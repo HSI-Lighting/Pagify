@@ -1488,6 +1488,27 @@ impl Document for PdfiumDocument {
         Ok(out)
     }
 
+    fn measure_text(&self, text: &str, size: f32) -> Result<f32> {
+        let bindings = pdfium()?.bindings();
+        let font =
+            unsafe { bindings.FPDFText_LoadStandardFont(self.document.handle(), "Helvetica") };
+        if font.is_null() {
+            return Ok(text.chars().count() as f32 * 0.55 * size);
+        }
+        let mut width = 0.0;
+        for ch in text.chars() {
+            let code = ch as u32;
+            // A standard font's glyph indices are character codes; anything
+            // outside the font's own repertoire is measured as a `?`.
+            let glyph = if code < 256 { code } else { 63 };
+            let mut advance = 0.0f32;
+            let ok = unsafe { bindings.FPDFFont_GetGlyphWidth(font, glyph, size, &mut advance) };
+            width += if bindings.is_true(ok) { advance } else { 0.55 * size };
+        }
+        unsafe { bindings.FPDFFont_Close(font) };
+        Ok(width)
+    }
+
     fn structure_outline(&self, page_index: usize) -> Result<Vec<TagNode>> {
         self.validate_page_index(page_index)?;
         let page_number =

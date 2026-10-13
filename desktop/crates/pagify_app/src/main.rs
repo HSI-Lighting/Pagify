@@ -7215,6 +7215,101 @@ impl PagifyApp {
         Ok(format!("area highlighted on page {}.", page + 1))
     }
 
+    /// Put words on the page in a red ring — the Comment tab's Stamp.
+    ///
+    /// The ring is an ink stroke and the words are written text, so both are
+    /// ordinary marks in the file: they save with it and undo together, as
+    /// one `Command::Batch`. The ring's size comes from `measure_text` — the
+    /// standard font's own advances — so a long word gets a long ring.
+    fn place_stamp_at(&mut self, page: usize, at: AppPoint, words: &str) -> Result<String, String> {
+        use pdf_core::document::{Annotation, Color, Point};
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            return Err("nothing open.".into());
+        };
+        const SIZE: f32 = 20.0;
+        let red = Color { r: 200, g: 30, b: 30, a: 255 };
+        let width = session.measure_text(words, SIZE).map_err(|e| e.to_string())?;
+        let (left, right) = (at.x as f32 - 6.0, at.x as f32 + width + 6.0);
+        let (top, bottom) = (at.y as f32 - SIZE * 0.95, at.y as f32 + SIZE * 0.3);
+        let ring = vec![
+            Point { x: left, y: top },
+            Point { x: right, y: top },
+            Point { x: right, y: bottom },
+            Point { x: left, y: bottom },
+            Point { x: left, y: top },
+        ];
+        let text = self.styled_line_command(page, (at.x as f32, at.y as f32), words, SIZE, red, None, 1.0)?;
+        session
+            .execute(pdf_core::command::Command::Batch {
+                commands: vec![
+                    pdf_core::command::Command::AddAnnotation {
+                        page_index: page,
+                        annotation: Annotation::Ink { strokes: vec![ring], color: red, width: 1.5 },
+                    },
+                    text,
+                ],
+            })
+            .map_err(|e| e.to_string())?;
+        if let Some(doc) = &mut self.tab_mut().doc {
+            doc.rendered_is_stale();
+        }
+        Ok(format!("stamped \"{}\" on page {}.", short(words), page + 1))
+    }
+
+    /// Words in a box with a leader to the point they describe — the Comment
+    /// tab's Callout. Ink and text, batched like the stamp.
+    fn place_callout_at(&mut self, page: usize, at: AppPoint, words: &str) -> Result<String, String> {
+        use pdf_core::document::{Annotation, Color, Point};
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            return Err("nothing open.".into());
+        };
+        const SIZE: f32 = 11.0;
+        const PAD: f32 = 5.0;
+        let ink = Color { r: 20, g: 20, b: 20, a: 255 };
+        let width = session.measure_text(words, SIZE).map_err(|e| e.to_string())?;
+        let box_left = at.x as f32 + 26.0;
+        let baseline = at.y as f32 - 22.0;
+        let (top, bottom) = (baseline - SIZE, baseline + SIZE * 0.35);
+        let right = box_left + width + PAD * 2.0;
+        let target = Point { x: at.x as f32 + 4.0, y: at.y as f32 - 4.0 };
+        let corner = Point { x: box_left, y: bottom };
+        let outline = vec![
+            Point { x: box_left, y: top },
+            Point { x: right, y: top },
+            Point { x: right, y: bottom },
+            Point { x: box_left, y: bottom },
+            Point { x: box_left, y: top },
+        ];
+        let text = self.styled_line_command(
+            page,
+            (box_left + PAD, baseline),
+            words,
+            SIZE,
+            ink,
+            None,
+            1.0,
+        )?;
+        session
+            .execute(pdf_core::command::Command::Batch {
+                commands: vec![
+                    pdf_core::command::Command::AddAnnotation {
+                        page_index: page,
+                        annotation: Annotation::Ink {
+                            strokes: vec![vec![target, corner], outline],
+                            color: ink,
+                            width: 1.0,
+                        },
+                    },
+                    text,
+                ],
+            })
+            .map_err(|e| e.to_string())?;
+        if let Some(doc) = &mut self.tab_mut().doc {
+            doc.rendered_is_stale();
+        }
+        Ok(format!("callout written on page {}.", page + 1))
+    }
+
     /// One pencil stroke, as an `Ink` annotation — the Comment tab's Pencil.
     /// The points arrive from the canvas as the drag gathered them; a
     /// single-point pick never reaches here (it resolves as a dot).

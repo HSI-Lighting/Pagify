@@ -5948,3 +5948,57 @@ fn reverseview_mirrors_the_facing_rows() {
     let doc = h.state().tab().doc.as_ref().expect("doc");
     assert!(doc.strip.left_of(0) < doc.strip.left_of(1), "the order did not come back");
 }
+
+/// **The Comment tab's Stamp and Callout, through the tool machine.** Each
+/// arms (the Stamp lights its ribbon button), and a resolved click lands an
+/// ink shape plus the words as one batch: a five-point ring for the stamp,
+/// a leader and a box for the callout.
+#[test]
+fn stamp_and_callout_land_ink_and_words() {
+    use crate::tool::{ArmedTool, ToolId};
+
+    let mut h = harness("two-column.pdf");
+    h.state_mut().submit("stamp Approved");
+    h.run_steps(1);
+    let armed = h.state().tab().tool.as_ref().expect("the stamp was not armed");
+    assert_eq!(armed.kind.id(), Some(ToolId::Stamp), "the wrong button would light");
+
+    h.state_mut().tab_mut().tool = Some(ArmedTool {
+        kind: crate::tool::Tool::Stamp("Approved".into()),
+        page: 0,
+        objects: Vec::new(),
+        points: vec![AppPoint { x: 120.0, y: 400.0 }],
+    });
+    h.state_mut().resolve_tool();
+    h.run_steps(1);
+
+    let session = h.state().tab().doc.as_ref().expect("doc").session.clone();
+    let marks = session.annotations(0).expect("marks");
+    let ring = marks.iter().find_map(|m| match &m.annotation {
+        pdf_core::document::Annotation::Ink { strokes, .. } => strokes.first().map(|s| s.len()),
+        _ => None,
+    });
+    assert_eq!(ring, Some(5), "the ring must be a closed five-point stroke");
+    // The words are written text, so they read back through the page's own
+    // characters — the same path `addtext` and `pagemarks` are read by.
+    let text = h.state_mut().characters(0).map(|c| c.text()).unwrap_or_default();
+    assert!(text.contains("Approved"), "the words did not land: {text:?}");
+
+    h.state_mut().tab_mut().tool = Some(ArmedTool {
+        kind: crate::tool::Tool::Callout("see figure 2".into()),
+        page: 0,
+        objects: Vec::new(),
+        points: vec![AppPoint { x: 200.0, y: 500.0 }],
+    });
+    h.state_mut().resolve_tool();
+    h.run_steps(1);
+
+    let session = h.state().tab().doc.as_ref().expect("doc").session.clone();
+    let strokes = session.annotations(0).expect("marks").iter().find_map(|m| match &m.annotation {
+        pdf_core::document::Annotation::Ink { strokes, .. } if strokes.len() == 2 => Some(strokes.len()),
+        _ => None,
+    });
+    assert_eq!(strokes, Some(2), "the callout must be a leader and a box");
+    let text = h.state_mut().characters(0).map(|c| c.text()).unwrap_or_default();
+    assert!(text.contains("see figure 2"), "the callout words did not land: {text:?}");
+}

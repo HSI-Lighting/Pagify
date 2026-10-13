@@ -150,6 +150,8 @@ impl crate::PagifyApp {
             Effect::ArmWhiteout
             | Effect::ArmAreaHighlight
             | Effect::ArmPencil
+            | Effect::ArmStamp { .. }
+            | Effect::ArmCallout { .. }
             | Effect::ArmDrawArrow
             | Effect::ToggleFill
             | Effect::ArmRedact
@@ -501,6 +503,22 @@ impl crate::PagifyApp {
                 } else {
                     let page = self.tab_mut().view_state.page;
                     self.arm_tool(Tool::Pencil, page);
+                }
+            }
+            Effect::ArmStamp { words } => {
+                if self.tab_mut().doc.is_none() {
+                    self.say_error("nothing open.");
+                } else {
+                    let page = self.tab_mut().view_state.page;
+                    self.arm_tool(Tool::Stamp(words), page);
+                }
+            }
+            Effect::ArmCallout { words } => {
+                if self.tab_mut().doc.is_none() {
+                    self.say_error("nothing open.");
+                } else {
+                    let page = self.tab_mut().view_state.page;
+                    self.arm_tool(Tool::Callout(words), page);
                 }
             }
             Effect::ArmDrawArrow => {

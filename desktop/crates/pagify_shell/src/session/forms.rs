@@ -78,6 +78,12 @@ impl Session {
         Ok(serde_json::Value::Array(entries).to_string())
     }
 
+    /// The width of `text` at `size`, in points, in the build's standard
+    /// font — what a stamp's ring or a callout's box is drawn around.
+    pub fn measure_text(&self, text: &str, size: f32) -> Result<f32> {
+        registry::with_session(self.handle, |s| s.document.measure_text(text, size))
+    }
+
     /// Every field as CSV: a header row, then one row per widget with
     /// name, kind and value. Quoted per RFC 4180 wherever a value carries
     /// a comma, a quote or a newline.

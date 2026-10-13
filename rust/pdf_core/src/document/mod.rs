@@ -772,6 +772,14 @@ pub trait Document: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// The width of `text` at `size`, in points, in this build's standard
+    /// font — what a stamp's ring or a callout's box is drawn around. The
+    /// fallback answers a per-character estimate, good enough to draw a
+    /// box, never used as a claim of exactness.
+    fn measure_text(&self, text: &str, size: f32) -> Result<f32> {
+        Ok(text.chars().count() as f32 * 0.55 * size)
+    }
+
     /// A page's structure tree — its tags — as the Tags panel lists them.
     /// Empty for an untagged page. Read-only: PDFium reads structure, it
     /// does not write it.

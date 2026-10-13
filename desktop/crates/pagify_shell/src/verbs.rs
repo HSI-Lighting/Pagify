@@ -492,6 +492,12 @@ pub enum Verb {
     ReadingOptions,
     /// The View tab's Reverse View: read each facing row right to left.
     ReverseView,
+    /// Stamp words in a red ring at a click — `stamp <words>`. Bare, it is
+    /// refused with the shape that works.
+    Stamp { words: String },
+    /// Words in a box with a leader to the point they describe —
+    /// `callout <words>`.
+    Callout { words: String },
     /// Write every form field's name, kind and value as JSON —
     /// `formexport [file.json]`. Bare, the app asks for the file.
     FormExport { dest: Option<PathBuf> },
@@ -961,7 +967,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("assistant", "the viewing phase", "the Assistant tool"),
     ("autotag", "the accessibility phase", "the Autotag Document tool"),
     ("calcorder", "the forms phase", "the Calculation Order tool"),
-    ("callout", "the annotation phase", "the Callout tool"),
     ("clipboard", "the capture phase", "the Clipboard tool"),
     ("cloudstorage", "the sharing phase", "the Cloud Storage tool"),
     ("combfield", "the forms phase", "the Comb Field tool"),
@@ -995,7 +1000,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("sendreview", "the sharing phase", "the Send for Review tool"),
     ("sharelink", "the sharing phase", "the Share Link tool"),
     ("signbranding", "the signing phase", "the Add E-Sign Branding tool"),
-    ("stamp", "the annotation phase", "the Stamp tool"),
     ("tooffice", "the conversion phase", "the To MS Office tool"),
     ("toolsettings", "the forms phase", "the Tool Settings tool"),
     ("toother", "the conversion phase", "the To Other tool"),
@@ -1126,7 +1130,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "exportimages", "fromfiles", "viewsetting", "calculator", "managecomments",
         "pagemarks", "fromclipboard", "pencil", "rearrange", "fromtemplate", "addshape",
         "drawing", "keeptool", "formexport", "formimport", "formtosheet", "tooltip",
-        "resetform", "flatten", "attach", "attachcomment", "tagspanel", "alttext", "readingorder", "viewsplit", "readingoptions", "reverseview",
+        "resetform", "flatten", "attach", "attachcomment", "tagspanel", "alttext", "readingorder", "viewsplit", "readingoptions", "reverseview", "stamp", "callout",
         "searchhighlight", "compare", "changecolor",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "areahighlight", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
@@ -1783,6 +1787,22 @@ fn parse_conversion(head: &str, _rest: &[&str], tail: &str) -> Option<Result<Ver
         "viewsplit" => Ok(Verb::ViewSplit),
         "readingoptions" => Ok(Verb::ReadingOptions),
         "reverseview" => Ok(Verb::ReverseView),
+        "stamp" => {
+            let words = tail.trim();
+            if words.is_empty() {
+                return Some(Err("stamp: the words to stamp, as in `stamp Approved`".into()));
+            }
+            Ok(Verb::Stamp { words: words.to_string() })
+        }
+        "callout" => {
+            let words = tail.trim();
+            if words.is_empty() {
+                return Some(Err(
+                    "callout: the words for the box, as in `callout see figure 2`".into(),
+                ));
+            }
+            Ok(Verb::Callout { words: words.to_string() })
+        }
         "flatten" => Ok(Verb::Flatten),
         "attach" => Ok(Verb::Attach {
             source: (!tail.is_empty()).then(|| resolve_path(tail)),
@@ -2883,5 +2903,29 @@ mod reverse_view_tests {
             PLANNED.iter().all(|(v, _, _)| *v != "reverseview"),
             "`reverseview` is still in the planned table"
         );
+    }
+}
+
+#[cfg(test)]
+mod stamp_callout_tests {
+    use super::*;
+
+    #[test]
+    fn stamp_and_callout_parse_and_are_not_planned() {
+        assert_eq!(parse("stamp Approved"), Some(Ok(Verb::Stamp { words: "Approved".into() })));
+        assert_eq!(
+            parse("callout see figure 2"),
+            Some(Ok(Verb::Callout { words: "see figure 2".into() }))
+        );
+        match parse("stamp") {
+            Some(Err(why)) => assert!(why.contains("words to stamp"), "{why}"),
+            other => panic!("bare stamp parsed as {other:?}"),
+        }
+        for word in ["stamp", "callout"] {
+            assert!(
+                PLANNED.iter().all(|(v, _, _)| *v != word),
+                "`{word}` is still in the planned table"
+            );
+        }
     }
 }

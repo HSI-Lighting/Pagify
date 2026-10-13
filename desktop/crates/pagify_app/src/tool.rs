@@ -78,6 +78,10 @@ pub(crate) enum Tool {
     /// movement: points join the stroke while the button is held, and
     /// letting go resolves it; a plain click dots.
     Pencil,
+    /// Words waiting for a point to be stamped at, in a red ring.
+    Stamp(String),
+    /// Words waiting for the point they describe, in a box with a leader.
+    Callout(String),
     /// Two corners of a box to draw while filling a form in.
     SignRectangle,
     /// The two ends of a line to rule while filling a form in.
@@ -129,6 +133,8 @@ impl Tool {
             | Tool::Write(_)
             | Tool::EraseMark
             | Tool::Pencil
+            | Tool::Stamp(_)
+            | Tool::Callout(_)
             | Tool::PickText => 1,
             Tool::PlaceText
             | Tool::Calibrate { .. }
@@ -201,6 +207,10 @@ impl Tool {
                 _ => "area highlight: opposite corner".into(),
             },
             Tool::Pencil => "pencil: drag to draw — a click dots".into(),
+            Tool::Stamp(words) => format!("stamp: click where \"{}\" goes", crate::short(words)),
+            Tool::Callout(words) => {
+                format!("callout: click the point the box describes \"{}\"", crate::short(words))
+            }
             // Says which of the two rectangles/lines this is, because the
             // other one is a drawing that can be picked up again and this
             // one is not.
@@ -325,6 +335,8 @@ impl Tool {
             Tool::Whiteout => Some(ToolId::Whiteout),
             Tool::AreaHighlight => Some(ToolId::AreaHighlight),
             Tool::Pencil => Some(ToolId::Pencil),
+            Tool::Stamp(_) => Some(ToolId::Stamp),
+            Tool::Callout(_) => Some(ToolId::Callout),
             Tool::SignRectangle => Some(ToolId::SignRectangle),
             Tool::SignLine => Some(ToolId::SignLine),
             Tool::Write(_) => Some(ToolId::AddText),
@@ -540,6 +552,14 @@ impl Tool {
                 }
                 Some(_) => app.pencil_stroke(page, &points),
                 None => Err("pencil: nowhere was clicked.".into()),
+            },
+            Tool::Stamp(words) => match points.first().copied() {
+                Some(at) => app.place_stamp_at(page, at, words.as_str()),
+                None => Err("stamp: nowhere was clicked.".into()),
+            },
+            Tool::Callout(words) => match points.first().copied() {
+                Some(at) => app.place_callout_at(page, at, words.as_str()),
+                None => Err("callout: nowhere was clicked.".into()),
             },
             Tool::SignRectangle => match (points.first(), points.get(1)) {
                 (Some(a), Some(b)) => app.stamp_box(page, *a, *b),
@@ -761,6 +781,8 @@ impl Tool {
             | Tool::Write(_)
             | Tool::EraseMark
             | Tool::Pencil
+            | Tool::Stamp(_)
+            | Tool::Callout(_)
             | Tool::Modify(_)
             | Tool::PickText => {}
             // A box, violet.
@@ -955,6 +977,8 @@ pub(crate) enum ToolId {
     Whiteout,
     AreaHighlight,
     Pencil,
+    Stamp,
+    Callout,
     SignRectangle,
     SignLine,
     Line,

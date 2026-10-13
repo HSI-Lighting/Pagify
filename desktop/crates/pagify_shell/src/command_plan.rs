@@ -196,6 +196,10 @@ pub enum Effect {
     ArmAreaHighlight,
     /// Arm the pencil.
     ArmPencil,
+    /// Arm the stamp with these words.
+    ArmStamp { words: String },
+    /// Arm the callout with these words.
+    ArmCallout { words: String },
     /// Arm the arrow drawing tool.
     ArmDrawArrow,
     /// Toggle whether new rectangles and circles are drawn filled.
@@ -421,6 +425,8 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::Whiteout
         | Verb::AreaHighlight
         | Verb::Pencil
+        | Verb::Stamp { .. }
+        | Verb::Callout { .. }
         | Verb::DrawArrow
         | Verb::ToggleFill
         | Verb::Redact
@@ -672,6 +678,8 @@ fn plan_security(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::Whiteout => vec![Effect::ArmWhiteout],
         Verb::AreaHighlight => vec![Effect::ArmAreaHighlight],
         Verb::Pencil => vec![Effect::ArmPencil],
+        Verb::Stamp { words } => vec![Effect::ArmStamp { words: words.clone() }],
+        Verb::Callout { words } => vec![Effect::ArmCallout { words: words.clone() }],
         Verb::DrawArrow => vec![Effect::ArmDrawArrow],
         Verb::ToggleFill => vec![Effect::ToggleFill],
         Verb::Redact => vec![Effect::ArmRedact],
@@ -1036,6 +1044,14 @@ mod tests {
             (Verb::Whiteout, vec![Effect::ArmWhiteout]),
             (Verb::AreaHighlight, vec![Effect::ArmAreaHighlight]),
             (Verb::Pencil, vec![Effect::ArmPencil]),
+            (
+                Verb::Stamp { words: "Draft".into() },
+                vec![Effect::ArmStamp { words: "Draft".into() }],
+            ),
+            (
+                Verb::Callout { words: "see 2".into() },
+                vec![Effect::ArmCallout { words: "see 2".into() }],
+            ),
             (Verb::DrawArrow, vec![Effect::ArmDrawArrow]),
             (Verb::ToggleFill, vec![Effect::ToggleFill]),
             (Verb::Redact, vec![Effect::ArmRedact]),

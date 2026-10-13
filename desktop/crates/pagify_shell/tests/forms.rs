@@ -158,3 +158,18 @@ fn clearing_empties_what_this_build_can_set_and_leaves_the_rest() {
     assert_eq!(fields[3].value.as_deref(), Some("slow"), "the radio must be untouched");
     assert_eq!(fields[5].value.as_deref(), Some("Green"), "the combo must be untouched");
 }
+
+#[test]
+fn measuring_a_word_uses_the_fonts_own_advances() {
+    let session = Session::open(fixture("two-column.pdf")).expect("open");
+
+    let wide = session.measure_text("WWWW", 20.0).expect("measure");
+    let narrow = session.measure_text("IIII", 20.0).expect("measure");
+
+    assert!(wide > narrow, "W's advance must beat I's: {wide} vs {narrow}");
+    assert!(narrow > 0.0);
+    assert!(
+        session.measure_text("", 20.0).expect("measure") == 0.0,
+        "nothing is no width"
+    );
+}
