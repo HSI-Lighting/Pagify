@@ -174,6 +174,7 @@ impl crate::PagifyApp {
             | Effect::InterleavePages { .. }
             | Effect::ExportImages { .. }
             | Effect::ExportHtml { .. }
+            | Effect::ExportOther { .. }
             | Effect::SplitPages { .. }
             | Effect::ReportWordCount(_)
             | Effect::RunAccessCheck
@@ -711,6 +712,10 @@ impl crate::PagifyApp {
             Effect::ExportHtml { dest } => match dest {
                 Some(path) => self.export_html(&path),
                 None => self.export_html_dialog(),
+            },
+            Effect::ExportOther { dest } => match dest {
+                Some(path) => self.export_other(&path),
+                None => self.export_other_dialog(),
             },
             Effect::SplitPages { every, dest } => match dest {
                 Some(folder) => self.split_pages(every, &folder),

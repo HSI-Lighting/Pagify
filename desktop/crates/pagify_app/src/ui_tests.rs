@@ -6046,3 +6046,25 @@ fn markredact_marks_then_destroys_on_the_second_press() {
         "the marked area was not destroyed: {before} -> {after_apply}"
     );
 }
+
+/// The Conversion tab's To Other, through the real dispatch: the extension
+/// picks the format, and each file really lands.
+#[test]
+fn toother_writes_txt_rtf_and_xml() {
+    let dir = std::env::temp_dir().join(format!("pagify-toother-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch folder");
+
+    let mut h = harness("two-column.pdf");
+    for extension in ["txt", "rtf", "xml"] {
+        let out = dir.join(format!("book.{extension}"));
+        h.state_mut().submit(&format!("toother {}", out.display()));
+        h.run_steps(1);
+        assert!(out.exists(), ".{extension} was not written");
+    }
+    let rtf = std::fs::read_to_string(dir.join("book.rtf")).expect("read");
+    assert!(rtf.starts_with("{\\rtf1"), "{rtf}");
+    let xml = std::fs::read_to_string(dir.join("book.xml")).expect("read");
+    assert!(xml.contains("<page n=\"1\">"), "{xml}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}

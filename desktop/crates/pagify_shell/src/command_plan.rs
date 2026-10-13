@@ -249,6 +249,9 @@ pub enum Effect {
     /// Write the document's text as one HTML file; `None` asks for the file
     /// first.
     ExportHtml { dest: Option<std::path::PathBuf> },
+    /// Write the document's text as a plain file — txt, rtf or xml by the
+    /// destination's extension; `None` asks for the file first.
+    ExportOther { dest: Option<std::path::PathBuf> },
     /// Write the document as several files, this many pages each; `None`
     /// asks for the folder first.
     SplitPages { every: usize, dest: Option<std::path::PathBuf> },
@@ -451,6 +454,7 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::Interleave { .. }
         | Verb::ToImage { .. }
         | Verb::ToHtml { .. }
+        | Verb::ToOther { .. }
         | Verb::Split { .. }
         | Verb::WordCount { .. }
         | Verb::PageMarks { .. }
@@ -723,6 +727,7 @@ fn plan_files_and_text(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
         }
         Verb::ToImage { dest } => vec![Effect::ExportImages { dest: dest.clone() }],
         Verb::ToHtml { dest } => vec![Effect::ExportHtml { dest: dest.clone() }],
+        Verb::ToOther { dest } => vec![Effect::ExportOther { dest: dest.clone() }],
         Verb::Split { every, dest } => {
             vec![Effect::SplitPages { every: *every, dest: dest.clone() }]
         }
@@ -1108,6 +1113,10 @@ mod tests {
             (
                 Verb::ToHtml { dest: Some("book.html".into()) },
                 vec![Effect::ExportHtml { dest: Some("book.html".into()) }],
+            ),
+            (
+                Verb::ToOther { dest: Some("book.rtf".into()) },
+                vec![Effect::ExportOther { dest: Some("book.rtf".into()) }],
             ),
             (
                 Verb::Split { every: 2, dest: None },

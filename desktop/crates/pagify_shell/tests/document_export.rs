@@ -91,3 +91,30 @@ fn the_character_wrap_is_a_count_and_keeps_the_characters() {
     // A line short of the width is one piece, not zero.
     assert_eq!(wrap_by_chars("abc", 4), ["abc"]);
 }
+
+#[test]
+fn the_plain_formats_come_from_the_same_pages() {
+    use pagify_shell::export::document_other;
+
+    let session = Session::open(fixture("two-column.pdf")).expect("open");
+
+    let txt = document_other(&session, "txt").expect("txt");
+    assert!(!txt.contains("<"), "txt must be plain: {txt}");
+    assert!(!txt.trim().is_empty());
+
+    let rtf = document_other(&session, "rtf").expect("rtf");
+    assert!(rtf.starts_with("{\\rtf1"), "{rtf}");
+    assert!(rtf.trim_end().ends_with('}'), "the RTF must close: {rtf}");
+
+    let xml = document_other(&session, "xml").expect("xml");
+    assert!(xml.contains("<?xml version=\"1.0\""), "{xml}");
+    assert!(xml.contains("<page n=\"1\">") && xml.contains("</document>"), "{xml}");
+
+    match document_other(&session, "docx") {
+        Err(why) => assert!(
+            why.to_string().contains("txt, .rtf and .xml"),
+            "unhelpful refusal: {why}"
+        ),
+        Ok(_) => panic!("docx cannot be written by this build"),
+    }
+}

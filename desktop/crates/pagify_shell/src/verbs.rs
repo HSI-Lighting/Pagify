@@ -502,6 +502,9 @@ pub enum Verb {
     /// Protection tab's Mark for Redaction. Two presses: nothing goes until
     /// the second.
     MarkRedact,
+    /// Write the document's text as a plain file — `toother <file.(txt|rtf|xml)>`.
+    /// Bare, the app asks for the file.
+    ToOther { dest: Option<PathBuf> },
     /// Write every form field's name, kind and value as JSON —
     /// `formexport [file.json]`. Bare, the app asks for the file.
     FormExport { dest: Option<PathBuf> },
@@ -1005,7 +1008,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("signbranding", "the signing phase", "the Add E-Sign Branding tool"),
     ("tooffice", "the conversion phase", "the To MS Office tool"),
     ("toolsettings", "the forms phase", "the Tool Settings tool"),
-    ("toother", "the conversion phase", "the To Other tool"),
     ("trackreviews", "the sharing phase", "the Track Reviews tool"),
     ("transitions", "the viewing phase", "the Page Transitions tool"),
 ];
@@ -1133,7 +1135,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "exportimages", "fromfiles", "viewsetting", "calculator", "managecomments",
         "pagemarks", "fromclipboard", "pencil", "rearrange", "fromtemplate", "addshape",
         "drawing", "keeptool", "formexport", "formimport", "formtosheet", "tooltip",
-        "resetform", "flatten", "attach", "attachcomment", "tagspanel", "alttext", "readingorder", "viewsplit", "readingoptions", "reverseview", "stamp", "callout", "markredact",
+        "resetform", "flatten", "attach", "attachcomment", "tagspanel", "alttext", "readingorder", "viewsplit", "readingoptions", "reverseview", "stamp", "callout", "markredact", "toother",
         "searchhighlight", "compare", "changecolor",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "areahighlight", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
@@ -1775,6 +1777,9 @@ fn parse_conversion(head: &str, _rest: &[&str], tail: &str) -> Option<Result<Ver
     Some(match head {
         // Words that make a document: blank paper, a copy of a template,
         // pasted words, and the form data going in and out.
+        "toother" => Ok(Verb::ToOther {
+            dest: (!tail.is_empty()).then(|| resolve_path(tail)),
+        }),
         "fromtemplate" => Ok(Verb::FromTemplate {
             source: (!tail.is_empty()).then(|| resolve_path(tail)),
         }),
@@ -2944,6 +2949,24 @@ mod mark_redact_tests {
         assert!(
             PLANNED.iter().all(|(v, _, _)| *v != "markredact"),
             "`markredact` is still in the planned table"
+        );
+    }
+}
+
+#[cfg(test)]
+mod to_other_tests {
+    use super::*;
+
+    #[test]
+    fn toother_parses_and_is_not_planned() {
+        assert_eq!(parse("toother"), Some(Ok(Verb::ToOther { dest: None })));
+        assert_eq!(
+            parse("toother book.rtf"),
+            Some(Ok(Verb::ToOther { dest: Some("book.rtf".into()) }))
+        );
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "toother"),
+            "`toother` is still in the planned table"
         );
     }
 }

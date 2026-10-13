@@ -57,6 +57,86 @@ pub fn wrap_by_chars(line: &str, width: usize) -> Vec<String> {
     chars.chunks(width).map(|chunk| chunk.iter().collect()).collect()
 }
 
+/// The document's text in one of the plain formats — the Conversion tab's
+/// To Other: `.txt`, `.rtf` or `.xml`, chosen by the extension the caller
+/// asks for. `.html` is [`document_html`]'s.
+pub fn document_other(session: &Session, extension: &str) -> pdf_core::Result<String> {
+    let pages: Vec<Vec<String>> = (0..session.page_count()?)
+        .map(|page| {
+            session.page_text_snapshot(page).map(|snapshot| {
+                snapshot
+                    .runs
+                    .iter()
+                    .map(|run| run.text.trim().to_string())
+                    .filter(|text| !text.is_empty())
+                    .collect()
+            })
+        })
+        .collect::<pdf_core::Result<Vec<_>>>()?;
+
+    let text = match extension.to_ascii_lowercase().as_str() {
+        "txt" => pages
+            .iter()
+            .map(|lines| lines.join("\n"))
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        "rtf" => {
+            let mut out = String::from("{\\rtf1\\ansi\n");
+            for (page, lines) in pages.iter().enumerate() {
+                if page > 0 {
+                    out.push_str("\\page\n");
+                }
+                for line in lines {
+                    out.push_str(&escape_rtf(line));
+                    out.push_str("\\par\n");
+                }
+            }
+            out.push('}');
+            out
+        }
+        "xml" => {
+            let mut out = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<document>\n");
+            for (page, lines) in pages.iter().enumerate() {
+                out.push_str(&format!("  <page n=\"{}\">\n", page + 1));
+                for line in lines {
+                    out.push_str(&format!("    <line>{}</line>\n", escape_xml(line)));
+                }
+                out.push_str("  </page>\n");
+            }
+            out.push_str("</document>\n");
+            out
+        }
+        other => {
+            return Err(pdf_core::PdfError::InvalidArgument(format!(
+                "toother writes .txt, .rtf and .xml — not `.{other}`; .html is `tohtml`"
+            )))
+        }
+    };
+    Ok(text)
+}
+
+/// RTF: backslash, braces and anything above ASCII, the way RTF spells them.
+pub(crate) fn escape_rtf(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '{' => out.push_str("\\{"),
+            '}' => out.push_str("\\}"),
+            c if (c as u32) < 128 => out.push(c),
+            c => out.push_str(&format!("\\u{}?", c as u32)),
+        }
+    }
+    out
+}
+
+/// XML: the four markup characters, nothing more.
+pub(crate) fn escape_xml(text: &str) -> String {
+    let mut escaped = text.replace('&', "&amp;");
+    escaped = escaped.replace('<', "&lt;").replace('>', "&gt;");
+    escaped.replace('"', "&quot;")
+}
+
 /// Four characters stand between text and markup; everything else passes
 /// through as it is. Shared with the accessibility report, which writes
 /// markup too.
@@ -72,4 +152,20 @@ pub(crate) fn escape(text: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod other_format_tests {
+    use super::*;
+
+    #[test]
+    fn the_rtf_escape_spells_markup_and_unicode() {
+        assert_eq!(escape_rtf("a\\b{c}"), "a\\\\b\\{c\\}");
+        assert_eq!(escape_rtf("café"), "caf\\u233?");
+    }
+
+    #[test]
+    fn the_xml_escape_covers_the_four_characters() {
+        assert_eq!(escape_xml("a<b>&\"c\""), "a&lt;b&gt;&amp;&quot;c&quot;");
+    }
 }

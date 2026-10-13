@@ -14056,6 +14056,48 @@ impl PagifyApp {
         }
     }
 
+    /// Write the document's text as a plain file — the Conversion tab's To
+    /// Other. The extension picks the format: txt, rtf or xml.
+    fn export_other(&mut self, dest: &std::path::Path) {
+        let Some(doc) = self.tab().doc.as_ref() else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let session = doc.session.clone();
+        let extension = dest
+            .extension()
+            .map(|e| e.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        let pages = doc.page_count;
+        match pagify_shell::export::document_other(&session, &extension) {
+            Ok(text) => match std::fs::write(dest, text) {
+                Ok(()) => self.say_info(format!(
+                    "wrote {pages} page(s) as .{extension} to {}.",
+                    dest.display()
+                )),
+                Err(e) => self.say_error(format!("toother: {e}")),
+            },
+            Err(e) => self.say_error(format!("toother: {e}")),
+        }
+    }
+
+    /// The Conversion tab's To Other button, bare: choose the file, then
+    /// write; the extension is the format.
+    fn export_other_dialog(&mut self) {
+        if self.tab().doc.is_none() {
+            self.say_error("nothing open.");
+            return;
+        }
+        let dialog = rfd::FileDialog::new()
+            .set_title("Write the document's text")
+            .set_file_name(format!("{}.txt", self.document_stem()))
+            .add_filter("Text", &["txt", "rtf", "xml"]);
+        match dialog.save_file() {
+            Some(path) => self.export_other(&path),
+            None => self.say_info("nothing chosen."),
+        }
+    }
+
     /// The Conversion tab's To HTML, bare: choose the file, then write the
     /// document's text into it.
     fn export_html_dialog(&mut self) {
