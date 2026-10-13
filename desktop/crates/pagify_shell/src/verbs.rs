@@ -147,6 +147,13 @@ pub enum SignatureAction {
 pub const SHAPE_WORDS: &str = "shapes draw with their own words: `line`, `rectangle`, `circle`, \
                                 `arrow`, `pline` and `spline` — and freehand ink is `pencil`.";
 
+/// What `readingoptions` answers with — the reading options this build
+/// actually has, and the one it does not.
+pub const READING_OPTIONS_WORDS: &str = "reading options in this build live in `viewsetting` — \
+                                          page display, turn and zoom — with `changecolor` for \
+                                          the paper. Speech, the Read Out Loud side of reading \
+                                          options, is not built.";
+
 /// What `keeptool` answers with: the state of the "keep tool selected"
 /// question in this build, which is that the keeping is already the default.
 pub const KEEP_TOOL_WORDS: &str = "every comment tool stays in hand already — a run of ticks, \
@@ -480,6 +487,9 @@ pub enum Verb {
     /// The View tab's Split: a second, read-only pane over the same strip,
     /// with its own scroll.
     ViewSplit,
+    /// Name where this build's reading options live — the Accessibility
+    /// tab's Reading Options, answered with the routes that exist.
+    ReadingOptions,
     /// Write every form field's name, kind and value as JSON —
     /// `formexport [file.json]`. Bare, the app asks for the file.
     FormExport { dest: Option<PathBuf> },
@@ -978,7 +988,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("pagetemplates", "the forms phase", "the Page Templates tool"),
     ("portfolio", "the conversion phase", "the PDF Portfolio tool"),
     ("readaloud", "the viewing phase", "the Read tool"),
-    ("readingoptions", "the accessibility phase", "the Reading Options tool"),
     ("requestsignature", "the signing phase", "the Request Signature tool"),
     ("reverseview", "the viewing phase", "the Reverse View tool"),
     ("sendbulk", "the signing phase", "the Send in Bulk tool"),
@@ -1116,7 +1125,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "exportimages", "fromfiles", "viewsetting", "calculator", "managecomments",
         "pagemarks", "fromclipboard", "pencil", "rearrange", "fromtemplate", "addshape",
         "drawing", "keeptool", "formexport", "formimport", "formtosheet", "tooltip",
-        "resetform", "flatten", "attach", "attachcomment", "tagspanel", "alttext", "readingorder", "viewsplit",
+        "resetform", "flatten", "attach", "attachcomment", "tagspanel", "alttext", "readingorder", "viewsplit", "readingoptions",
         "searchhighlight", "compare", "changecolor",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "areahighlight", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
@@ -1771,6 +1780,7 @@ fn parse_conversion(head: &str, _rest: &[&str], tail: &str) -> Option<Result<Ver
         "alttext" => Ok(Verb::AltText { pages: tail.trim().to_string() }),
         "readingorder" => Ok(Verb::ReadingOrder { pages: tail.trim().to_string() }),
         "viewsplit" => Ok(Verb::ViewSplit),
+        "readingoptions" => Ok(Verb::ReadingOptions),
         "flatten" => Ok(Verb::Flatten),
         "attach" => Ok(Verb::Attach {
             source: (!tail.is_empty()).then(|| resolve_path(tail)),
@@ -2840,5 +2850,22 @@ mod view_split_tests {
             PLANNED.iter().all(|(v, _, _)| *v != "viewsplit"),
             "`viewsplit` is still in the planned table"
         );
+    }
+}
+
+#[cfg(test)]
+mod reading_options_tests {
+    use super::*;
+
+    #[test]
+    fn readingoptions_parses_and_is_not_planned() {
+        assert_eq!(parse("readingoptions"), Some(Ok(Verb::ReadingOptions)));
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "readingoptions"),
+            "`readingoptions` is still in the planned table"
+        );
+        for route in ["viewsetting", "changecolor", "Read Out Loud"] {
+            assert!(READING_OPTIONS_WORDS.contains(route), "the answer omits `{route}`");
+        }
     }
 }

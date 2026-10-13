@@ -457,6 +457,7 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::AltText { .. }
         | Verb::ReadingOrder { .. }
         | Verb::ViewSplit
+        | Verb::ReadingOptions
         | Verb::ShapeWords
         | Verb::KeepTool
         | Verb::Reflow
@@ -733,6 +734,7 @@ fn plan_files_and_text(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::AltText { pages } => vec![Effect::ReportAltText(pages.clone())],
         Verb::ReadingOrder { pages } => vec![Effect::ReportReadingOrder(pages.clone())],
         Verb::ViewSplit => vec![Effect::ToggleSplitView],
+        Verb::ReadingOptions => vec![Effect::Say(crate::verbs::READING_OPTIONS_WORDS.into())],
         Verb::ShapeWords => vec![Effect::Say(crate::verbs::SHAPE_WORDS.into())],
         Verb::KeepTool => vec![Effect::Say(crate::verbs::KEEP_TOOL_WORDS.into())],
         // Text and find.
@@ -1120,6 +1122,10 @@ mod tests {
                 vec![Effect::ReportReadingOrder(String::new())],
             ),
             (Verb::ViewSplit, vec![Effect::ToggleSplitView]),
+            (
+                Verb::ReadingOptions,
+                vec![Effect::Say(crate::verbs::READING_OPTIONS_WORDS.into())],
+            ),
             (Verb::ShapeWords, vec![Effect::Say(crate::verbs::SHAPE_WORDS.into())]),
             (Verb::KeepTool, vec![Effect::Say(crate::verbs::KEEP_TOOL_WORDS.into())]),
             (Verb::Reflow, vec![Effect::RunReflow]),

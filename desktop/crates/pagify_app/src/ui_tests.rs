@@ -5902,3 +5902,17 @@ fn viewsplit_toggles_the_second_pane() {
     let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
     assert!(said.iter().any(|l| l.contains("split view: off")), "{said:?}");
 }
+
+/// The Accessibility tab's Reading Options answers with where this build's
+/// reading options actually live, and names what is not built.
+#[test]
+fn readingoptions_points_at_the_real_routes() {
+    let mut h = harness("pages-ladder.pdf");
+    h.state_mut().submit("readingoptions");
+    h.run_steps(1);
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(
+        said.iter().any(|l| l.contains("`viewsetting`") && l.contains("not built")),
+        "the answer does not name the routes: {said:?}"
+    );
+}
