@@ -323,7 +323,10 @@ fn only_the_cards_that_wait_for_arguments_leave_a_bare_command_the_parser_refuse
     }
     asked.sort();
     asked.dedup();
-    assert_eq!(asked, ["deletepage", "extract", "movepage", "pagemarks", "tooltip"]);
+    assert_eq!(
+        asked,
+        ["callout", "deletepage", "extract", "movepage", "pagemarks", "stamp", "tooltip"]
+    );
 }
 
 /// **Reported from use (report 10): "Extract lacks a UI".** The card used to

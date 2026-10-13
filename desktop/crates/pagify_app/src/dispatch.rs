@@ -153,8 +153,8 @@ impl crate::PagifyApp {
             | Effect::ArmStamp { .. }
             | Effect::ArmCallout { .. }
             | Effect::ArmDrawArrow
-            | Effect::ToggleFill
-            | Effect::ArmRedact
+            | Effect::ArmRedact => self.apply_tool_arms(effect),
+            Effect::ToggleFill
             | Effect::LockWords
             | Effect::RunSecure(_)
             | Effect::RunSmartRedact { .. }
@@ -479,7 +479,11 @@ impl crate::PagifyApp {
 
     /// The security effects — the bodies `act_security` ran (its walks live
     /// beside this as `act_validate`, `act_certify` and `act_smart_redact`).
-    fn apply_security(&mut self, effect: Effect) {
+    /// The tool-arming effects of the security and comment domains — every
+    /// one is the same guard-then-arm, so they live together and
+    /// `apply_security` stays inside the size invariant. Split out when the
+    /// comment tab's Stamp and Callout pushed it one line over.
+    fn apply_tool_arms(&mut self, effect: Effect) {
         match effect {
             Effect::ArmWhiteout => {
                 if self.tab_mut().doc.is_none() {
@@ -529,14 +533,6 @@ impl crate::PagifyApp {
                     self.arm_tool(Tool::Draw(DrawKind::Arrow), page);
                 }
             }
-            Effect::ToggleFill => {
-                self.prefs_state.draw_fill = !self.prefs_state.draw_fill;
-                self.say_info(if self.prefs_state.draw_fill {
-                    "fill: on — the next rectangle or circle is drawn filled."
-                } else {
-                    "fill: off — the next rectangle or circle is drawn hollow."
-                });
-            }
             Effect::ArmRedact => {
                 if self.tab_mut().doc.is_none() {
                     self.say_error("nothing open.");
@@ -544,6 +540,20 @@ impl crate::PagifyApp {
                     let page = self.tab_mut().view_state.page;
                     self.arm_tool(Tool::Redact, page);
                 }
+            }
+            other => unreachable!("apply_tool_arms was handed {other:?}"),
+        }
+    }
+
+    fn apply_security(&mut self, effect: Effect) {
+        match effect {
+            Effect::ToggleFill => {
+                self.prefs_state.draw_fill = !self.prefs_state.draw_fill;
+                self.say_info(if self.prefs_state.draw_fill {
+                    "fill: on — the next rectangle or circle is drawn filled."
+                } else {
+                    "fill: off — the next rectangle or circle is drawn hollow."
+                });
             }
             Effect::LockWords => {
                 if self.tab_mut().doc.is_none() {
