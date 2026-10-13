@@ -8270,6 +8270,9 @@ impl PagifyApp {
         let members: Vec<Selected> = self.tab().selection.group.iter().filter(|s| s.page == page).cloned().collect();
         if !members.is_empty() {
             let Some(bounds) = self.group_bounds(page) else { return false };
+            // Pictures and shapes that overlap are copied as one picture of the
+            // page over their joint box — see [`merge_overlapping`].
+            let members = merge_overlapping(members);
             let cx = (bounds.left + bounds.right) / 2.0;
             let cy = (bounds.top + bounds.bottom) / 2.0;
             let items: Vec<(ObjectClipboard, f32, f32)> = members
@@ -8388,13 +8391,22 @@ impl PagifyApp {
     /// [`Self::copy_object_selection`].
     fn content_for_selected(&self, sel: &Selected) -> Option<ObjectClipboard> {
         let page = sel.page;
-        if sel.what == "the words" {
-            let run = self
-                .tab()
-                .doc
-                .as_ref()
-                .and_then(|d| d.session.text_runs(page).ok())
-                .and_then(|runs| runs.into_iter().find(|r| r.object == sel.object))?;
+        let run = if sel.what == "the words" {
+            Some(
+                self.tab()
+                    .doc
+                    .as_ref()
+                    .and_then(|d| d.session.text_runs(page).ok())
+                    .and_then(|runs| runs.into_iter().find(|r| r.object == sel.object))?,
+            )
+        } else {
+            None
+        };
+        // **Words with no size are copied as what they look like.** PDFium gives
+        // size 0 to text set on its side — VIVO's vertical "108mm" — and pasted
+        // as words at size 0 they were invisible, and their undo could not find
+        // them again, which left the rest of that paste stale on screen.
+        if let Some(run) = run.as_ref().filter(|r| r.size > 0.0) {
             let face = self.registered_face_of_object(page, sel.object);
             let text = run.text.trim().to_string();
             let track = Self::measured_track(face.as_deref(), &text, run.size, run.rect);
@@ -8402,7 +8414,8 @@ impl PagifyApp {
         } else {
             let raster = self.tab().doc.as_ref().and_then(|d| d.session.render_page_region(page, sel.rect, 3.0).ok())?;
             let mut rgba = raster.pixels;
-            if sel.what == "the shape" {
+            // The paper round a shape, or round sideways words, is the page's.
+            if sel.what == "the shape" || sel.what == "the words" {
                 clear_paper_around(&mut rgba, raster.width as usize, raster.height as usize);
             }
             Some(ObjectClipboard::Image { rgba, width: raster.width, height: raster.height, rect: sel.rect })
@@ -8521,6 +8534,68 @@ impl PagifyApp {
     /// `at` — pulled out so [`ObjectClipboard::Group`] can call it once per
     /// member, each at its own offset from the point clicked.
     fn place_clipboard_content(&mut self, page: usize, at: AppPoint, content: ObjectClipboard) {
+        if let ObjectClipboard::Shapes(objects) = content {
+            self.recording_state.session_log.record("paste", &format!("at=({:.1},{:.1}) {} drawn shape(s)", at.x, at.y, objects.len()));
+            let height = view_height(self, page);
+            let layer = self.tab_mut().markup.page(page, height);
+            let centre = shapes_centre(&objects, layer);
+            let by = cad_kernel::Vec2::new(at.x - centre.x, -(at.y - centre.y));
+            self.put_shapes_down(page, &objects, by);
+            return;
+        }
+        let is_group = matches!(content, ObjectClipboard::Group(_));
+        let is_text = matches!(content, ObjectClipboard::Text { .. });
+        let mut commands = match self.paste_commands(page, at, content) {
+            Ok(commands) => commands,
+            Err(e) => {
+                self.say_error(e);
+                return;
+            }
+        };
+        let n = commands.len();
+        // **One command, however many pieces: one undo.** A drawing copied as a
+        // group is dozens of pictures, and each used to be its own undo step —
+        // reported from use as 93 presses of `undo` to take back one paste. A
+        // batch is also all or nothing, so a paste cannot be left half down.
+        let command = match n {
+            0 => {
+                self.say_info("nothing to paste.");
+                return;
+            }
+            1 => commands.remove(0),
+            _ => pdf_core::command::Command::Batch { commands },
+        };
+        let outcome = self.tab().doc.as_ref().map(|d| d.session.execute(command));
+        match outcome {
+            Some(Ok(_)) => {
+                if let Some(doc) = &mut self.tab_mut().doc {
+                    doc.rendered_is_stale();
+                }
+                self.say_info(if is_group {
+                    format!("{n} things pasted — `undo` takes them back together.")
+                } else if is_text {
+                    format!("text pasted ({n} line{}) — `undo` takes it back.", if n == 1 { "" } else { "s" })
+                } else {
+                    "picture pasted — `undo` takes it back.".to_string()
+                });
+            }
+            Some(Err(e)) => self.say_error(format!("{e}")),
+            None => self.say_error("nothing open."),
+        }
+    }
+
+    /// The engine commands that put `content` down at `at`: one for each line of
+    /// words, one for each picture, and for a group all its members' in order.
+    /// What the caller says for an `Err` is already worded.
+    ///
+    /// Shapes are not here — they go to the markup layer, which has its own undo
+    /// (see [`Self::put_shapes_down`]) — and a group never holds any.
+    fn paste_commands(
+        &mut self,
+        page: usize,
+        at: AppPoint,
+        content: ObjectClipboard,
+    ) -> Result<Vec<pdf_core::command::Command>, String> {
         // Logged before the match, not after: a `styled_line_command` error
         // returns early, and the log should still show what was *attempted*,
         // not just what succeeded. Recurses once per `Group` member, so each
@@ -8528,10 +8603,17 @@ impl PagifyApp {
         self.recording_state.session_log.record("paste", &format!("at=({:.1},{:.1}) {}", at.x, at.y, describe_clipboard(&content)));
         match content {
             ObjectClipboard::Group(items) => {
+                let mut commands = Vec::new();
                 for (item, dx, dy) in items {
                     let at = AppPoint { x: at.x + dx as f64, y: at.y + dy as f64 };
-                    self.place_clipboard_content(page, at, item);
+                    // A member that cannot be written is said and left out; the
+                    // rest of the group still goes down.
+                    match self.paste_commands(page, at, item) {
+                        Ok(more) => commands.extend(more),
+                        Err(e) => self.say_error(e),
+                    }
                 }
+                Ok(commands)
             }
             ObjectClipboard::Text { lines, size, color, face, track } => {
                 let gap = size * 1.2;
@@ -8539,36 +8621,11 @@ impl PagifyApp {
                 let mut commands = Vec::new();
                 for line in &lines {
                     if !line.trim().is_empty() {
-                        match self.styled_line_command(page, (at.x as f32, baseline), line, size, color, face.as_deref(), track) {
-                            Ok(command) => commands.push(command),
-                            Err(e) => {
-                                self.say_error(e);
-                                return;
-                            }
-                        }
+                        commands.push(self.styled_line_command(page, (at.x as f32, baseline), line, size, color, face.as_deref(), track)?);
                     }
                     baseline += gap;
                 }
-                let n = commands.len();
-                let command = match commands.len() {
-                    0 => {
-                        self.say_info("nothing to paste.");
-                        return;
-                    }
-                    1 => commands.remove(0),
-                    _ => pdf_core::command::Command::Batch { commands },
-                };
-                let outcome = self.tab().doc.as_ref().map(|d| d.session.execute(command));
-                match outcome {
-                    Some(Ok(_)) => {
-                        if let Some(doc) = &mut self.tab_mut().doc {
-                            doc.rendered_is_stale();
-                        }
-                        self.say_info(format!("text pasted ({n} line{}) — `undo` takes it back.", if n == 1 { "" } else { "s" }));
-                    }
-                    Some(Err(e)) => self.say_error(format!("{e}")),
-                    None => self.say_error("nothing open."),
-                }
+                Ok(commands)
             }
             ObjectClipboard::Image { rgba, width, height, rect } => {
                 let (w, h) = (rect.right - rect.left, rect.bottom - rect.top);
@@ -8578,31 +8635,12 @@ impl PagifyApp {
                     top: at.y as f32 - h / 2.0,
                     bottom: at.y as f32 + h / 2.0,
                 };
-                let Some(doc) = &self.tab().doc else {
-                    self.say_error("nothing open.");
-                    return;
-                };
-                let outcome = doc.session.execute(pdf_core::command::Command::AddAnnotation {
+                Ok(vec![pdf_core::command::Command::AddAnnotation {
                     page_index: page,
                     annotation: pdf_core::document::Annotation::Image { rect, rgba, width, height },
-                });
-                match outcome {
-                    Ok(_) => {
-                        if let Some(doc) = &mut self.tab_mut().doc {
-                            doc.rendered_is_stale();
-                        }
-                        self.say_info("picture pasted — `undo` takes it back.");
-                    }
-                    Err(e) => self.say_error(format!("{e}")),
-                }
+                }])
             }
-            ObjectClipboard::Shapes(objects) => {
-                let height = view_height(self, page);
-                let layer = self.tab_mut().markup.page(page, height);
-                let centre = shapes_centre(&objects, layer);
-                let by = cad_kernel::Vec2::new(at.x - centre.x, -(at.y - centre.y));
-                self.put_shapes_down(page, &objects, by);
-            }
+            ObjectClipboard::Shapes(_) => Ok(Vec::new()),
         }
     }
 
@@ -10420,6 +10458,16 @@ impl PagifyApp {
             Ok((false, _)) => false,
             Err(e) => {
                 self.say_error(explain(&e));
+                // **A failed undo can still have changed the page** — a group's
+                // picture taken off before one of its words could not be.
+                // Reported from use: the picture stayed on screen, page and
+                // thumbnail, until a zoom; what is held of the page is dropped
+                // here the same as after an undo that went through.
+                if let Some(doc) = &mut self.tab_mut().doc {
+                    doc.rendered_is_stale();
+                }
+                self.tab_mut().selection.text_selection = None;
+                self.tab_mut().panels.find_hits.clear();
                 true
             }
         }
@@ -10720,31 +10768,44 @@ impl PagifyApp {
             }
         }
 
-        // Incremental, always, unless saving somewhere new: a signature covers a
-        // byte range, and a full rewrite relocates every object in the file.
+        // **Incremental only when there is a signature to keep**: a signature
+        // covers a byte range, and a full rewrite relocates every object in the
+        // file.
         //
-        // **Except after a redaction**, where incremental is the one thing that
-        // must not happen: it keeps the original bytes verbatim and appends a
-        // delta, so every word the redaction removed is still in the file at its
-        // old offset. The engine refuses it outright; this asks the same
+        // **Not otherwise. Reported from use: "save saves a copy instead of the
+        // changes", "the file size multiplies".** PDFium's incremental save
+        // appends every object it has *loaded*, not only what changed — and
+        // showing a page loads nearly all of them. Measured on the user's own
+        // files: a save with nothing changed added 713 KB (43 objects) to a
+        // 2.7 MB datasheet; one pasted picture and a save added 465 of a
+        // catalogue page's 484 objects. Every save appended most of the document
+        // again, and kept what had been deleted readable in the revision before.
+        // A document with no signature has nothing an append preserves, so it is
+        // written whole: the size of what is in it, once.
+        //
+        // **And never after a redaction**, where incremental is the one thing
+        // that must not happen: it keeps the original bytes verbatim and appends
+        // a delta, so every word the redaction removed is still in the file at
+        // its old offset. The engine refuses it outright; this asks the same
         // question first so the answer is a rewritten file rather than an error
-        // the user has to interpret.
-        //
-        // Nothing is lost by rewriting here. The redaction has already changed
-        // the page's content stream, so any signature over this document is void
-        // whichever way it is written.
-        let incremental = !session.must_save_full_copy();
+        // the user has to interpret. Nothing is lost by rewriting there: the
+        // redaction has already changed the page's content stream, so any
+        // signature over this document is void whichever way it is written.
+        let signed = session.signature_count() > 0;
+        let incremental = signed && !session.must_save_full_copy();
         // A rewrite relocates every object, and a signature covers a byte
         // range: one made before the redaction or the password is void
         // afterwards. Said at the save, which is where it happens.
-        let signatures_lost = if incremental { 0 } else { session.signature_count() };
+        let signatures_lost = if signed && !incremental { session.signature_count() } else { 0 };
+        // Worth saying only where a rewrite is not the ordinary save.
+        let rewritten_note = session.must_save_full_copy();
         match session.save_to(&path, incremental) {
             Ok(()) => {
                 self.tab_mut().view_state.saved_revision = self.tab_mut().markup.revision();
                 self.say_info(format!(
                     "saved {} ({stored} marks){}.",
                     path.display(),
-                    if incremental { "" } else { " — the file was rewritten" }
+                    if rewritten_note { " — the file was rewritten" } else { "" }
                 ));
                 if signatures_lost > 0 {
                     self.say_error(format!(
@@ -15675,6 +15736,48 @@ fn shapes_centre(objects: &[(cad_kernel::DObject, bool)], layer: &pagify_shell::
     layer.space().from_kernel(cad_kernel::Vec2::new((min.x + max.x) / 2.0, (min.y + max.y) / 2.0))
 }
 
+/// The pictures and shapes of a selection, with every pair that overlaps (or
+/// all but touches) folded into one box — what the page draws over that box is
+/// then copied once. Words pass through untouched: they are copied as words.
+///
+/// **Reported from use: a drawing of 93 pieces came out of paste washed out.**
+/// Each piece was copied as a picture of the page over *its own* box, which
+/// carries whatever else the page draws there — the rings of a lens each held
+/// all the rings inside them — and the 93 pictures were put down in selection
+/// order, not the page's, each at a sub-pixel offset from the next. One picture
+/// of the joint box is what the page itself shows, in the page's own order.
+///
+/// A single pass: a piece absorbs every box it overlaps, growing as it does, so
+/// no two boxes left overlap, and a page-wide selection stays quadratic at worst.
+fn merge_overlapping(members: Vec<Selected>) -> Vec<Selected> {
+    // Half a point: shapes that meet at an end are one drawing.
+    const NEAR: f32 = 0.5;
+    let touches = |a: &pdf_core::document::Rect, b: &pdf_core::document::Rect| {
+        a.left <= b.right + NEAR && b.left <= a.right + NEAR && a.top <= b.bottom + NEAR && b.top <= a.bottom + NEAR
+    };
+    let (mut merged, pieces): (Vec<Selected>, Vec<Selected>) = members.into_iter().partition(|s| s.what == "the words");
+    let mut boxes: Vec<Selected> = Vec::new();
+    for mut piece in pieces {
+        while let Some(i) = boxes.iter().position(|b| touches(&b.rect, &piece.rect)) {
+            let b = boxes.swap_remove(i);
+            piece.rect = pdf_core::document::Rect {
+                left: piece.rect.left.min(b.rect.left),
+                top: piece.rect.top.min(b.rect.top),
+                right: piece.rect.right.max(b.rect.right),
+                bottom: piece.rect.bottom.max(b.rect.bottom),
+            };
+            // A picture has its own paper, a shape does not: the joint box keeps
+            // the paper only when it holds nothing but shapes.
+            if b.what != piece.what {
+                piece.what = "the picture";
+            }
+        }
+        boxes.push(piece);
+    }
+    merged.extend(boxes);
+    merged
+}
+
 /// Make the paper around a copied shape see-through: every near-white pixel
 /// **reachable from the edge of the picture** without crossing ink becomes
 /// transparent. White *inside* the shape (a white fill, a letter's counter) is
@@ -16098,3 +16201,9 @@ mod pick_wiring_tests;
 
 #[cfg(test)]
 mod exact_text_tests;
+
+#[cfg(test)]
+mod copy_group_tests;
+
+#[cfg(test)]
+mod save_size_tests;

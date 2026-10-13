@@ -521,6 +521,45 @@ mod tests {
         assert!(!history.can_redo());
     }
 
+    /// **A batch is taken back as far as it can be.** Reported from use: undoing
+    /// a pasted group stopped at a word that could not be found again — the
+    /// picture reverted before it already gone, the words after it left on the
+    /// page with nothing left to undo them by. A member that cannot be reverted
+    /// is still reported; every other member is still reverted.
+    #[test]
+    fn a_batch_undo_reverts_every_member_it_can_and_reports_the_one_it_cannot() {
+        let mut history = CommandHistory::default();
+        let mut doc = FakeDoc::with_pages(&[10.0, 20.0, 30.0]);
+        // `FakeDoc::remove_text` always fails: this word's undo cannot be done.
+        let words = Annotation::Text {
+            text: "108mm".into(),
+            font: "Helvetica".into(),
+            font_asset: None,
+            size: 0.0,
+            color: Color { r: 0, g: 0, b: 0, a: 255 },
+            glyphs: Vec::new(),
+            id: 7,
+            restore: String::new(),
+            frame: Vec::new(),
+            frame_width: 0.0,
+        };
+        history
+            .execute(
+                Command::Batch {
+                    commands: vec![
+                        Command::SetPageRotation { index: 0, quarter_turns: 1 },
+                        Command::AddAnnotation { page_index: 1, annotation: words },
+                        Command::SetPageRotation { index: 2, quarter_turns: 3 },
+                    ],
+                },
+                &mut doc,
+            )
+            .unwrap();
+
+        assert!(history.undo(&mut doc).is_err(), "the word that could not be taken back is still reported");
+        assert_eq!(doc.rotations, vec![0, 0, 0], "both rotations are taken back, either side of the word that was not");
+    }
+
     #[test]
     fn a_failed_command_is_not_recorded_and_keeps_the_redo_branch() {
         let mut history = CommandHistory::default();

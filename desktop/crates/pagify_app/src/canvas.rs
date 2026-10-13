@@ -1636,6 +1636,18 @@ impl crate::PagifyApp {
     ) {
         let response = ui.interact(rect, egui::Id::new(("page", page)), egui::Sense::click_and_drag());
 
+        // **Pressing on the page ends the rail's page selection.** Pages picked
+        // in the thumbnail rail stay selected until Escape, and Ctrl+C and Delete
+        // give them priority over everything else. Reported from use: Edit Object
+        // picked a picture, Ctrl+C said "1 page copied" — the page a thumbnail
+        // had been clicked on an hour before — and Delete would have taken that
+        // page out. Whatever was picked last is what the keys mean.
+        if response.clicked() || response.drag_started() {
+            let organize = &mut self.tab_mut().organize;
+            organize.organize_selected.clear();
+            organize.organize_anchor = None;
+        }
+
         // **Click elsewhere applies the paragraph being edited, rather than
         // doing nothing to it.** `draw_run_editor` is drawn after this
         // page's own response is created, so a click that actually lands on

@@ -1011,11 +1011,20 @@ impl UndoRecord {
             // Reverse order: the commands that produced these ran forwards,
             // so undoing them has to run backwards — the same reasoning
             // `RemovePages`' own revert above already documents.
+            // **Every member that can be reverted is.** Stopping at the first
+            // that cannot left the ones before it reverted and the ones after
+            // it on the page for good — the record is spent either way, so
+            // nothing could undo them afterwards. Reported from use: a pasted
+            // group whose words could not be found again kept those words, and
+            // said "nothing to undo". The first failure is still the answer.
             UndoRecord::Batch(records) => {
+                let mut first_failure = None;
                 for record in records.into_iter().rev() {
-                    record.revert(doc)?;
+                    if let Err(e) = record.revert(doc) {
+                        first_failure.get_or_insert(e);
+                    }
                 }
-                Ok(())
+                first_failure.map_or(Ok(()), Err)
             }
         }
     }

@@ -376,7 +376,7 @@ pub fn undo(session: &mut DocumentSession) -> Result<(bool, EditState)> {
             .document
             .as_document_mut()
             .ok_or(PdfError::Unsupported("editing this document"))?;
-        session.history.undo(doc)?
+        session.history.undo(doc)
     };
     apply_outcome(session, affected)
 }
@@ -388,22 +388,32 @@ pub fn redo(session: &mut DocumentSession) -> Result<(bool, EditState)> {
             .document
             .as_document_mut()
             .ok_or(PdfError::Unsupported("editing this document"))?;
-        session.history.redo(doc)?
+        session.history.redo(doc)
     };
     apply_outcome(session, affected)
 }
 
 fn apply_outcome(
     session: &mut DocumentSession,
-    affected: Option<Vec<usize>>,
+    affected: Result<Option<Vec<usize>>>,
 ) -> Result<(bool, EditState)> {
     match affected {
-        Some(affected) => {
+        Ok(Some(affected)) => {
             invalidate(session, &affected);
             Ok((true, edit_state(session)))
         }
         // Nothing moved, so nothing is stale.
-        None => Ok((false, edit_state(session))),
+        Ok(None) => Ok((false, edit_state(session))),
+        // **A revert that fails partway has still changed the document.**
+        // Reported from use: undoing a pasted group failed on one of its words
+        // after its picture had already been taken off, and the cached page
+        // went on showing the picture — on the page and in the thumbnail —
+        // until a zoom asked for a render nothing had cached. Which pages
+        // changed is not known here, so all of them are dropped.
+        Err(e) => {
+            invalidate(session, &[]);
+            Err(e)
+        }
     }
 }
 
