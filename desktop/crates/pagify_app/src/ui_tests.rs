@@ -5780,3 +5780,39 @@ fn form_to_sheet_tooltip_and_reset_run_from_the_box() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// **Flatten, File Attachment and the Comment tab's File pin, through the
+/// real dispatch.** Flatten bakes the fixture's fields away and says it is
+/// not undoable; a document attachment lists; a page pin lands on the page
+/// in view.
+#[test]
+fn flatten_attach_and_attachcomment_run_from_the_box() {
+    let dir = std::env::temp_dir().join(format!("pagify-attachbox-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch folder");
+    let payload = dir.join("notes.txt");
+    std::fs::write(&payload, b"payload bytes").expect("write payload");
+
+    let mut h = harness("form-fields.pdf");
+
+    h.state_mut().submit("flatten");
+    h.run_steps(1);
+    let session = h.state().tab().doc.as_ref().expect("doc").session.clone();
+    assert!(session.form_fields().expect("fields").is_empty(), "flatten left fields");
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(
+        said.iter().any(|l| l.contains("not undoable")),
+        "flatten must say it cannot be taken back: {said:?}"
+    );
+
+    h.state_mut().submit(&format!("attach {}", payload.display()));
+    h.run_steps(1);
+    let session = h.state().tab().doc.as_ref().expect("doc").session.clone();
+    assert_eq!(session.attachments().expect("list"), ["notes.txt"]);
+
+    h.state_mut().submit(&format!("attachcomment {}", payload.display()));
+    h.run_steps(1);
+    let session = h.state().tab().doc.as_ref().expect("doc").session.clone();
+    assert_eq!(session.page_attachments(0).expect("pins"), ["notes.txt"]);
+
+    std::fs::remove_dir_all(&dir).ok();
+}

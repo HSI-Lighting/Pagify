@@ -457,6 +457,15 @@ pub enum Verb {
     /// Open a copy of a file as untitled, so the original is untouched —
     /// `fromtemplate <file.pdf>`. Bare, the app asks for the file.
     FromTemplate { source: Option<PathBuf> },
+    /// Bake every page's annotations and form fields into its content —
+    /// the Page tab's Flatten. Not undoable.
+    Flatten,
+    /// Embed a file in the document — `attach [file]`. Bare, the app asks
+    /// for the file.
+    Attach { source: Option<PathBuf> },
+    /// Attach a file to the page in view as an annotation — `attachcomment
+    /// [file]`. Bare, the app asks for the file.
+    AttachComment { source: Option<PathBuf> },
     /// Write every form field's name, kind and value as JSON —
     /// `formexport [file.json]`. Bare, the app asks for the file.
     FormExport { dest: Option<PathBuf> },
@@ -925,8 +934,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("add3d", "the editing phase", "the Add 3D tool"),
     ("alttext", "the accessibility phase", "the Set Alternate Text tool"),
     ("assistant", "the viewing phase", "the Assistant tool"),
-    ("attach", "the editing phase", "the File Attachment tool"),
-    ("attachcomment", "the annotation phase", "the File tool"),
     ("autotag", "the accessibility phase", "the Autotag Document tool"),
     ("calcorder", "the forms phase", "the Calculation Order tool"),
     ("callout", "the annotation phase", "the Callout tool"),
@@ -948,7 +955,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("fieldradio", "the forms phase", "the Radio Button tool"),
     ("fieldsignature", "the forms phase", "the Signature Field tool"),
     ("fieldtext", "the forms phase", "the Text Field tool"),
-    ("flatten", "the page phase", "the Flatten tool"),
     ("formdesigner", "the forms phase", "the Designer Assistant tool"),
     ("formrecognise", "the forms phase", "the Run Form Field Recognition tool"),
     ("fromscanner", "the scanning phase", "the From Scanner tool"),
@@ -1100,7 +1106,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "exportimages", "fromfiles", "viewsetting", "calculator", "managecomments",
         "pagemarks", "fromclipboard", "pencil", "rearrange", "fromtemplate", "addshape",
         "drawing", "keeptool", "formexport", "formimport", "formtosheet", "tooltip",
-        "resetform",
+        "resetform", "flatten", "attach", "attachcomment",
         "searchhighlight", "compare", "changecolor",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "areahighlight", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
@@ -1750,6 +1756,13 @@ fn parse_conversion(head: &str, _rest: &[&str], tail: &str) -> Option<Result<Ver
         }),
         "formimport" => Ok(Verb::FormImport {
             dest: (!tail.is_empty()).then(|| resolve_path(tail)),
+        }),
+        "flatten" => Ok(Verb::Flatten),
+        "attach" => Ok(Verb::Attach {
+            source: (!tail.is_empty()).then(|| resolve_path(tail)),
+        }),
+        "attachcomment" => Ok(Verb::AttachComment {
+            source: (!tail.is_empty()).then(|| resolve_path(tail)),
         }),
         "formtosheet" => Ok(Verb::FormToSheet {
             dest: (!tail.is_empty()).then(|| resolve_path(tail)),
@@ -2717,6 +2730,31 @@ mod form_tab_tests {
             other => panic!("bare tooltip parsed as {other:?}"),
         }
         for word in ["formtosheet", "tooltip", "resetform"] {
+            assert!(
+                PLANNED.iter().all(|(v, _, _)| *v != word),
+                "`{word}` is still in the planned table"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod attach_flatten_tests {
+    use super::*;
+
+    #[test]
+    fn flatten_attach_and_attachcomment_parse_and_are_not_planned() {
+        assert_eq!(parse("flatten"), Some(Ok(Verb::Flatten)));
+        assert_eq!(parse("attach"), Some(Ok(Verb::Attach { source: None })));
+        assert_eq!(
+            parse("attach notes.txt"),
+            Some(Ok(Verb::Attach { source: Some("notes.txt".into()) }))
+        );
+        assert_eq!(
+            parse("attachcomment letter.pdf"),
+            Some(Ok(Verb::AttachComment { source: Some("letter.pdf".into()) }))
+        );
+        for word in ["flatten", "attach", "attachcomment"] {
             assert!(
                 PLANNED.iter().all(|(v, _, _)| *v != word),
                 "`{word}` is still in the planned table"

@@ -185,7 +185,10 @@ impl crate::PagifyApp {
             | Effect::ImportFormData { .. }
             | Effect::ExportFormSheet { .. }
             | Effect::SetFormTooltip { .. }
-            | Effect::ClearFormFields => self.apply_files(effect),
+            | Effect::ClearFormFields
+            | Effect::FlattenDocument
+            | Effect::AttachFile { .. }
+            | Effect::AttachComment { .. } => self.apply_files(effect),
             Effect::RunReflow
             | Effect::RunFind(_)
             | Effect::RunFindStep { .. }
@@ -699,6 +702,15 @@ impl crate::PagifyApp {
             },
             Effect::SetFormTooltip { field, text } => self.set_form_tooltip(&field, &text),
             Effect::ClearFormFields => self.clear_form_fields(),
+            Effect::FlattenDocument => self.flatten_document(),
+            Effect::AttachFile { source } => match source {
+                Some(path) => self.attach_file(&path),
+                None => self.attach_file_dialog(),
+            },
+            Effect::AttachComment { source } => match source {
+                Some(path) => self.attach_comment(&path),
+                None => self.attach_comment_dialog(),
+            },
             Effect::RunAccessCheck => self.run_access_check(),
             Effect::WriteAccessReport { dest } => match dest {
                 Some(path) => self.write_access_report(&path),

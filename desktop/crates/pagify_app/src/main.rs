@@ -14405,6 +14405,138 @@ impl PagifyApp {
         }
     }
 
+    /// Bake every page's annotations and form fields into its content — the
+    /// Page tab's Flatten.
+    ///
+    /// **Not undoable**, and the answer says so: the backend call is
+    /// PDFium's own flatten rather than one of the engine's commands, so
+    /// there is no history entry to take back.
+    fn flatten_document(&mut self) {
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let count = self.tab().doc.as_ref().map(|d| d.page_count).unwrap_or(0);
+        let mut failures: Vec<String> = Vec::new();
+        for page in 0..count {
+            if let Err(e) = session.flatten_page(page) {
+                failures.push(format!("page {}: {e}", page + 1));
+            }
+        }
+        if let Some(doc) = &mut self.tab_mut().doc {
+            doc.rendered_is_stale();
+        }
+        self.tab_mut().markup.clear();
+        if failures.is_empty() {
+            self.say_info(format!(
+                "flattened {count} page(s) — marks and form fields are page content now, \
+                 and this is not undoable."
+            ));
+        } else {
+            self.say_error(format!(
+                "flatten: {} page(s) did not take; {}",
+                failures.len(),
+                failures.join("; ")
+            ));
+        }
+    }
+
+    /// Embed a file in the document — the Edit tab's File Attachment tool.
+    fn attach_file(&mut self, source: &std::path::Path) {
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let bytes = match std::fs::read(source) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                self.say_error(format!("attach: could not read {}: {e}", source.display()));
+                return;
+            }
+        };
+        let name = source
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "attachment".into());
+        match session.add_attachment(&name, &bytes) {
+            Ok(true) => self.say_info(format!(
+                "attached `{name}` ({} byte(s)) to the document — it is in the file now, \
+                 and `save` writes it out.",
+                bytes.len()
+            )),
+            Ok(false) => self.say_error(format!(
+                "attach: the document already holds a file named `{name}`."
+            )),
+            Err(e) => self.say_error(format!("attach: {e}")),
+        }
+    }
+
+    /// The Edit tab's File Attachment button, bare: choose the file, then
+    /// embed it.
+    fn attach_file_dialog(&mut self) {
+        if self.tab().doc.is_none() {
+            self.say_error("nothing open.");
+            return;
+        }
+        let dialog = rfd::FileDialog::new().set_title("Choose a file to attach");
+        match dialog.pick_file() {
+            Some(path) => self.attach_file(&path),
+            None => self.say_info("nothing chosen."),
+        }
+    }
+
+    /// Attach a file to the page in view as a file-attachment annotation —
+    /// the Comment tab's File tool.
+    fn attach_comment(&mut self, source: &std::path::Path) {
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let page = self.tab().view_state.page;
+        let bytes = match std::fs::read(source) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                self.say_error(format!(
+                    "attachcomment: could not read {}: {e}",
+                    source.display()
+                ));
+                return;
+            }
+        };
+        let name = source
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "attachment".into());
+        match session.add_annot_attachment(page, &name, &bytes) {
+            Ok(true) => {
+                if let Some(doc) = &mut self.tab_mut().doc {
+                    doc.rendered_is_stale();
+                }
+                self.say_info(format!(
+                    "attached `{name}` on page {} — the pin is at the top-left; `save` \
+                     writes it out.",
+                    page + 1
+                ));
+            }
+            Ok(false) => self.say_error("attachcomment: the pin could not be made."),
+            Err(e) => self.say_error(format!("attachcomment: {e}")),
+        }
+    }
+
+    /// The Comment tab's File button, bare: choose the file, then pin it to
+    /// the page in view.
+    fn attach_comment_dialog(&mut self) {
+        if self.tab().doc.is_none() {
+            self.say_error("nothing open.");
+            return;
+        }
+        let dialog = rfd::FileDialog::new().set_title("Choose a file to attach to this page");
+        match dialog.pick_file() {
+            Some(path) => self.attach_comment(&path),
+            None => self.say_info("nothing chosen."),
+        }
+    }
+
     /// The `fromclipboard` wait: ask the platform once, then take the text
     /// when it arrives. Called from `handle_input`, the one place with both
     /// the context and the paste events; split out of it so that function

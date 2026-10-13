@@ -34,6 +34,14 @@ use crate::document::{
 // bindings keep private. Named here as the header names them.
 const FPDF_FORMFIELD_CHECKBOX: i32 = 2;
 
+// `FPDFPage_Flatten`'s flag (`fpdf_flatten.h`), kept private by the
+// bindings: bake what a reader shows and a printer sends.
+const FPDF_FLAT_PRINT: i32 = 1;
+
+// The `FPDF_ANNOT_*` subtype (`fpdf_annot.h`), kept private by the
+// bindings: a file-attachment pin.
+const FPDF_ANNOT_FILEATTACHMENT: u32 = 17;
+
 /// Read a PDFium wide string in the two passes every sized read uses —
 /// length first, then the buffer — as a Rust `String`.
 fn read_form_wide(
@@ -1295,6 +1303,148 @@ impl Document for PdfiumDocument {
 
     fn clear_form_fields(&mut self) -> Result<usize> {
         PdfiumDocument::clear_form_fields(self)
+    }
+
+    fn flatten_page(&mut self, page_index: usize) -> Result<()> {
+        self.validate_page_index(page_index)?;
+        let page_number =
+            i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
+                index: page_index,
+                count: self.page_count,
+            })?;
+        let page = RawPage::open(self.document.handle(), page_number)?;
+        let bindings = pdfium()?.bindings();
+        // FLAT_PRINT (1) — bake what a reader shows and a printer sends;
+        // FLAT_NORMALDISPLAY is 0. The constant lives in the bindings'
+        // private module, so it is named here as the header names it.
+        let ok = unsafe { bindings.FPDFPage_Flatten(page.handle, FPDF_FLAT_PRINT) };
+        if ok == 0 {
+            return Err(PdfError::Pdfium(format!(
+                "flattening page {} did not take",
+                page_index + 1
+            )));
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
+    fn add_attachment(&mut self, name: &str, bytes: &[u8]) -> Result<bool> {
+        let bindings = pdfium()?.bindings();
+        let attachment =
+            unsafe { bindings.FPDFDoc_AddAttachment_str(self.document.handle(), name) };
+        if attachment.is_null() {
+            return Ok(false);
+        }
+        let ok = unsafe {
+            bindings.FPDFAttachment_SetFile(
+                attachment,
+                self.document.handle(),
+                bytes.as_ptr() as *const c_void,
+                bytes.len() as c_ulong,
+            )
+        };
+        if !bindings.is_true(ok) {
+            return Err(PdfError::Pdfium(format!("writing attached file {name:?}")));
+        }
+        self.dirty = true;
+        Ok(true)
+    }
+
+    fn attachments(&self) -> Result<Vec<String>> {
+        let bindings = pdfium()?.bindings();
+        let count = unsafe { bindings.FPDFDoc_GetAttachmentCount(self.document.handle()) };
+        let mut out = Vec::new();
+        for index in 0..count.max(0) {
+            let attachment =
+                unsafe { bindings.FPDFDoc_GetAttachment(self.document.handle(), index) };
+            if attachment.is_null() {
+                continue;
+            }
+            let name = read_form_wide(|buf, len| unsafe {
+                bindings.FPDFAttachment_GetName(attachment, buf, len)
+            });
+            if let Some(name) = name {
+                out.push(name);
+            }
+        }
+        Ok(out)
+    }
+
+    fn add_annot_attachment(
+        &mut self,
+        page_index: usize,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<bool> {
+        self.validate_page_index(page_index)?;
+        let page_number =
+            i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
+                index: page_index,
+                count: self.page_count,
+            })?;
+        let page = RawPage::open(self.document.handle(), page_number)?;
+        let bindings = pdfium()?.bindings();
+        // FPDF_ANNOT_FILEATTACHMENT = 17, kept private by the bindings; named
+        // here as the header names it.
+        let annot = unsafe {
+            bindings.FPDFPage_CreateAnnot(page.handle, FPDF_ANNOT_FILEATTACHMENT as i32)
+        };
+        if annot.is_null() {
+            return Ok(false);
+        }
+        let ok = unsafe {
+            // A 40pt icon at the top-left of the page, where every reader
+            // puts a file-attachment pin.
+            let rect = FS_RECTF { left: 24.0, top: 72.0, right: 64.0, bottom: 32.0 };
+            bindings.FPDFAnnot_SetRect(annot, &rect);
+            let attachment = bindings.FPDFAnnot_AddFileAttachment_str(annot, name);
+            let ok = if attachment.is_null() {
+                false
+            } else {
+                bindings.is_true(bindings.FPDFAttachment_SetFile(
+                    attachment,
+                    self.document.handle(),
+                    bytes.as_ptr() as *const c_void,
+                    bytes.len() as c_ulong,
+                ))
+            };
+            bindings.FPDFPage_CloseAnnot(annot);
+            ok
+        };
+        if ok {
+            self.dirty = true;
+        }
+        Ok(ok)
+    }
+
+    fn page_attachments(&self, page_index: usize) -> Result<Vec<String>> {
+        self.validate_page_index(page_index)?;
+        let page_number =
+            i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
+                index: page_index,
+                count: self.page_count,
+            })?;
+        let page = RawPage::open(self.document.handle(), page_number)?;
+        let bindings = pdfium()?.bindings();
+        let count = unsafe { bindings.FPDFPage_GetAnnotCount(page.handle) };
+        let mut out = Vec::new();
+        for index in 0..count.max(0) {
+            let annot = unsafe { bindings.FPDFPage_GetAnnot(page.handle, index) };
+            if annot.is_null() {
+                continue;
+            }
+            let attachment = unsafe { bindings.FPDFAnnot_GetFileAttachment(annot) };
+            if !attachment.is_null() {
+                let name = read_form_wide(|buf, len| unsafe {
+                    bindings.FPDFAttachment_GetName(attachment, buf, len)
+                });
+                if let Some(name) = name {
+                    out.push(name);
+                }
+            }
+            unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+        }
+        Ok(out)
     }
 
     fn run_font_data(&self, page_index: usize, object: usize) -> Result<Option<Vec<u8>>> {

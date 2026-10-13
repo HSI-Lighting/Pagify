@@ -733,6 +733,45 @@ pub trait Document: Send + Sync {
         Ok(0)
     }
 
+    /// Flatten a page: annotations and form fields are baked into the page's
+    /// own content — what a reader shows and a printer sends, made
+    /// permanent.
+    ///
+    /// **Not a command, so not undoable.** The backend call is PDFium's own
+    /// flatten rather than one of this engine's commands; the app says so
+    /// when it runs.
+    fn flatten_page(&mut self, _page_index: usize) -> Result<()> {
+        Ok(())
+    }
+
+    /// Embed `bytes` in the document as an attached file named `name`;
+    /// `false` when the backend refuses (an empty or already-used name).
+    fn add_attachment(&mut self, _name: &str, _bytes: &[u8]) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// The names of the document's embedded files, in the file's own order.
+    fn attachments(&self) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
+    /// Attach a file to a page as a file-attachment annotation; `false` when
+    /// the annotation cannot be made.
+    fn add_annot_attachment(
+        &mut self,
+        _page_index: usize,
+        _name: &str,
+        _bytes: &[u8],
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// The names of the files riding on a page's annotations, in annotation
+    /// order.
+    fn page_attachments(&self, _page_index: usize) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
     /// The bytes of the font one text run is drawn in, if it can be had.
     ///
     /// **What Obfuscate needs and [`crate::crypto::tweak::coverage`] cannot

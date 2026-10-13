@@ -105,4 +105,11 @@ impl Session {
         }
         self.page_count()
     }
+    /// Flatten a page: annotations and form fields are baked into the
+    /// page's own content. **Not undoable** — PDFium's own flatten, not one
+    /// of this engine's commands.
+    pub fn flatten_page(&self, page: usize) -> Result<()> {
+        registry::with_session(self.handle, |s| s.document.flatten_page(page))
+    }
+
 }

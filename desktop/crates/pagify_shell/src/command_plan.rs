@@ -261,6 +261,12 @@ pub enum Effect {
     /// Read form JSON back and apply what this build can set; `None` asks
     /// for the file first.
     ImportFormData { dest: Option<std::path::PathBuf> },
+    /// Flatten every page: annotations and form fields become content.
+    FlattenDocument,
+    /// Embed a file in the document; `None` asks for the file first.
+    AttachFile { source: Option<std::path::PathBuf> },
+    /// Attach a file to the page in view; `None` asks for the file first.
+    AttachComment { source: Option<std::path::PathBuf> },
     /// Write every field as CSV; `None` asks for the file first.
     ExportFormSheet { dest: Option<std::path::PathBuf> },
     /// Set a field's tooltip.
@@ -436,6 +442,9 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::FormToSheet { .. }
         | Verb::ToolTip { .. }
         | Verb::ResetForm
+        | Verb::Flatten
+        | Verb::Attach { .. }
+        | Verb::AttachComment { .. }
         | Verb::ShapeWords
         | Verb::KeepTool
         | Verb::Reflow
@@ -705,6 +714,9 @@ fn plan_files_and_text(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
             text: text.clone(),
         }],
         Verb::ResetForm => vec![Effect::ClearFormFields],
+        Verb::Flatten => vec![Effect::FlattenDocument],
+        Verb::Attach { source } => vec![Effect::AttachFile { source: source.clone() }],
+        Verb::AttachComment { source } => vec![Effect::AttachComment { source: source.clone() }],
         Verb::ShapeWords => vec![Effect::Say(crate::verbs::SHAPE_WORDS.into())],
         Verb::KeepTool => vec![Effect::Say(crate::verbs::KEEP_TOOL_WORDS.into())],
         // Text and find.
@@ -1076,6 +1088,12 @@ mod tests {
                 vec![Effect::SetFormTooltip { field: "email".into(), text: "Your address".into() }],
             ),
             (Verb::ResetForm, vec![Effect::ClearFormFields]),
+            (Verb::Flatten, vec![Effect::FlattenDocument]),
+            (Verb::Attach { source: None }, vec![Effect::AttachFile { source: None }]),
+            (
+                Verb::AttachComment { source: None },
+                vec![Effect::AttachComment { source: None }],
+            ),
             (Verb::ShapeWords, vec![Effect::Say(crate::verbs::SHAPE_WORDS.into())]),
             (Verb::KeepTool, vec![Effect::Say(crate::verbs::KEEP_TOOL_WORDS.into())]),
             (Verb::Reflow, vec![Effect::RunReflow]),
