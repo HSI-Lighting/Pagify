@@ -1293,6 +1293,9 @@ struct PagifyApp {
     prefs_state: PrefsState,
     render_state: RenderState,
     ui_state: UiState,
+    /// A file dialog running on its own thread, and its continuation —
+    /// see [`PendingDialog`].
+    pending_dialog: Option<PendingDialog>,
     clipboard_state: ClipboardState,
     faces_state: FacesState,
     update_state: UpdateState,
@@ -2659,6 +2662,29 @@ const SIGNATURE_WIDTH_PT: f32 = 144.0;
 
 
 
+/// A file dialog that is still open, and what to do when it answers.
+///
+/// **Dialogs run on their own thread.** They used to run right here, on the
+/// frame thread: the OS dialog blocks whoever opened it until the person
+/// answers, so the window stopped repainting and the OS drew "not
+/// responding" over it (reported from use, the moment anyone opened one).
+/// The thread that asked keeps drawing; the answer is applied the frame it
+/// arrives, in `run_pending_dialog`.
+type PendingDialog = (
+    std::sync::mpsc::Receiver<DialogAnswer>,
+    Box<dyn FnOnce(&mut PagifyApp, DialogAnswer)>,
+);
+
+/// What a deferred dialog came back with — one variant per kind, so the
+/// continuation never has to re-check which dialog it was.
+enum DialogAnswer {
+    File(std::path::PathBuf),
+    Files(Vec<std::path::PathBuf>),
+    Folder(std::path::PathBuf),
+    Save(std::path::PathBuf),
+    Cancelled,
+}
+
 impl PagifyApp {
 
     /// The ribbon, top panels and all. Returns the command a button asked to
@@ -3751,6 +3777,115 @@ impl PagifyApp {
     /// The thumbnail rail or the Organize grid, whichever is showing.
     /// Returns a page the reader asked to jump to — deferred to the caller,
     /// because the panel borrows `ui` for its own duration.
+    /// Run a file dialog **away from the frame** — see [`PendingDialog`].
+    ///
+    /// `run` executes on the dialog's own thread; `apply` runs here when
+    /// the answer arrives. In tests no dialog can be shown, so the answer
+    /// (cancelled) comes back at once and the flow stays testable.
+    fn defer_dialog(
+        &mut self,
+        run: impl FnOnce() -> DialogAnswer + Send + 'static,
+        apply: impl FnOnce(&mut PagifyApp, DialogAnswer) + 'static,
+    ) {
+        if self.pending_dialog.is_some() {
+            self.say_info("a file dialog is already open — answer it first.");
+            return;
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        if cfg!(test) {
+            let _ = sender.send(DialogAnswer::Cancelled);
+        } else {
+            std::thread::spawn(move || {
+                let _ = sender.send(run());
+            });
+        }
+        self.pending_dialog = Some((receiver, Box::new(apply)));
+    }
+
+    /// The answer to a pending dialog, applied the frame it arrives.
+    fn run_pending_dialog(&mut self) {
+        let Some((receiver, apply)) = self.pending_dialog.take() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(answer) => apply(self, answer),
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.pending_dialog = Some((receiver, apply));
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.say_info("nothing chosen.");
+            }
+        }
+    }
+
+    fn pick_file_deferred(
+        &mut self,
+        configure: impl FnOnce(rfd::FileDialog) -> rfd::FileDialog + Send + 'static,
+        on_picked: impl FnOnce(&mut PagifyApp, std::path::PathBuf) + 'static,
+    ) {
+        self.defer_dialog(
+            move || match configure(rfd::FileDialog::new()).pick_file() {
+                Some(path) => DialogAnswer::File(path),
+                None => DialogAnswer::Cancelled,
+            },
+            move |app, answer| match answer {
+                DialogAnswer::File(path) => on_picked(app, path),
+                _ => app.say_info("nothing chosen."),
+            },
+        );
+    }
+
+    fn pick_files_deferred(
+        &mut self,
+        configure: impl FnOnce(rfd::FileDialog) -> rfd::FileDialog + Send + 'static,
+        on_picked: impl FnOnce(&mut PagifyApp, Vec<std::path::PathBuf>) + 'static,
+    ) {
+        self.defer_dialog(
+            move || match configure(rfd::FileDialog::new()).pick_files() {
+                Some(paths) => DialogAnswer::Files(paths),
+                None => DialogAnswer::Cancelled,
+            },
+            move |app, answer| match answer {
+                DialogAnswer::Files(paths) => on_picked(app, paths),
+                _ => app.say_info("nothing chosen."),
+            },
+        );
+    }
+
+    fn pick_folder_deferred(
+        &mut self,
+        configure: impl FnOnce(rfd::FileDialog) -> rfd::FileDialog + Send + 'static,
+        on_picked: impl FnOnce(&mut PagifyApp, std::path::PathBuf) + 'static,
+    ) {
+        self.defer_dialog(
+            move || match configure(rfd::FileDialog::new()).pick_folder() {
+                Some(folder) => DialogAnswer::Folder(folder),
+                None => DialogAnswer::Cancelled,
+            },
+            move |app, answer| match answer {
+                DialogAnswer::Folder(folder) => on_picked(app, folder),
+                _ => app.say_info("nothing chosen."),
+            },
+        );
+    }
+
+    fn save_file_deferred(
+        &mut self,
+        configure: impl FnOnce(rfd::FileDialog) -> rfd::FileDialog + Send + 'static,
+        on_picked: impl FnOnce(&mut PagifyApp, std::path::PathBuf) + 'static,
+    ) {
+        self.defer_dialog(
+            move || match configure(rfd::FileDialog::new()).save_file() {
+                Some(path) => DialogAnswer::Save(path),
+                None => DialogAnswer::Cancelled,
+            },
+            move |app, answer| match answer {
+                DialogAnswer::Save(path) => on_picked(app, path),
+                _ => app.say_info("nothing chosen."),
+            },
+        );
+    }
+
     fn draw_left_rail(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, backstage: bool) -> Option<usize> {
         // -- thumbnails ----------------------------------------------------------
         let mut jump_to = None;
@@ -4205,6 +4340,7 @@ impl PagifyApp {
             prefs_state: PrefsState { ortho: false, defaults: tools::Defaults::default(), draw_fill: false, snaps: SnapSet::defaults(), grid_pt: 0.0, },
             render_state: RenderState { renders: None, async_render: !cfg!(test), render_stats: RenderStats::default(), },
             ui_state: UiState { show_thumbs: true, show_contents: false, organize_open: false, show_layers: false, command_open: false, errors_said: 0, },
+            pending_dialog: None,
             clipboard_state: ClipboardState { object_clipboard: None, paste_count: 0, page_clipboard: None, paste_ghost: None, clipboard_dir: if cfg!(test) {
                 static APPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 std::env::temp_dir().join(format!(
@@ -5256,13 +5392,10 @@ impl PagifyApp {
 
     /// Ask for a picture file, and keep whatever is chosen as a signature.
     fn upload_signature_dialog(&mut self) {
-        let dialog = rfd::FileDialog::new()
-            .set_title("Upload a signature")
-            .add_filter("Picture", &["png", "jpg", "jpeg"]);
-        match dialog.pick_file() {
-            Some(path) => self.upload_signature(&path),
-            None => self.say_info("nothing chosen."),
-        }
+        self.pick_file_deferred(
+            |dialog| dialog.set_title("Upload a signature").add_filter("Picture", &["png", "jpg", "jpeg"]),
+            |app, path| app.upload_signature(&path),
+        );
     }
 
     /// Decode a picture file and keep it as a signature.
@@ -8925,13 +9058,10 @@ impl PagifyApp {
             self.say_error("nothing open.");
             return;
         }
-        let dialog = rfd::FileDialog::new()
-            .set_title("Compare this document against another PDF")
-            .add_filter("PDF", &["pdf"]);
-        match dialog.pick_file() {
-            Some(path) => self.compare_with(&path),
-            None => self.say_info("nothing chosen."),
-        }
+        self.pick_file_deferred(
+            |dialog| dialog.set_title("Compare this document against another PDF").add_filter("PDF", &["pdf"]),
+            |app, path| app.compare_with(&path),
+        );
     }
 
     /// ⌘C on what Edit Object has picked.
@@ -9731,17 +9861,17 @@ impl PagifyApp {
             .and_then(|e| e.path.parent().map(|p| p.to_path_buf()))
             .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
 
-        let mut dialog = rfd::FileDialog::new()
-            .set_title("Open a PDF")
-            .add_filter("PDF", &["pdf"]);
-        if let Some(start) = start {
-            dialog = dialog.set_directory(start);
-        }
-
-        match dialog.pick_file() {
-            Some(path) => self.open(&path.to_string_lossy()),
-            None => self.say_info("nothing chosen."),
-        }
+        self.pick_file_deferred(
+            move |dialog| {
+                let mut dialog =
+                    dialog.set_title("Open a PDF").add_filter("PDF", &["pdf"]);
+                if let Some(start) = start {
+                    dialog = dialog.set_directory(start);
+                }
+                dialog
+            },
+            |app, path| app.open(&path.to_string_lossy()),
+        );
     }
 
     /// Ctrl+P — the native Print dialog on Windows. Not yet available on
@@ -9810,20 +9940,20 @@ impl PagifyApp {
         };
         let current = doc.session.path().to_path_buf();
 
-        let mut dialog = rfd::FileDialog::new().set_title("Save As").add_filter("PDF", &["pdf"]);
-        if let Some(dir) = current.parent() {
-            dialog = dialog.set_directory(dir);
-        }
-        if let Some(name) = current.file_name() {
-            dialog = dialog.set_file_name(name.to_string_lossy());
-        }
-
-        match dialog.save_file() {
-            Some(path) => {
-                self.save(Some(path));
-            }
-            None => self.say_info("nothing chosen."),
-        }
+        self.save_file_deferred(
+            move |dialog| {
+                let mut dialog =
+                    dialog.set_title("Save As").add_filter("PDF", &["pdf"]);
+                if let Some(dir) = current.parent() {
+                    dialog = dialog.set_directory(dir);
+                }
+                if let Some(name) = current.file_name() {
+                    dialog = dialog.set_file_name(name.to_string_lossy());
+                }
+                dialog
+            },
+            |app, path| { app.save(Some(path)); }
+        );
     }
 
     /// Every candidate outlined-text font: what this build bundles, plus
@@ -9839,14 +9969,10 @@ impl PagifyApp {
     }
 
     fn outlined_font_dialog(&mut self) {
-        let dialog = rfd::FileDialog::new()
-            .set_title("Add a font for outlined-text recognition")
-            .add_filter("Fonts", &["ttf", "otf", "ttc"]);
-
-        match dialog.pick_file() {
-            Some(path) => self.add_outlined_font(path),
-            None => self.say_info("nothing chosen."),
-        }
+        self.pick_file_deferred(
+            |dialog| dialog.set_title("Add a font for outlined-text recognition").add_filter("Fonts", &["ttf", "otf", "ttc"]),
+            |app, path| app.add_outlined_font(path),
+        );
     }
 
     fn add_outlined_font(&mut self, path: PathBuf) {
@@ -11451,22 +11577,22 @@ impl PagifyApp {
         match choice {
             Choice::Cancel => self.say_info("not saved."),
             Choice::SaveCopy => {
-                let mut dialog = rfd::FileDialog::new()
-                    .set_title("Save a secured copy")
-                    .add_filter("PDF", &["pdf"]);
-                if let Some(dir) = original.parent() {
-                    dialog = dialog.set_directory(dir);
-                }
-                let suggested = original
-                    .file_stem()
-                    .map(|s| format!("{} (secured).pdf", s.to_string_lossy()))
-                    .unwrap_or_else(|| "secured.pdf".to_string());
-                match dialog.set_file_name(&suggested).save_file() {
-                    Some(dest) => {
-                        self.save(Some(dest));
-                    }
-                    None => self.say_info("not saved."),
-                }
+                self.save_file_deferred(
+                    move |dialog| {
+                        let mut dialog = dialog
+                            .set_title("Save a secured copy")
+                            .add_filter("PDF", &["pdf"]);
+                        if let Some(dir) = original.parent() {
+                            dialog = dialog.set_directory(dir);
+                        }
+                        let suggested = original
+                            .file_stem()
+                            .map(|s| format!("{} (secured).pdf", s.to_string_lossy()))
+                            .unwrap_or_else(|| "secured.pdf".to_string());
+                        dialog.set_file_name(suggested)
+                    },
+                    |app, dest| { app.save(Some(dest)); }
+                );
             }
             Choice::DropPassword => {
                 let dropped = self.tab_mut().doc.as_ref().map(|d| d.session.unsecure_document());
@@ -13673,13 +13799,10 @@ impl PagifyApp {
     }
 
     fn add_image_dialog(&mut self) {
-        let dialog = rfd::FileDialog::new()
-            .set_title("Add an image")
-            .add_filter("Picture", &["png", "jpg", "jpeg"]);
-        match dialog.pick_file() {
-            Some(path) => self.add_image(&path),
-            None => self.say_info("nothing chosen."),
-        }
+        self.pick_file_deferred(
+            |dialog| dialog.set_title("Add an image").add_filter("Picture", &["png", "jpg", "jpeg"]),
+            |app, path| app.add_image(&path),
+        );
     }
 
     /// Decode a picture file and arm it, waiting for a click to place it at.
@@ -13914,16 +14037,13 @@ impl PagifyApp {
             self.say_error("nothing open.");
             return;
         }
-        let dialog = rfd::FileDialog::new()
-            .set_title("Insert pages from another PDF")
-            .add_filter("PDF", &["pdf"]);
-        match dialog.pick_file() {
-            Some(path) => {
-                let at = self.page_after_selection();
-                self.import_at(&path, "all", at);
-            }
-            None => self.say_info("nothing chosen."),
-        }
+        self.pick_file_deferred(
+            |dialog| dialog.set_title("Insert pages from another PDF").add_filter("PDF", &["pdf"]),
+            |app, path| {
+                let at = app.page_after_selection();
+                app.import_at(&path, "all", at);
+            },
+        );
     }
 
     /// Where pages inserted "here" go: just after the last selected page, or
@@ -14042,13 +14162,10 @@ impl PagifyApp {
             self.say_error("nothing open.");
             return;
         }
-        let dialog = rfd::FileDialog::new()
-            .set_title("Replace this page with a page from another PDF")
-            .add_filter("PDF", &["pdf"]);
-        match dialog.pick_file() {
-            Some(path) => self.replace_pages(&path, "1"),
-            None => self.say_info("nothing chosen."),
-        }
+        self.pick_file_deferred(
+            |dialog| dialog.set_title("Replace this page with a page from another PDF").add_filter("PDF", &["pdf"]),
+            |app, path| app.replace_pages(&path, "1"),
+        );
     }
 
     /// The Organize tab's Interleaving button, bare: choose the file, then
@@ -14058,13 +14175,10 @@ impl PagifyApp {
             self.say_error("nothing open.");
             return;
         }
-        let dialog = rfd::FileDialog::new()
-            .set_title("Interleave pages from another PDF")
-            .add_filter("PDF", &["pdf"]);
-        match dialog.pick_file() {
-            Some(path) => self.interleave_pages(&path, "all"),
-            None => self.say_info("nothing chosen."),
-        }
+        self.pick_file_deferred(
+            |dialog| dialog.set_title("Interleave pages from another PDF").add_filter("PDF", &["pdf"]),
+            |app, path| app.interleave_pages(&path, "all"),
+        );
     }
 
     /// The document's own name, for naming what an export writes beside it.
@@ -14144,11 +14258,10 @@ impl PagifyApp {
             self.say_error("nothing open.");
             return;
         }
-        let dialog = rfd::FileDialog::new().set_title("Choose a folder for the page images");
-        match dialog.pick_folder() {
-            Some(folder) => self.export_images(&folder),
-            None => self.say_info("nothing chosen."),
-        }
+        self.pick_folder_deferred(
+            |dialog| dialog.set_title("Choose a folder for the page images"),
+            |app, folder| app.export_images(&folder),
+        );
     }
 
     /// Write the document's text as a plain file — the Conversion tab's To
@@ -14183,14 +14296,16 @@ impl PagifyApp {
             self.say_error("nothing open.");
             return;
         }
-        let dialog = rfd::FileDialog::new()
-            .set_title("Write the document's text")
-            .set_file_name(format!("{}.txt", self.document_stem()))
-            .add_filter("Text", &["txt", "rtf", "xml"]);
-        match dialog.save_file() {
-            Some(path) => self.export_other(&path),
-            None => self.say_info("nothing chosen."),
-        }
+        let name = format!("{}.txt", self.document_stem());
+        self.save_file_deferred(
+            move |dialog| {
+                dialog
+                    .set_title("Write the document's text")
+                    .set_file_name(name)
+                    .add_filter("Text", &["txt", "rtf", "xml"])
+            },
+            |app, path| app.export_other(&path),
+        );
     }
 
     /// The Conversion tab's To HTML, bare: choose the file, then write the
@@ -14200,14 +14315,16 @@ impl PagifyApp {
             self.say_error("nothing open.");
             return;
         }
-        let dialog = rfd::FileDialog::new()
-            .set_title("Write the document's text as HTML")
-            .set_file_name(format!("{}.html", self.document_stem()))
-            .add_filter("HTML", &["html"]);
-        match dialog.save_file() {
-            Some(path) => self.export_html(&path),
-            None => self.say_info("nothing chosen."),
-        }
+        let name = format!("{}.html", self.document_stem());
+        self.save_file_deferred(
+            move |dialog| {
+                dialog
+                    .set_title("Write the document's text as HTML")
+                    .set_file_name(name)
+                    .add_filter("HTML", &["html"])
+            },
+            |app, path| app.export_html(&path),
+        );
     }
 
     /// Write the document out as several files, `every` pages each — the
@@ -14261,11 +14378,10 @@ impl PagifyApp {
             self.say_error("nothing open.");
             return;
         }
-        let dialog = rfd::FileDialog::new().set_title("Choose a folder for the split files");
-        match dialog.pick_folder() {
-            Some(folder) => self.split_pages(1, &folder),
-            None => self.say_info("nothing chosen."),
-        }
+        self.pick_folder_deferred(
+            |dialog| dialog.set_title("Choose a folder for the split files"),
+            |app, folder| app.split_pages(1, &folder),
+        );
     }
 
     /// Start a new document out of nothing — the Convert tab's Blank.
@@ -14411,13 +14527,10 @@ impl PagifyApp {
     /// The Convert tab's Combine Files button, bare: choose the PDFs, then
     /// merge them in the order chosen.
     fn combine_dialog(&mut self) {
-        let dialog = rfd::FileDialog::new()
-            .set_title("Choose PDFs to combine")
-            .add_filter("PDF", &["pdf"]);
-        match dialog.pick_files() {
-            Some(paths) => self.combine_files(&paths),
-            None => self.say_info("nothing chosen."),
-        }
+        self.pick_files_deferred(
+            |dialog| dialog.set_title("Choose PDFs to combine").add_filter("PDF", &["pdf"]),
+            |app, paths| app.combine_files(&paths),
+        );
     }
 
     /// Write the same words on every page — the Page phase's Page Marks.
@@ -14518,13 +14631,10 @@ impl PagifyApp {
     /// The Convert tab's From Template button, bare: choose the file, then
     /// open a copy of it.
     fn from_template_dialog(&mut self) {
-        let dialog = rfd::FileDialog::new()
-            .set_title("Choose a PDF to start from")
-            .add_filter("PDF", &["pdf"]);
-        match dialog.pick_file() {
-            Some(path) => self.open_template(&path),
-            None => self.say_info("nothing chosen."),
-        }
+        self.pick_file_deferred(
+            |dialog| dialog.set_title("Choose a PDF to start from").add_filter("PDF", &["pdf"]),
+            |app, path| app.open_template(&path),
+        );
     }
 
     /// Write every form field's name, kind and value as JSON — the Form
@@ -14556,14 +14666,16 @@ impl PagifyApp {
             self.say_error("nothing open.");
             return;
         }
-        let dialog = rfd::FileDialog::new()
-            .set_title("Write the form data")
-            .set_file_name(format!("{}-form.json", self.document_stem()))
-            .add_filter("Form data", &["json"]);
-        match dialog.save_file() {
-            Some(path) => self.export_form_data(&path),
-            None => self.say_info("nothing chosen."),
-        }
+        let name = format!("{}-form.json", self.document_stem());
+        self.save_file_deferred(
+            move |dialog| {
+                dialog
+                    .set_title("Write the form data")
+                    .set_file_name(name)
+                    .add_filter("Form data", &["json"])
+            },
+            |app, path| app.export_form_data(&path),
+        );
     }
 
     /// Read form JSON and apply what this build can set — the Form tab's
@@ -14606,13 +14718,10 @@ impl PagifyApp {
             self.say_error("nothing open.");
             return;
         }
-        let dialog = rfd::FileDialog::new()
-            .set_title("Read form data")
-            .add_filter("Form data", &["json"]);
-        match dialog.pick_file() {
-            Some(path) => self.import_form_data(&path),
-            None => self.say_info("nothing chosen."),
-        }
+        self.pick_file_deferred(
+            |dialog| dialog.set_title("Read form data").add_filter("Form data", &["json"]),
+            |app, path| app.import_form_data(&path),
+        );
     }
 
     /// Write every field as CSV — the Form tab's Form to Sheet.
@@ -14642,14 +14751,16 @@ impl PagifyApp {
             self.say_error("nothing open.");
             return;
         }
-        let dialog = rfd::FileDialog::new()
-            .set_title("Write the form as a sheet")
-            .set_file_name(format!("{}-sheet.csv", self.document_stem()))
-            .add_filter("CSV", &["csv"]);
-        match dialog.save_file() {
-            Some(path) => self.form_to_sheet(&path),
-            None => self.say_info("nothing chosen."),
-        }
+        let name = format!("{}-sheet.csv", self.document_stem());
+        self.save_file_deferred(
+            move |dialog| {
+                dialog
+                    .set_title("Write the form as a sheet")
+                    .set_file_name(name)
+                    .add_filter("CSV", &["csv"])
+            },
+            |app, path| app.form_to_sheet(&path),
+        );
     }
 
     /// Set a field's tooltip — the Form tab's Add Tooltip.
@@ -14961,11 +15072,10 @@ impl PagifyApp {
             self.say_error("nothing open.");
             return;
         }
-        let dialog = rfd::FileDialog::new().set_title("Choose a file to attach");
-        match dialog.pick_file() {
-            Some(path) => self.attach_file(&path),
-            None => self.say_info("nothing chosen."),
-        }
+        self.pick_file_deferred(
+            |dialog| dialog.set_title("Choose a file to attach"),
+            |app, path| app.attach_file(&path),
+        );
     }
 
     /// Attach a file to the page in view as a file-attachment annotation —
@@ -15013,11 +15123,10 @@ impl PagifyApp {
             self.say_error("nothing open.");
             return;
         }
-        let dialog = rfd::FileDialog::new().set_title("Choose a file to attach to this page");
-        match dialog.pick_file() {
-            Some(path) => self.attach_comment(&path),
-            None => self.say_info("nothing chosen."),
-        }
+        self.pick_file_deferred(
+            |dialog| dialog.set_title("Choose a file to attach to this page"),
+            |app, path| app.attach_comment(&path),
+        );
     }
 
     /// The `fromclipboard` wait: ask the platform once, then take the text
@@ -15208,14 +15317,16 @@ impl PagifyApp {
             self.say_error("nothing open.");
             return;
         }
-        let dialog = rfd::FileDialog::new()
-            .set_title("Write the accessibility report")
-            .set_file_name(format!("{}-accessibility.html", self.document_stem()))
-            .add_filter("HTML", &["html"]);
-        match dialog.save_file() {
-            Some(path) => self.write_access_report(&path),
-            None => self.say_info("nothing chosen."),
-        }
+        let name = format!("{}-accessibility.html", self.document_stem());
+        self.save_file_deferred(
+            move |dialog| {
+                dialog
+                    .set_title("Write the accessibility report")
+                    .set_file_name(name)
+                    .add_filter("HTML", &["html"])
+            },
+            |app, path| app.write_access_report(&path),
+        );
     }
 
     /// Auto Create Bookmarks — the Navigation tab's button: one bookmark per
@@ -15370,11 +15481,10 @@ impl PagifyApp {
             self.say_error("nothing open.");
             return;
         }
-        let dialog = rfd::FileDialog::new().set_title("Choose a folder for the images");
-        match dialog.pick_folder() {
-            Some(folder) => self.export_pictures(&folder),
-            None => self.say_info("nothing chosen."),
-        }
+        self.pick_folder_deferred(
+            |dialog| dialog.set_title("Choose a folder for the images"),
+            |app, folder| app.export_pictures(&folder),
+        );
     }
 
     /// Make a new document out of picture files — the Convert tab's From
@@ -15499,13 +15609,10 @@ impl PagifyApp {
     /// The Convert tab's From Files button, bare: choose the pictures, then
     /// make the document in the order chosen.
     fn from_files_dialog(&mut self) {
-        let dialog = rfd::FileDialog::new()
-            .set_title("Choose pictures to make a PDF from")
-            .add_filter("Pictures", &["png", "jpg", "jpeg"]);
-        match dialog.pick_files() {
-            Some(paths) => self.make_pdf_from_pictures(&paths),
-            None => self.say_info("nothing chosen."),
-        }
+        self.pick_files_deferred(
+            |dialog| dialog.set_title("Choose pictures to make a PDF from").add_filter("Pictures", &["png", "jpg", "jpeg"]),
+            |app, paths| app.make_pdf_from_pictures(&paths),
+        );
     }
 
     /// The annotation under a point, if any.
@@ -16663,6 +16770,9 @@ impl eframe::App for PagifyApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let command_id = self.command_id();
+        // A file dialog's answer, the frame it arrives — see
+        // `defer_dialog` for why the dialog itself does not run here.
+        self.run_pending_dialog();
         self.draw_frame_preamble(&ctx);
         self.handle_input(&ctx, frame, command_id);
         let mut submitted = None;

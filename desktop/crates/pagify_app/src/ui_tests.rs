@@ -6112,3 +6112,29 @@ fn contents_opens_the_files_table_of_contents_in_the_rail() {
     h.run_steps(2);
     assert!(!h.state().ui_state.show_contents, "the panel did not close");
 }
+
+/// **File dialogs run on their own thread.** `open` used to run the OS
+/// dialog on the frame thread, freezing the window while it was up (the OS
+/// drew "not responding" over it — reported from use). The command now
+/// returns with the dialog pending; the answer is applied when it arrives,
+/// and a second dialog is refused while one is open.
+#[test]
+fn a_file_dialog_never_blocks_the_frame() {
+    let mut h = harness("pages-ladder.pdf");
+    h.state_mut().submit("open");
+    // This line runs at all only because the command did not block.
+    assert!(h.state().pending_dialog.is_some(), "no dialog was left pending");
+    // A second dialog while one is open is refused, not queued.
+    h.state_mut().submit("interleave");
+    h.run_steps(2);
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(
+        said.iter().any(|l| l.contains("already open")),
+        "the busy guard did not answer: {said:?}"
+    );
+    assert!(
+        said.iter().any(|l| l.contains("nothing chosen.")),
+        "the harness answer must apply: {said:?}"
+    );
+    assert!(h.state().pending_dialog.is_none(), "the answer did not clear the dialog");
+}
