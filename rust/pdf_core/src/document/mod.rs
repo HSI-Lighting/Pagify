@@ -978,6 +978,13 @@ pub trait Document: Send + Sync {
         Err(PdfError::Unsupported("listing what a page draws"))
     }
 
+    /// Some of a page's pictures and shapes, lifted out of its content stream
+    /// into a one-page clip that draws exactly them — the page's own operators
+    /// and original images, not a picture of them. Words are refused.
+    fn lift_objects(&self, _page_index: usize, _objects: &[usize]) -> Result<Lifted> {
+        Err(PdfError::Unsupported("copying drawings as lines"))
+    }
+
     /// The paths of a page — exactly the entries of [`Document::drawn_objects`]
     /// whose kind is [`DrawnKind::Shape`], the same ones in the same order — for
     /// a caller that has no use for the rest.
@@ -1348,6 +1355,14 @@ pub trait DocumentMut {
     /// See [`Document::remove_object`].
     fn remove_object_mut(&mut self, _page_index: usize, _object: usize) -> Result<()> {
         Err(PdfError::Unsupported("removing an object from this page"))
+    }
+
+    /// Put a lifted clip ([`Document::lift_objects`]) down on a page, its
+    /// operators written into the page's own drawing so each pasted line is a
+    /// shape of the page's, centred on `at` (page points, top-left origin).
+    /// Checked before it is kept; a refusal changes nothing.
+    fn paste_lifted_mut(&mut self, _page_index: usize, _lifted: &[u8], _at: Point) -> Result<()> {
+        Err(PdfError::Unsupported("pasting drawings as lines"))
     }
 
     /// See [`Document::remove_objects`].
@@ -2484,6 +2499,17 @@ impl DrawnKind {
             DrawnKind::Group => "group",
         }
     }
+}
+
+/// Drawn objects lifted off a page: see [`Document::lift_objects`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lifted {
+    /// A one-page PDF that draws exactly the lifted objects, where they were.
+    pub pdf: Vec<u8>,
+    /// The union of their bounds, in page points with a top-left origin.
+    pub rect: Rect,
+    /// How many page objects the clip draws (a picture brings its frame).
+    pub objects: usize,
 }
 
 /// One thing drawn on a page, in the order the page draws it.

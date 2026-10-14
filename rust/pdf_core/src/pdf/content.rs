@@ -137,7 +137,7 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<Operation>> {
 }
 
 /// Past an inline image, to just after its `EI`.
-fn skip_inline_image(bytes: &[u8], from: usize) -> Result<usize> {
+pub(super) fn skip_inline_image(bytes: &[u8], from: usize) -> Result<usize> {
     // The data begins after `ID` and one whitespace byte.
     let id = bytes[from..]
         .windows(2)

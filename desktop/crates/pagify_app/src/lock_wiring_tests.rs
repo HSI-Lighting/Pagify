@@ -3885,7 +3885,14 @@ fn copying_a_group_overwrites_whatever_was_copied_before_it() {
     app.paste_object_selection();
     app.place_paste_ghost(0, AppPoint { x: 500.0, y: 500.0 });
 
-    let placed = app.tab_mut().doc.as_ref().expect("open").session.placed_image_marks(0).expect("marks");
+    // Since 0.1.70 the two pictures go down as the page's own pictures
+    // (copied as lines): the last two things the page draws.
+    let drawn = app.tab_mut().doc.as_ref().expect("open").session.drawn_objects(0).expect("drawn");
+    let top: Vec<_> = drawn.iter().filter(|d| d.depth == 0).collect();
+    let placed: Vec<_> = top[top.len().saturating_sub(2)..]
+        .iter()
+        .filter(|d| d.kind == pdf_core::document::DrawnKind::Picture)
+        .collect();
     assert_eq!(placed.len(), 2, "both group members should have been pasted, not just the one copied earlier");
     assert!(
         (placed[0].rect.left - placed[1].rect.left).abs() > 1.0 || (placed[0].rect.top - placed[1].rect.top).abs() > 1.0,

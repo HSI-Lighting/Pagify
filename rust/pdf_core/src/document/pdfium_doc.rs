@@ -34,6 +34,8 @@ use crate::error::{classify_pdfium_load_error, PdfError, Result};
 use crate::render::bitmap::{self, Bitmap, PixelOrder};
 use crate::render::{RegionPixels, RenderTarget};
 
+mod lift;
+
 /// The process-wide PDFium binding.
 ///
 /// Leaked deliberately. PDFium's own `FPDF_InitLibrary`/`DestroyLibrary` pair is
@@ -208,6 +210,13 @@ pub struct PdfiumDocument {
     /// The failure is kept, as its message, until something rewrites the
     /// attachment or reopens the document.
     vault: std::sync::Mutex<Option<CachedVault>>,
+    /// What [`Document::run_font_data`] made of each cmap-less font program,
+    /// keyed by a hash of the program: the same font with a `cmap` added, or
+    /// `None` where none could be made. **Asking is a serialisation of the
+    /// document and a parse of the page** (~100 ms), and a copied paragraph asks
+    /// once per word of one font — measured at +2.9 s on a whole-page copy before
+    /// this was kept.
+    mended_fonts: std::sync::Mutex<HashMap<u64, Option<Vec<u8>>>>,
     /// Fonts a caller has offered for typing characters the document's own
     /// fonts cannot spell.
     ///
@@ -746,6 +755,7 @@ impl PdfiumDocument {
             page_count,
             dirty: false,
             vault: std::sync::Mutex::new(None),
+            mended_fonts: std::sync::Mutex::new(HashMap::new()),
             already_secured: password.is_some_and(|p| !p.is_empty()),
             remove_password: false,
             secure_plus: false,
@@ -1070,6 +1080,28 @@ impl Document for PdfiumDocument {
         // export writes the directory out of order — see `sort_table_directory`.
         // Done here so no caller has to remember to.
         crate::pdf::subset::sort_table_directory(&mut buffer);
+        // **A CID subset with no `cmap` shapes every letter to glyph 0**, the
+        // empty box (see `add_unicode_cmap`). It is given one from what the PDF
+        // says each glyph spells; the look-up is paid only by such a font.
+        if ttf_parser::Face::parse(&buffer, 0).is_ok_and(|face| face.tables().cmap.is_none()) {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            buffer.hash(&mut hasher);
+            let key = hasher.finish();
+            let held = self.mended_fonts.lock().ok().and_then(|held| held.get(&key).cloned());
+            let mended = held.unwrap_or_else(|| {
+                let made = self
+                    .unicode_glyphs_of_run(page_index, object)
+                    .and_then(|glyphs| crate::pdf::subset::add_unicode_cmap(&buffer, &glyphs));
+                if let Ok(mut held) = self.mended_fonts.lock() {
+                    held.insert(key, made.clone());
+                }
+                made
+            });
+            if let Some(mended) = mended {
+                return Ok(Some(mended));
+            }
+        }
         Ok(Some(buffer))
     }
 
@@ -2134,6 +2166,10 @@ impl Document for PdfiumDocument {
         }
         let rewritten = Self::write_edit(&base, &file, &replacements, &[])?;
         self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
+    }
+
+    fn lift_objects(&self, page_index: usize, objects: &[usize]) -> Result<crate::document::Lifted> {
+        self.lift(page_index, objects)
     }
 
     fn drawn_objects(&self, page_index: usize) -> Result<Vec<crate::document::DrawnObject>> {
@@ -4638,6 +4674,10 @@ impl DocumentMut for PdfiumDocument {
 
     fn remove_objects_mut(&mut self, page_index: usize, objects: &[usize]) -> Result<()> {
         <Self as Document>::remove_objects(self, page_index, objects)
+    }
+
+    fn paste_lifted_mut(&mut self, page_index: usize, lifted: &[u8], at: crate::document::Point) -> Result<()> {
+        self.paste_lifted(page_index, lifted, at)
     }
 
     fn split_run_into_characters_mut(&mut self, page_index: usize, object: usize) -> Result<()> {
@@ -7610,7 +7650,6 @@ fn font_to_unicode(
         let before = Self::open_bytes(before.to_vec(), None)?;
         let after = Self::open_bytes(after.to_vec(), None)?;
         let page_index = request.page_index;
-        let size = before.page_size(page_index)?;
         let area = request.area;
 
         let outside = |run: &crate::document::TextRun| !crate::document::redact::overlaps(&run.rect, &area);
@@ -7625,38 +7664,7 @@ fn font_to_unicode(
             )));
         }
 
-        let render = |doc: &PdfiumDocument| -> Result<crate::render::Bitmap> {
-            doc.page(page_index)?.render_region(&RegionRequest {
-                crop: Rect { left: 0.0, top: 0.0, right: size.width_pt, bottom: size.height_pt },
-                scale: 1.0,
-                ..RegionRequest::default()
-            })
-        };
-        let (a, b) = (render(&before)?, render(&after)?);
-        if (a.width, a.height) != (b.width, b.height) {
-            return Ok(Some("the page changed size".to_string()));
-        }
-        // The mark's own edge is not damage, so a few points round the area are
-        // not looked at.
-        const MARGIN: f32 = 4.0;
-        let mut changed = 0usize;
-        for y in 0..a.height as usize {
-            for x in 0..a.width as usize {
-                let (px, py) = (x as f32, y as f32);
-                if px >= area.left - MARGIN && px <= area.right + MARGIN && py >= area.top - MARGIN && py <= area.bottom + MARGIN {
-                    continue;
-                }
-                let at = y * a.stride + x * 4;
-                let difference: i32 = (0..3).map(|c| (i32::from(a.data[at + c]) - i32::from(b.data[at + c])).abs()).sum();
-                if difference > 30 {
-                    changed += 1;
-                }
-            }
-        }
-        // Antialiasing differences are a handful of pixels; a regenerated page
-        // is thousands.
-        let allowed = (a.width as usize * a.height as usize) / 10_000;
-        Ok((changed > allowed).then(|| format!("{changed} pixels outside the area changed")))
+        changed_outside(&before, &after, page_index, area)
     }
 
 /// The font dictionary in force for a page, inherited if need be.
@@ -9172,6 +9180,71 @@ fn font_to_unicode(
             out.insert(run.object, spaced_text(&run.text, &owner, &spellings));
         }
         Ok(out)
+    }
+
+    /// Which glyph of `object`'s font each character is, as the PDF says it:
+    /// `/ToUnicode` gives a code's character, and for an `/Identity-H` (or `-V`)
+    /// TrueType CID font the code is the CID and `/CIDToGIDMap` gives its glyph.
+    /// `None` for any other kind of font, or a map this cannot read — never a
+    /// guess. Where two codes spell one character, the lowest code's glyph.
+    fn unicode_glyphs_of_run(&self, page_index: usize, object: usize) -> Option<std::collections::BTreeMap<char, u16>> {
+        use crate::pdf::{content, Object};
+        let base = self.edit_base().ok()?;
+        let bytes = &base.bytes;
+        let file = crate::pdf::File::parse(bytes).ok()?;
+        let page = self.page_object(&file, page_index).ok()?;
+        let (stream, _) = self.page_content(&file, &page).ok()?;
+        let fonts = self.page_fonts(&file, &page)?;
+        let operations = content::parse(&stream).ok()?;
+        let placed = content::placed(&operations);
+
+        // The run's font resource, found as `exact_run_texts` finds it.
+        let height = self.page_size(page_index).ok()?.height_pt;
+        let run = self.text_runs_some(page_index, &HashSet::from([object])).ok()?.into_iter().next()?;
+        let text_objects = self.text_objects_in_order(page_index).unwrap_or_default();
+        let order = text_objects.binary_search(&object).ok().map(|which| (which, text_objects.len()));
+        let codes_in = |p: &content::Placed| codes_drawn(&file, Some(&fonts), &operations, p);
+        let found = self.operator_of(page_index, &run, height, &placed, order, &codes_in, &mut None).ok()?;
+        let name = found.font.as_ref()?;
+
+        let resolved = |entry: Option<&Object>| entry.and_then(|e| file.resolve(e).ok());
+        let font = resolved(fonts.get(name))?;
+        let font = font.as_dict()?;
+        if !matches!(resolved(font.get(b"Encoding")).as_ref().and_then(Object::as_name), Some(b"Identity-H" | b"Identity-V")) {
+            return None;
+        }
+        let Some(Object::Array(descendants)) = resolved(font.get(b"DescendantFonts")) else { return None };
+        let cid_font = resolved(descendants.first())?;
+        let cid_font = cid_font.as_dict()?;
+        if resolved(cid_font.get(b"Subtype")).as_ref().and_then(Object::as_name) != Some(b"CIDFontType2") {
+            return None;
+        }
+        // Absent, the map is `/Identity` (ISO 32000-1 §9.7.4.2): glyph = CID.
+        let map = match resolved(cid_font.get(b"CIDToGIDMap")) {
+            None => None,
+            Some(Object::Name(identity)) if identity == b"Identity" => None,
+            Some(Object::Stream(dict, range)) => Some(content::decode(&dict, bytes.get(range)?)?),
+            Some(_) => return None,
+        };
+        let unicode = Self::font_to_unicode(&file, bytes, &fonts, name)?;
+
+        let mut glyphs = std::collections::BTreeMap::new();
+        for (&code, text) in &unicode {
+            let mut chars = text.chars();
+            let (Some(c), None) = (chars.next(), chars.next()) else { continue };
+            let glyph = match &map {
+                None => u16::try_from(code).ok(),
+                Some(map) => {
+                    let at = code as usize * 2;
+                    map.get(at..at + 2).map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+                }
+            };
+            if let Some(glyph) = glyph.filter(|&g| g != 0) {
+                // In code order, so the lowest code's glyph is the one kept.
+                glyphs.entry(c).or_insert(glyph);
+            }
+        }
+        Some(glyphs)
     }
 
     /// The content-stream edit, exposed so a probe can ask *why* it refused.
@@ -14511,6 +14584,54 @@ struct TextCut {
     /// Which characters the area covers.
     covered: Vec<bool>,
 }
+
+/// Whether a page changed outside `area` (page points, top-left origin):
+/// rendered whole at scale 1 before and after, and a pixel counts when its
+/// channels differ by more than 30 in all. A few points round the area are not
+/// looked at (an edit's own edge is not damage), and antialiasing is allowed
+/// for: a page regenerated by mistake changes thousands of pixels, not one in
+/// ten thousand. Factored out of redact's harm check for the paste's.
+///
+/// The area is turned with the page, so a page with `/Rotate` is looked at
+/// where its area is drawn, not where it would be unturned.
+fn changed_outside(
+    before: &PdfiumDocument,
+    after: &PdfiumDocument,
+    page_index: usize,
+    area: Rect,
+) -> Result<Option<String>> {
+    let size = before.page_size(page_index)?;
+    let render = |doc: &PdfiumDocument| -> Result<crate::render::Bitmap> {
+        doc.page(page_index)?.render_region(&RegionRequest {
+            crop: Rect { left: 0.0, top: 0.0, right: size.width_pt, bottom: size.height_pt },
+            scale: 1.0,
+            ..RegionRequest::default()
+        })
+    };
+    let (a, b) = (render(before)?, render(after)?);
+    if (a.width, a.height) != (b.width, b.height) {
+        return Ok(Some("the page changed size".to_string()));
+    }
+    let area = before.displayed(page_index, area)?;
+    const MARGIN: f32 = 4.0;
+    let mut changed = 0usize;
+    for y in 0..a.height as usize {
+        for x in 0..a.width as usize {
+            let (px, py) = (x as f32, y as f32);
+            if px >= area.left - MARGIN && px <= area.right + MARGIN && py >= area.top - MARGIN && py <= area.bottom + MARGIN {
+                continue;
+            }
+            let at = y * a.stride + x * 4;
+            let difference: i32 = (0..3).map(|c| (i32::from(a.data[at + c]) - i32::from(b.data[at + c])).abs()).sum();
+            if difference > 30 {
+                changed += 1;
+            }
+        }
+    }
+    let allowed = (a.width as usize * a.height as usize) / 10_000;
+    Ok((changed > allowed).then(|| format!("{changed} pixels outside the area changed")))
+}
+
 
 /// What a stream leaves open at its end: how many `q`s are unclosed, and the
 /// transform in force once they are closed — the page-level `cm`s an

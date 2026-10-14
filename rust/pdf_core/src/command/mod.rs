@@ -201,6 +201,15 @@ pub enum Command {
         page_index: usize,
         objects: Vec<usize>,
     },
+    /// Put drawings copied as lines down on a page — see
+    /// [`crate::document::DocumentMut::paste_lifted_mut`]. `lifted` is the
+    /// clip [`crate::document::Document::lift_objects`] made. Undoes by one
+    /// page snapshot, as [`Command::RemoveObjects`].
+    PasteLifted {
+        page_index: usize,
+        lifted: Vec<u8>,
+        at: crate::document::Point,
+    },
     /// Turn one run of words into one object per character — see
     /// [`crate::document::Document::split_run_into_characters`].
     ///
@@ -674,6 +683,11 @@ impl Command {
                 doc.remove_objects_mut(*page_index, objects)?;
                 Ok(UndoRecord::RestoreRedactedPage { index: *page_index, page })
             }
+            Command::PasteLifted { page_index, lifted, at } => {
+                let page = doc.snapshot_page(*page_index)?;
+                doc.paste_lifted_mut(*page_index, lifted, *at)?;
+                Ok(UndoRecord::RestoreRedactedPage { index: *page_index, page })
+            }
             Command::SplitRunIntoCharacters { page_index, object } => {
                 let page = doc.snapshot_page(*page_index)?;
                 doc.split_run_into_characters_mut(*page_index, *object)?;
@@ -838,6 +852,7 @@ impl Command {
             Command::SplitRunIntoCharacters { page_index, .. } => {
                 format!("Split into characters on page {}", page_index + 1)
             }
+            Command::PasteLifted { page_index, .. } => format!("Paste on page {}", page_index + 1),
             // Named by what the user drew, not by "annotation" — the label goes
             // straight onto an undo button, and "Undo add annotation" tells nobody
             // which of their marks is about to vanish.
@@ -895,6 +910,7 @@ impl Command {
             | Command::RotateObject { page_index, .. }
             | Command::RemoveObject { page_index, .. }
             | Command::RemoveObjects { page_index, .. }
+            | Command::PasteLifted { page_index, .. }
             | Command::SplitRunIntoCharacters { page_index, .. }
             // Invisible text changes no pixels, but the cache is not only for
             // pixels: a raster kept from before the layer existed would hand

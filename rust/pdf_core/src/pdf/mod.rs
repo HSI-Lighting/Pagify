@@ -38,6 +38,7 @@ pub mod content;
 pub mod embed;
 pub mod encrypt;
 pub mod hidden;
+pub mod lift;
 pub mod secure_plus;
 pub mod sign;
 pub mod sm;

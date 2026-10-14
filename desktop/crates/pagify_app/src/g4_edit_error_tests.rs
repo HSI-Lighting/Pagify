@@ -4,7 +4,7 @@ use super::*;
 use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 
-fn page_with(content: &[u8], resources: &str, extra: &[Vec<u8>]) -> Vec<u8> {
+pub(crate) fn page_with(content: &[u8], resources: &str, extra: &[Vec<u8>]) -> Vec<u8> {
     let mut objects: Vec<Vec<u8>> = vec![
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
@@ -450,6 +450,35 @@ fn escape_puts_a_picked_up_paste_down_nowhere() {
     assert_eq!(occurrences(&mut h, &words), before);
 }
 
+/// **A group's paste preview shows the drawing in it.** Reported from use
+/// (0.1.70, a screenshot): the VIVO lens copied with its "Ø128mm" label
+/// previewed as the label alone — each picture or drawing in a group was
+/// drawn as an outline the colour of paper.
+#[test]
+fn a_group_paste_preview_shows_its_drawing() {
+    let mut h = harness("pictures.pdf");
+    h.state_mut().submit("editobject");
+    h.run_steps(1);
+    let rect = pdf_core::document::Rect { left: 0.0, top: 0.0, right: 40.0, bottom: 40.0 };
+    let picture = ObjectClipboard::Image { rgba: [255u8, 0, 0, 255].repeat(4), width: 2, height: 2, rect };
+    let drawing = ObjectClipboard::Lifted { pdf: std::sync::Arc::new(Vec::new()), rect, picture: Box::new(picture) };
+    let words = ObjectClipboard::Text {
+        lines: vec!["Label".into()],
+        size: 12.0,
+        color: pdf_core::document::Color { r: 0, g: 0, b: 0, a: 255 },
+        face: None,
+        track: 1.0,
+    };
+    h.state_mut().clipboard_state.object_clipboard = Some(ObjectClipboard::Group(vec![(drawing, 0.0, 0.0), (words, 30.0, 0.0)]));
+    h.event(egui::Event::Paste(COPIED_IN_PAGIFY.into()));
+    h.run_steps(2);
+    h.event(egui::Event::PointerMoved(page_spot(&h, 200.0, 200.0)));
+    h.run_steps(3);
+
+    let ghost = h.state().clipboard_state.paste_ghost.as_ref().expect("the paste was not picked up");
+    assert_eq!(ghost.textures.len(), 1, "the drawing in the group was not drawn in the preview");
+}
+
 /// Words copied somewhere else (what `Event::Paste` carries) are pasted the
 /// same way in Edit Text.
 #[test]
@@ -483,7 +512,9 @@ fn with_no_editing_tool_in_hand_paste_does_not_pick_anything_up() {
     assert!(h.state().clipboard_state.paste_ghost.is_none());
 }
 
-/// A picture copied from the page is picked up and put down as a picture.
+/// A picture copied from the page is picked up and put down where clicked —
+/// since 0.1.70 as the page's own picture (lifted as lines), so the page gains
+/// a drawing, not a placed picture.
 #[test]
 fn a_picture_from_the_page_is_copied_and_pasted_where_clicked() {
     let mut h = harness("pictures.pdf");
@@ -497,20 +528,20 @@ fn a_picture_from_the_page_is_copied_and_pasted_where_clicked() {
     );
     click(&mut h, middle);
     assert!(h.state().tab().selection.selected.is_some(), "the picture was not picked");
-    let marks = |h: &Harness<'static, PagifyApp>| h.state().tab().doc.as_ref().unwrap().session.placed_image_marks(0).unwrap().len();
-    let before = marks(&h);
+    let drawn = |h: &Harness<'static, PagifyApp>| h.state().tab().doc.as_ref().unwrap().session.drawn_objects(0).unwrap().iter().filter(|d| d.depth == 0).count();
+    let before = drawn(&h);
 
     h.event(egui::Event::Copy);
     h.run_steps(2);
-    assert!(matches!(h.state().clipboard_state.object_clipboard, Some(ObjectClipboard::Image { .. })), "the picture was not copied");
+    assert!(matches!(h.state().clipboard_state.object_clipboard, Some(ObjectClipboard::Lifted { .. })), "the picture was not copied");
     h.event(egui::Event::Paste(COPIED_IN_PAGIFY.into()));
     h.run_steps(2);
     assert!(h.state().clipboard_state.paste_ghost.is_some());
-    assert_eq!(marks(&h), before, "it was placed before the click");
+    assert_eq!(drawn(&h), before, "it was placed before the click");
 
     { let spot = page_spot(&h, 150.0, 150.0); click(&mut h, spot); }
     h.run_steps(2);
-    assert_eq!(marks(&h), before + 1, "the click did not put the picture down; said {:?}", history(&h));
+    assert_eq!(drawn(&h), before + 1, "the click did not put the picture down; said {:?}", history(&h));
 }
 
 /// Nothing selected inside the box: ⌘C takes the whole run or paragraph.

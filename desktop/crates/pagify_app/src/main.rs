@@ -2237,6 +2237,70 @@ enum ObjectClipboard {
     /// points) from the whole group's centre, so pasting puts every member
     /// down in the same arrangement they were copied in.
     Group(Vec<(ObjectClipboard, f32, f32)>),
+    /// Pictures and shapes lifted out of the page's own drawing: a one-page
+    /// clip of their operators and original images
+    /// ([`pdf_core::document::Document::lift_objects`]), pasted into the page as
+    /// lines of its own — each as sharp as the original at every zoom, and
+    /// edited like it (0.1.72; 0.1.70 pasted one group). `rect` is where they were
+    /// (page points). `picture` is the copy as a picture of the page, as before
+    /// lines could be copied — drawn as the paste ghost, and put down instead
+    /// when a page refuses the lines.
+    Lifted { pdf: std::sync::Arc<Vec<u8>>, rect: pdf_core::document::Rect, picture: Box<ObjectClipboard> },
+}
+
+/// Every [`ObjectClipboard::Lifted`] in `content` replaced by its picture —
+/// what a paste falls back to when the page refuses the lines.
+fn as_pictures(content: ObjectClipboard) -> ObjectClipboard {
+    match content {
+        ObjectClipboard::Lifted { picture, .. } => *picture,
+        ObjectClipboard::Group(items) => {
+            ObjectClipboard::Group(items.into_iter().map(|(item, dx, dy)| (as_pictures(item), dx, dy)).collect())
+        }
+        other => other,
+    }
+}
+
+/// What a paste ghost draws for `content`: lines as their picture, the same
+/// thing already rendered; anything else as itself.
+fn as_shown(content: &ObjectClipboard) -> &ObjectClipboard {
+    match content {
+        ObjectClipboard::Lifted { picture, .. } => picture,
+        other => other,
+    }
+}
+
+/// One picture of a paste ghost at half strength, centred on `centre`. Its
+/// texture is made the first frame it is drawn and kept in `textures` under
+/// `key`, so a ghost following the pointer does not load one a frame.
+fn draw_ghost_picture(
+    painter: &egui::Painter,
+    ctx: &egui::Context,
+    textures: &mut std::collections::HashMap<usize, egui::TextureHandle>,
+    key: usize,
+    picture: &ObjectClipboard,
+    centre: egui::Pos2,
+    scale: f32,
+) {
+    let ObjectClipboard::Image { rgba, width, height, rect: source } = picture else { return };
+    let texture = textures.entry(key).or_insert_with(|| {
+        let image = egui::ColorImage::from_rgba_unmultiplied([*width as usize, *height as usize], rgba);
+        ctx.load_texture(format!("paste-ghost-{key}"), image, egui::TextureOptions::LINEAR)
+    });
+    let size = egui::vec2((source.right - source.left) * scale, (source.bottom - source.top) * scale);
+    painter.image(
+        texture.id(),
+        egui::Rect::from_center_size(centre, size),
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        egui::Color32::from_white_alpha(128),
+    );
+}
+
+fn holds_lines(content: &ObjectClipboard) -> bool {
+    match content {
+        ObjectClipboard::Lifted { .. } => true,
+        ObjectClipboard::Group(items) => items.iter().any(|(item, ..)| holds_lines(item)),
+        _ => false,
+    }
 }
 
 /// Every detail of a clipboard payload *except the document's own words* —
@@ -2264,6 +2328,7 @@ fn describe_clipboard(content: &ObjectClipboard) -> String {
             format!("image {width}x{height}px rect={rect:?}")
         }
         ObjectClipboard::Shapes(objects) => format!("{} drawn shape(s)", objects.len()),
+        ObjectClipboard::Lifted { pdf, rect, .. } => format!("lifted bytes={} rect={rect:?}", pdf.len()),
         ObjectClipboard::Group(items) => {
             let parts: Vec<String> =
                 items.iter().map(|(c, dx, dy)| format!("[offset {dx:.1},{dy:.1}] {}", describe_clipboard(c))).collect();
@@ -2294,8 +2359,9 @@ const COPIED_IN_PAGIFY: &str = "(copied in Pagify)";
 /// somewhere they did not choose. See [`PagifyApp::paste_ghost`].
 struct PasteGhost {
     content: ObjectClipboard,
-    /// A picture's pixels as a texture, made the first frame it is drawn.
-    texture: Option<egui::TextureHandle>,
+    /// Each picture's pixels as a texture, made the first frame it is drawn
+    /// and kept for the rest: by member for a group, `0` for one picture.
+    textures: std::collections::HashMap<usize, egui::TextureHandle>,
 }
 
 /// What Organize's own `copy` carries to `paste` — see
@@ -3709,22 +3775,32 @@ impl PagifyApp {
             }
         }
         if let Some(dispatch) = submitted.take() {
-            // A typed line cancels any half-collected pick. Letting it swallow
-            // the click silently would mean an unrelated command finishing
-            // someone else's measurement.
-            if self.tab_mut().tool.take().is_some() {
-                self.say_info("that pick was cancelled.");
-            }
-            let line = self
-                .cmd
-                .history()
-                .last()
-                .map(|e| e.text.clone())
-                .unwrap_or_default();
-            self.recording_state.recorder.observe(&line);
-            self.recording_state.session_log.record("command", &line);
-            self.run(dispatch);
+            self.run_submitted(dispatch);
         }
+    }
+
+    /// Carry out a line the command box just submitted: cancel any half-collected
+    /// pick, log and record the line, run it.
+    fn run_submitted(&mut self, dispatch: pagify_shell::command::Dispatch) {
+        // **Read before anything is said.** `say_info` adds its message to this
+        // same history, so reading the last entry after the cancel below stored
+        // "that pick was cancelled." as the command — in the log, and in a
+        // recorded script that a replay would then fail on.
+        let line = self
+            .cmd
+            .history()
+            .last()
+            .map(|e| e.text.clone())
+            .unwrap_or_default();
+        // A typed line cancels any half-collected pick. Letting it swallow
+        // the click silently would mean an unrelated command finishing
+        // someone else's measurement.
+        if self.tab_mut().tool.take().is_some() {
+            self.say_info("that pick was cancelled.");
+        }
+        self.recording_state.recorder.observe(&line);
+        self.recording_state.session_log.record("command", &line);
+        self.run(dispatch);
     }
 
     /// The thumbnail rail or the Organize grid, whichever is showing.
@@ -8270,12 +8346,29 @@ impl PagifyApp {
         let members: Vec<Selected> = self.tab().selection.group.iter().filter(|s| s.page == page).cloned().collect();
         if !members.is_empty() {
             let Some(bounds) = self.group_bounds(page) else { return false };
-            // Pictures and shapes that overlap are copied as one picture of the
-            // page over their joint box — see [`merge_overlapping`].
-            let members = merge_overlapping(members);
             let cx = (bounds.left + bounds.right) / 2.0;
             let cy = (bounds.top + bounds.bottom) / 2.0;
-            let items: Vec<(ObjectClipboard, f32, f32)> = members
+            // Pictures and shapes are lifted as lines, together; words stay
+            // words. Where the page cannot be followed, pictures and shapes
+            // that overlap are copied as one picture of the page over their
+            // joint box, as before — see [`merge_overlapping`].
+            let (words, drawn): (Vec<Selected>, Vec<Selected>) =
+                members.into_iter().partition(|s| s.what == "the words");
+            let lifted = if drawn.is_empty() { None } else { self.lift_members(page, &drawn) };
+            let members = match lifted {
+                Some(_) => words,
+                None => merge_overlapping(words.into_iter().chain(drawn).collect()),
+            };
+            // The drawing first, so the words pasted with it land on top of it.
+            let mut items: Vec<(ObjectClipboard, f32, f32)> = lifted
+                .map(|lines| {
+                    let ObjectClipboard::Lifted { rect, .. } = &lines else { unreachable!("lift_members lifts") };
+                    let (dx, dy) = ((rect.left + rect.right) / 2.0 - cx, (rect.top + rect.bottom) / 2.0 - cy);
+                    (lines, dx, dy)
+                })
+                .into_iter()
+                .collect();
+            items.extend(members
                 .iter()
                 .filter_map(|sel| {
                     let content = self.content_for_selected(sel)?;
@@ -8321,8 +8414,7 @@ impl PagifyApp {
                         _ => (sel.rect.left + sel.rect.right) / 2.0,
                     };
                     Some((content, ax - cx, ay - cy))
-                })
-                .collect();
+                }));
             if items.is_empty() {
                 return false;
             }
@@ -8367,13 +8459,15 @@ impl PagifyApp {
     /// ⌘C on what Edit Object has picked.
     ///
     /// **Words are copied as words** — their text, size, colour and font — and
-    /// paste back as new, editable text. A picture or shape the page itself
-    /// draws cannot be lifted out of the page's content stream, so it is
-    /// copied as what it looks like: the page's own pixels over its box, the
-    /// paper around a shape made see-through (see [`clear_paper_around`]) so
-    /// that it can be set down over other things.
+    /// paste back as new, editable text. A picture or shape is lifted out of
+    /// the page's own drawing as lines ([`Self::lift_members`]); where the page
+    /// cannot be followed it is copied as what it looks like: the page's own
+    /// pixels over its box, the paper around a shape made see-through (see
+    /// [`clear_paper_around`]) so that it can be set down over other things.
     fn copy_page_object(&mut self, sel: &Selected) -> bool {
-        let Some(content) = self.content_for_selected(sel) else { return false };
+        // A picture or shape goes as lines when the page can be followed.
+        let lines = (sel.what != "the words").then(|| self.lift_members(sel.page, std::slice::from_ref(sel))).flatten();
+        let Some(content) = lines.or_else(|| self.content_for_selected(sel)) else { return false };
         // The source rect only — never logged by `put_on_clipboard` itself,
         // since `ObjectClipboard` carries no rect for `Text`. Matched up
         // against the `paste` line's own `at=` by eye: a paste that landed
@@ -8408,7 +8502,12 @@ impl PagifyApp {
         // them again, which left the rest of that paste stale on screen.
         if let Some(run) = run.as_ref().filter(|r| r.size > 0.0) {
             let face = self.registered_face_of_object(page, sel.object);
-            let text = run.text.trim().to_string();
+            // **PDFium's text layer hands a line-end hyphen back as U+0002**, a
+            // control code no font has a glyph for (every other reader of a run's
+            // text repairs it the same way). Copied as it came it shaped to glyph
+            // 0, and the guard in `styled_line_command` then wrote it in Helvetica,
+            // which draws code 2 as "ÿ": "pre-pared" pasted as "preÿpared".
+            let text = run.text.trim().replace('\u{2}', "-");
             let track = Self::measured_track(face.as_deref(), &text, run.size, run.rect);
             Some(ObjectClipboard::Text { lines: vec![text], size: run.size, color: run.color, face, track })
         } else {
@@ -8420,6 +8519,33 @@ impl PagifyApp {
             }
             Some(ObjectClipboard::Image { rgba, width: raster.width, height: raster.height, rect: sel.rect })
         }
+    }
+
+    /// Pictures and shapes copied as lines: lifted out of the page's own
+    /// drawing into a clip the engine has checked draws exactly them, with a
+    /// picture of their joint box beside it for the ghost and the fallback.
+    /// `None` when the page cannot be followed — the caller copies pictures.
+    /// Logged as a content-free `lift` line either way.
+    fn lift_members(&mut self, page: usize, members: &[Selected]) -> Option<ObjectClipboard> {
+        let objects: Vec<usize> = members.iter().map(|s| s.object).collect();
+        let started = std::time::Instant::now();
+        let lifted = self.tab().doc.as_ref()?.session.lift_objects(page, &objects);
+        let ms = started.elapsed().as_millis();
+        let lifted = match lifted {
+            Ok(lifted) => lifted,
+            Err(e) => {
+                self.recording_state.session_log.record("lift", &format!("refused selected={} ms={ms} reason={e}", objects.len()));
+                return None;
+            }
+        };
+        // The paper round a drawing of shapes alone is the page's; a picture keeps its own.
+        let what = if members.iter().all(|s| s.what == "the shape") { "the shape" } else { "the picture" };
+        let picture = self.content_for_selected(&Selected { page, object: members[0].object, rect: lifted.rect, what })?;
+        self.recording_state.session_log.record(
+            "lift",
+            &format!("selected={} objects={} bytes={} ms={ms}", objects.len(), lifted.objects, lifted.pdf.len()),
+        );
+        Some(ObjectClipboard::Lifted { pdf: std::sync::Arc::new(lifted.pdf), rect: lifted.rect, picture: Box::new(picture) })
     }
 
     /// How much narrower (or wider) a run's own words were actually drawn
@@ -8517,7 +8643,7 @@ impl PagifyApp {
                 None => return false,
             },
         };
-        self.clipboard_state.paste_ghost = Some(PasteGhost { content, texture: None });
+        self.clipboard_state.paste_ghost = Some(PasteGhost { content, textures: Default::default() });
         self.say_info("pasting — move to where it goes and click to put it down. Escape cancels.");
         true
     }
@@ -8533,7 +8659,12 @@ impl PagifyApp {
     /// The actual per-kind placement [`Self::place_paste_ghost`] does at
     /// `at` — pulled out so [`ObjectClipboard::Group`] can call it once per
     /// member, each at its own offset from the point clicked.
-    fn place_clipboard_content(&mut self, page: usize, at: AppPoint, content: ObjectClipboard) {
+    ///
+    /// **Lines the page refuses go down as pictures, in the same click.** A
+    /// paste of lines is checked by the engine before it is kept; when it is
+    /// refused, the same paste is put down again with each drawing's picture in
+    /// its place, and the message says so. Returns whether anything went down.
+    fn place_clipboard_content(&mut self, page: usize, at: AppPoint, content: ObjectClipboard) -> bool {
         if let ObjectClipboard::Shapes(objects) = content {
             self.recording_state.session_log.record("paste", &format!("at=({:.1},{:.1}) {} drawn shape(s)", at.x, at.y, objects.len()));
             let height = view_height(self, page);
@@ -8541,15 +8672,17 @@ impl PagifyApp {
             let centre = shapes_centre(&objects, layer);
             let by = cad_kernel::Vec2::new(at.x - centre.x, -(at.y - centre.y));
             self.put_shapes_down(page, &objects, by);
-            return;
+            return true;
         }
         let is_group = matches!(content, ObjectClipboard::Group(_));
         let is_text = matches!(content, ObjectClipboard::Text { .. });
-        let mut commands = match self.paste_commands(page, at, content) {
+        let pictures = holds_lines(&content).then(|| as_pictures(content.clone()));
+        let mut swapped = Vec::new();
+        let mut commands = match self.paste_commands(page, at, content, &mut swapped) {
             Ok(commands) => commands,
             Err(e) => {
                 self.say_error(e);
-                return;
+                return false;
             }
         };
         let n = commands.len();
@@ -8560,27 +8693,59 @@ impl PagifyApp {
         let command = match n {
             0 => {
                 self.say_info("nothing to paste.");
-                return;
+                return false;
             }
             1 => commands.remove(0),
             _ => pdf_core::command::Command::Batch { commands },
         };
+        let started = std::time::Instant::now();
         let outcome = self.tab().doc.as_ref().map(|d| d.session.execute(command));
+        if pictures.is_some() {
+            let ms = started.elapsed().as_millis();
+            let result = match &outcome {
+                Some(Ok(_)) => "kept".to_string(),
+                Some(Err(e)) => format!("refused reason={e}"),
+                None => "no document".to_string(),
+            };
+            self.recording_state.session_log.record("lift", &format!("paste {result} ms={ms}"));
+        }
         match outcome {
             Some(Ok(_)) => {
                 if let Some(doc) = &mut self.tab_mut().doc {
                     doc.rendered_is_stale();
                 }
-                self.say_info(if is_group {
+                let mut said = if is_group {
                     format!("{n} things pasted — `undo` takes them back together.")
                 } else if is_text {
                     format!("text pasted ({n} line{}) — `undo` takes it back.", if n == 1 { "" } else { "s" })
+                } else if pictures.is_some() {
+                    "drawing pasted as lines — `undo` takes it back.".to_string()
                 } else {
                     "picture pasted — `undo` takes it back.".to_string()
-                });
+                };
+                swapped.sort();
+                swapped.dedup();
+                if !swapped.is_empty() {
+                    said += &format!(" Words written in {} — the copied font cannot draw those letters.", swapped.join(", "));
+                }
+                self.say_info(said);
+                true
             }
-            Some(Err(e)) => self.say_error(format!("{e}")),
-            None => self.say_error("nothing open."),
+            Some(Err(e)) => {
+                let Some(pictures) = pictures else {
+                    self.say_error(format!("{e}"));
+                    return false;
+                };
+                let placed = self.place_clipboard_content(page, at, pictures);
+                if placed {
+                    self.say_info(format!("pasted as a picture — the lines could not be put down here: {e}"));
+                }
+                placed
+            }
+            None => {
+                self.say_error("nothing open.");
+                false
+            }
         }
     }
 
@@ -8590,11 +8755,15 @@ impl PagifyApp {
     ///
     /// Shapes are not here — they go to the markup layer, which has its own undo
     /// (see [`Self::put_shapes_down`]) — and a group never holds any.
+    ///
+    /// `swapped` collects the face any line of words was written in instead of
+    /// its own (see [`Self::styled_line_command`]).
     fn paste_commands(
         &mut self,
         page: usize,
         at: AppPoint,
         content: ObjectClipboard,
+        swapped: &mut Vec<String>,
     ) -> Result<Vec<pdf_core::command::Command>, String> {
         // Logged before the match, not after: a `styled_line_command` error
         // returns early, and the log should still show what was *attempted*,
@@ -8608,7 +8777,7 @@ impl PagifyApp {
                     let at = AppPoint { x: at.x + dx as f64, y: at.y + dy as f64 };
                     // A member that cannot be written is said and left out; the
                     // rest of the group still goes down.
-                    match self.paste_commands(page, at, item) {
+                    match self.paste_commands(page, at, item, swapped) {
                         Ok(more) => commands.extend(more),
                         Err(e) => self.say_error(e),
                     }
@@ -8621,7 +8790,10 @@ impl PagifyApp {
                 let mut commands = Vec::new();
                 for line in &lines {
                     if !line.trim().is_empty() {
-                        commands.push(self.styled_line_command(page, (at.x as f32, baseline), line, size, color, face.as_deref(), track)?);
+                        let (command, other) =
+                            self.styled_line_command(page, (at.x as f32, baseline), line, size, color, face.as_deref(), track)?;
+                        commands.push(command);
+                        swapped.extend(other);
                     }
                     baseline += gap;
                 }
@@ -8641,6 +8813,11 @@ impl PagifyApp {
                 }])
             }
             ObjectClipboard::Shapes(_) => Ok(Vec::new()),
+            ObjectClipboard::Lifted { pdf, .. } => Ok(vec![pdf_core::command::Command::PasteLifted {
+                page_index: page,
+                lifted: (*pdf).clone(),
+                at: pdf_core::document::Point { x: at.x as f32, y: at.y as f32 },
+            }]),
         }
     }
 
@@ -8675,7 +8852,9 @@ impl PagifyApp {
         // Taken out while it is drawn (the shapes need the markup layer, which
         // is the app's too) and put straight back.
         let Some(mut ghost) = self.clipboard_state.paste_ghost.take() else { return };
-        match &ghost.content {
+        let PasteGhost { content, textures } = &mut ghost;
+        let shown = as_shown(content);
+        match shown {
             ObjectClipboard::Text { lines, size, color, .. } => {
                 let font = egui::FontId::proportional((size * view.scale).max(4.0));
                 let ink = egui::Color32::from_rgb(color.r, color.g, color.b).gamma_multiply(0.5);
@@ -8684,19 +8863,7 @@ impl PagifyApp {
                     painter.text(at, egui::Align2::LEFT_TOP, line, font.clone(), ink);
                 }
             }
-            ObjectClipboard::Image { rgba, width, height, rect: source } => {
-                let texture = ghost.texture.get_or_insert_with(|| {
-                    let image = egui::ColorImage::from_rgba_unmultiplied([*width as usize, *height as usize], rgba);
-                    ui.ctx().load_texture("paste-ghost", image, egui::TextureOptions::LINEAR)
-                });
-                let size = egui::vec2((source.right - source.left) * view.scale, (source.bottom - source.top) * view.scale);
-                painter.image(
-                    texture.id(),
-                    egui::Rect::from_center_size(pointer, size),
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    egui::Color32::from_white_alpha(128),
-                );
-            }
+            ObjectClipboard::Image { .. } => draw_ghost_picture(&painter, ui.ctx(), textures, 0, shown, pointer, view.scale),
             ObjectClipboard::Shapes(objects) => {
                 let at = view.to_page(pointer);
                 let height = view_height(self, page);
@@ -8707,8 +8874,9 @@ impl PagifyApp {
                 overlay::draw_ghost(&painter, objects, layer, view, by, ink);
             }
             ObjectClipboard::Group(items) => {
-                for (item, dx, dy) in items {
+                for (member, (item, dx, dy)) in items.iter().enumerate() {
                     let at = pointer + egui::vec2(*dx * view.scale, *dy * view.scale);
+                    let item = as_shown(item);
                     match item {
                         ObjectClipboard::Text { lines, size, color, .. } => {
                             let font = egui::FontId::proportional((size * view.scale).max(4.0));
@@ -8718,28 +8886,18 @@ impl PagifyApp {
                                 painter.text(at, egui::Align2::LEFT_TOP, line, font.clone(), ink);
                             }
                         }
-                        // ponytail: outline only, not the actual pixels — a
-                        // group ghost can hold several pictures, and there is
-                        // nowhere to cache one texture per member the way the
-                        // single-`Image` arm above does; loading one fresh
-                        // every frame per member would leak a GPU texture a
-                        // frame. Upgrade to real previews if that matters.
-                        ObjectClipboard::Image { rect: source, .. } => {
-                            let size = egui::vec2(
-                                (source.right - source.left) * view.scale,
-                                (source.bottom - source.top) * view.scale,
-                            );
-                            painter.rect_stroke(
-                                egui::Rect::from_center_size(at, size),
-                                egui::CornerRadius::ZERO,
-                                egui::Stroke::new(1.5, egui::Color32::from_white_alpha(160)),
-                                egui::StrokeKind::Middle,
-                            );
+                        // **Each picture and drawing as itself.** It used to be
+                        // an outline the colour of paper, invisible: reported
+                        // from use as a copied lens previewed as its label only.
+                        ObjectClipboard::Image { .. } => {
+                            draw_ghost_picture(&painter, ui.ctx(), textures, member, item, at, view.scale)
                         }
-                        ObjectClipboard::Shapes(_) | ObjectClipboard::Group(_) => {}
+                        ObjectClipboard::Shapes(_) | ObjectClipboard::Group(_) | ObjectClipboard::Lifted { .. } => {}
                     }
                 }
             }
+            // Never held inside another — see `as_shown`.
+            ObjectClipboard::Lifted { .. } => {}
         }
         self.clipboard_state.paste_ghost = Some(ghost);
     }
@@ -8767,13 +8925,21 @@ impl PagifyApp {
             // group is the same — it has no single source rect to step away
             // from, so it also waits for a click.
             ObjectClipboard::Text { .. } | ObjectClipboard::Group(_) => {
-                self.clipboard_state.paste_ghost = Some(PasteGhost { content: clip, texture: None });
+                self.clipboard_state.paste_ghost = Some(PasteGhost { content: clip, textures: Default::default() });
                 self.say_info("pasting — move to where it goes and click to put it down. Escape cancels.");
             }
             ObjectClipboard::Shapes(objects) => {
                 // Kernel space counts upwards — see `finish_markup_grab` —
                 // so "down and to the right" on the page is `(+, -)` here.
                 self.put_shapes_down(page, &objects, cad_kernel::Vec2::new(step, -step));
+            }
+            // Beside where it was copied, as a picture is.
+            ObjectClipboard::Lifted { pdf, rect, picture } => {
+                let at = AppPoint {
+                    x: ((rect.left + rect.right) / 2.0) as f64 + step,
+                    y: ((rect.top + rect.bottom) / 2.0) as f64 + step,
+                };
+                self.place_clipboard_content(page, at, ObjectClipboard::Lifted { pdf, rect, picture });
             }
             ObjectClipboard::Image { rgba, width, height, rect } => {
                 let Some(doc) = &self.tab_mut().doc else {
@@ -12388,14 +12554,32 @@ impl PagifyApp {
     /// nothing says so: the text still extracts as the right words. Found by
     /// rendering the result; an ink count does not catch it, because the box is ink.
     fn replacement_face(&self, own: &str, text: &str) -> Option<Option<String>> {
-        let drawable = |name: &str| -> Option<bool> {
-            let bytes = pdf_core::text::font_data(name).ok()?;
-            let coverage = pdf_core::pdf::embed::outlined_chars(&bytes)?;
-            Some(text.chars().filter(|c| !c.is_whitespace()).all(|c| coverage.has(c)))
-        };
-        if drawable(own) != Some(false) {
+        if Self::draws_all(own, text) != Some(false) {
             return None;
         }
+        Some(self.face_that_draws(own, text))
+    }
+
+    /// Whether the registered face `name` has ink for every letter of `text`;
+    /// `None` when its program cannot tell (no `cmap`, for one).
+    fn draws_all(name: &str, text: &str) -> Option<bool> {
+        let bytes = pdf_core::text::font_data(name).ok()?;
+        let coverage = pdf_core::pdf::embed::outlined_chars(&bytes)?;
+        Some(text.chars().filter(|c| !c.is_whitespace()).all(|c| coverage.has(c)))
+    }
+
+    /// Whether `name` shapes a letter of `text` to glyph 0, the empty box.
+    fn shapes_a_box(name: &str, text: &str) -> bool {
+        pdf_core::text::shape(name, text).is_ok_and(|shaped| {
+            shaped.glyphs.iter().any(|g| {
+                g.id == 0 && text.get(g.cluster as usize..).and_then(|t| t.chars().next()).is_some_and(|c| !c.is_whitespace())
+            })
+        })
+    }
+
+    /// The registered face that draws every letter of `text`, nearest in weight
+    /// to `own`. `None` when none can, which writes plain Helvetica.
+    fn face_that_draws(&self, own: &str, text: &str) -> Option<String> {
         let bold = |name: &str| {
             pdf_core::text::font_data(name)
                 .ok()
@@ -12403,12 +12587,10 @@ impl PagifyApp {
                 .is_some_and(|m| m.bold)
         };
         let wanted = bold(own);
-        Some(
-            self.writing_faces()
-                .into_iter()
-                .filter(|name| drawable(name) == Some(true))
-                .max_by_key(|name| bold(name) == wanted),
-        )
+        self.writing_faces()
+            .into_iter()
+            .filter(|name| Self::draws_all(name, text) == Some(true))
+            .max_by_key(|name| bold(name) == wanted)
     }
 
 
@@ -12931,7 +13113,7 @@ impl PagifyApp {
         color: pdf_core::document::Color,
         face: Option<&str>,
     ) -> Result<(), String> {
-        let command = self.styled_line_command(page, origin, text, size, color, face, 1.0)?;
+        let (command, _) = self.styled_line_command(page, origin, text, size, color, face, 1.0)?;
         let Some(doc) = &self.tab_mut().doc else { return Err("nothing open.".into()) };
         doc.session.execute(command).map_err(|e| format!("{e}"))?;
         Ok(())
@@ -12943,6 +13125,13 @@ impl PagifyApp {
     /// `track` is [`ObjectClipboard::Text::track`]'s own correction — `1.0`
     /// for words someone typed, where a plain reshape of the font *is* the
     /// whole answer; a copy's own measured value otherwise.
+    ///
+    /// **Never writes boxes.** Where `face` shapes a letter to glyph 0 — a
+    /// subset without it, or a program with no `cmap` to find it by — the line
+    /// is written in [`Self::face_that_draws`]'s face instead, and that face's
+    /// name comes back with the command so the caller can say so. Asked of the
+    /// glyphs themselves: [`Self::draws_all`] cannot tell for a font with no
+    /// `cmap`, and that is the font that pasted copied words as boxes.
     fn styled_line_command(
         &mut self,
         page: usize,
@@ -12952,8 +13141,19 @@ impl PagifyApp {
         color: pdf_core::document::Color,
         face: Option<&str>,
         track: f32,
-    ) -> Result<pdf_core::command::Command, String> {
+    ) -> Result<(pdf_core::command::Command, Option<String>), String> {
         use pdf_core::document::{Annotation, Glyph};
+
+        let replacement = face
+            .filter(|own| Self::shapes_a_box(own, text))
+            .map(|own| self.face_that_draws(own, text).filter(|other| !Self::shapes_a_box(other, text)));
+        let swapped = replacement.as_ref().map(|other| other.clone().unwrap_or_else(|| "Helvetica".to_string()));
+        let face = match &replacement {
+            Some(other) => other.as_deref(),
+            None => face,
+        };
+        // A copy's tracking was measured against its own face's advances.
+        let track = if swapped.is_some() { 1.0 } else { track };
 
         let (font, font_asset, glyphs) = match face {
             Some(name) => {
@@ -12994,7 +13194,7 @@ impl PagifyApp {
 
         let id = self.tab_mut().next_text_id;
         self.tab_mut().next_text_id += 1;
-        Ok(pdf_core::command::Command::AddAnnotation {
+        Ok((pdf_core::command::Command::AddAnnotation {
             page_index: page,
             annotation: Annotation::Text {
                 text: text.to_string(),
@@ -13008,7 +13208,7 @@ impl PagifyApp {
                 frame: Vec::new(),
                 frame_width: 0.0,
             },
-        })
+        }, swapped))
     }
 
     /// Turn [`Self::new_text_box`]'s typed buffer into real page content,

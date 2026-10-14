@@ -204,3 +204,60 @@ pub fn check_both_saves(doc: &mut Box<dyn Document>, label: &str) {
         .expect("full save");
     check_with_qpdf(&full, &format!("{label}-full"));
 }
+
+/// One page of [`hand_built_pdf`]: its content stream, the value of its
+/// `/Resources` (a dict or `n 0 R`; empty leaves the key out, so the page
+/// inherits), and any other page-dict text (`/MediaBox [...] /Rotate 90`).
+pub struct HandPage {
+    pub content: &'static str,
+    pub resources: &'static str,
+    pub extra: &'static str,
+}
+
+/// A classic-xref PDF written by hand, so a test can say exactly what a page holds.
+///
+/// Numbering: 1 catalogue, 2 page tree (`/MediaBox [0 0 612 792]`, inherited),
+/// then each page and its content stream (`3 + 2i`, `4 + 2i`), then `objects`
+/// from `3 + 2 * pages.len()` on.
+pub fn hand_built_pdf(pages: &[HandPage], objects: &[&str]) -> Vec<u8> {
+    hand_built_pdf_with(pages, objects, "")
+}
+
+/// [`hand_built_pdf`] with more text in the page tree's dict, e.g. `/Resources` all pages inherit.
+pub fn hand_built_pdf_with(pages: &[HandPage], objects: &[&str], pages_extra: &str) -> Vec<u8> {
+    let kids: Vec<String> = (0..pages.len()).map(|i| format!("{} 0 R", 3 + 2 * i)).collect();
+    let mut bodies = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        format!(
+            "<< /Type /Pages /Kids [{}] /Count {} /MediaBox [0 0 612 792] {pages_extra} >>",
+            kids.join(" "),
+            pages.len()
+        ),
+    ];
+    for (i, page) in pages.iter().enumerate() {
+        let resources = if page.resources.is_empty() { String::new() } else { format!("/Resources {}", page.resources) };
+        bodies.push(format!(
+            "<< /Type /Page /Parent 2 0 R /Contents {} 0 R {resources} {} >>",
+            4 + 2 * i,
+            page.extra
+        ));
+        bodies.push(format!("<< /Length {} >>\nstream\n{}\nendstream", page.content.len(), page.content));
+    }
+    bodies.extend(objects.iter().map(|o| o.to_string()));
+
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, body) in bodies.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref_at = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", bodies.len() + 1).as_bytes());
+    for offset in &offsets {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF", bodies.len() + 1).as_bytes(),
+    );
+    out
+}

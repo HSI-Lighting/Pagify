@@ -12,6 +12,12 @@ impl Session {
         registry::with_session(self.handle, |s| s.document.drawn_objects(page_index))
     }
 
+    /// Some of a page's pictures and shapes, lifted into a one-page clip of
+    /// their own operators — see [`pdf_core::document::Document::lift_objects`].
+    pub fn lift_objects(&self, page_index: usize, objects: &[usize]) -> Result<pdf_core::document::Lifted> {
+        registry::with_session(self.handle, |s| s.document.lift_objects(page_index, objects))
+    }
+
     /// Resize one thing about a point — see
     /// [`pdf_core::document::DocumentMut::scale_object`].
     pub fn scale_object(

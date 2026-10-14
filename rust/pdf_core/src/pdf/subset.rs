@@ -289,3 +289,233 @@ fn candidates(code: u32) -> Vec<String> {
     out.push(format!("uni{code:04X}"));
     out
 }
+
+/// Give a font program that has **no `cmap` table** one, built from what the
+/// PDF says each glyph spells (`glyphs`: character → glyph id).
+///
+/// **Why this exists.** An `/Identity-H` font is addressed by glyph id and read
+/// through `/ToUnicode`, so the page never needs the program's own `cmap`, and
+/// producers (InDesign) leave it out. Every shaper finds a letter's glyph through
+/// `cmap`: without one each letter shapes to glyph 0, the empty box, and nothing
+/// says so. Measured on a datasheet: words copied in its body font (a
+/// cmap-less `Montserrat-Light` subset) pasted as a row of boxes.
+///
+/// Writes a Windows Unicode subtable — `(3,1)` format 4, plus `(3,10)` format 12
+/// when a character is past U+FFFF — and rebuilds the table directory: sorted
+/// tags, 4-byte aligned tables, their checksums and `head.checkSumAdjustment`.
+/// `None` when the font already has a `cmap`, cannot be read, or nothing in
+/// `glyphs` names a glyph it has.
+pub fn add_unicode_cmap(font: &[u8], glyphs: &BTreeMap<char, u16>) -> Option<Vec<u8>> {
+    let face = ttf_parser::Face::parse(font, 0).ok()?;
+    if face.tables().cmap.is_some() {
+        return None;
+    }
+    let count = face.number_of_glyphs();
+    let glyphs: Vec<(u32, u16)> =
+        glyphs.iter().filter(|(_, &g)| g != 0 && g < count).map(|(&c, &g)| (c as u32, g)).collect();
+    if glyphs.is_empty() {
+        return None;
+    }
+    let mut tables = tables_of(font)?;
+    tables.push((*b"cmap", unicode_cmap(&glyphs)?));
+    Some(sfnt(&font[..4], tables))
+}
+
+/// A `cmap` table for `glyphs` (character → glyph, in character order).
+fn unicode_cmap(glyphs: &[(u32, u16)]) -> Option<Vec<u8>> {
+    // Runs where character and glyph both step by one: a format 4 segment, a
+    // format 12 group.
+    let mut runs: Vec<(u32, u32, u16)> = Vec::new();
+    for &(c, g) in glyphs {
+        match runs.last_mut() {
+            Some((start, end, first)) if *end + 1 == c && u32::from(*first) + (c - *start) == u32::from(g) => *end = c,
+            _ => runs.push((c, c, g)),
+        }
+    }
+
+    // Format 4: the Basic Multilingual Plane, ending in the 0xFFFF segment the
+    // format requires. A run crossing 0xFFFF is cut there.
+    let mut segments: Vec<(u16, u16, u16)> = runs
+        .iter()
+        .filter(|(start, ..)| *start < 0xFFFF)
+        .map(|&(start, end, first)| (start as u16, end.min(0xFFFE) as u16, first.wrapping_sub(start as u16)))
+        .collect();
+    segments.push((0xFFFF, 0xFFFF, 1));
+    let n = segments.len();
+    let search = 2 * (1usize << n.ilog2());
+    let mut format4: Vec<u8> = Vec::new();
+    for value in [4, 16 + 8 * n, 0, 2 * n, search, (search / 2).ilog2() as usize, 2 * n - search] {
+        format4.extend(u16::try_from(value).ok()?.to_be_bytes());
+    }
+    let column = |pick: fn(&(u16, u16, u16)) -> u16| segments.iter().flat_map(move |s| pick(s).to_be_bytes());
+    format4.extend(column(|s| s.1));
+    format4.extend([0, 0]);
+    format4.extend(column(|s| s.0));
+    format4.extend(column(|s| s.2));
+    format4.extend(std::iter::repeat_n(0u8, 2 * n));
+
+    // Format 12, only when a character is past the BMP; it then holds every run.
+    let format12 = runs.iter().any(|(_, end, _)| *end > 0xFFFF).then(|| {
+        let mut table: Vec<u8> = vec![0, 12, 0, 0];
+        for value in [16 + 12 * runs.len(), 0, runs.len()] {
+            table.extend((value as u32).to_be_bytes());
+        }
+        for &(start, end, first) in &runs {
+            for value in [start, end, u32::from(first)] {
+                table.extend(value.to_be_bytes());
+            }
+        }
+        table
+    });
+
+    let subtables: Vec<(u16, Vec<u8>)> = std::iter::once((1, format4)).chain(format12.map(|t| (10, t))).collect();
+    let mut out: Vec<u8> = vec![0, 0];
+    out.extend((subtables.len() as u16).to_be_bytes());
+    let mut offset = 4 + 8 * subtables.len();
+    for (encoding, table) in &subtables {
+        out.extend(3u16.to_be_bytes());
+        out.extend(encoding.to_be_bytes());
+        out.extend((offset as u32).to_be_bytes());
+        offset += table.len();
+    }
+    for (_, table) in subtables {
+        out.extend(table);
+    }
+    Some(out)
+}
+
+/// A font's tables, by tag, as they sit in the file. `None` for a collection or
+/// a directory pointing outside the data.
+fn tables_of(font: &[u8]) -> Option<Vec<([u8; 4], Vec<u8>)>> {
+    if font.get(..4)? == b"ttcf" {
+        return None;
+    }
+    let count = u16::from_be_bytes(font.get(4..6)?.try_into().ok()?) as usize;
+    (0..count)
+        .map(|i| {
+            let record = font.get(12 + 16 * i..28 + 16 * i)?;
+            let word = |at: usize| u32::from_be_bytes(record[at..at + 4].try_into().expect("4 bytes")) as usize;
+            let data = font.get(word(8)..word(8).checked_add(word(12))?)?;
+            Some((record[..4].try_into().expect("4 bytes"), data.to_vec()))
+        })
+        .collect()
+}
+
+/// A font file holding `tables`, laid out as the format requires.
+fn sfnt(version: &[u8], mut tables: Vec<([u8; 4], Vec<u8>)>) -> Vec<u8> {
+    tables.sort_by(|a, b| a.0.cmp(&b.0));
+    for (tag, data) in &mut tables {
+        // Summed as zero, then set from the whole file below.
+        if tag == b"head" && data.len() >= 12 {
+            data[8..12].fill(0);
+        }
+    }
+    let n = tables.len();
+    let power = if n == 0 { 0 } else { 1usize << n.ilog2() };
+    let mut out = version.to_vec();
+    for value in [n, power * 16, power.max(1).ilog2() as usize, (n - power) * 16] {
+        out.extend((value as u16).to_be_bytes());
+    }
+    let mut offset = 12 + 16 * n;
+    let mut head = None;
+    for (tag, data) in &tables {
+        out.extend(tag);
+        out.extend(checksum(data).to_be_bytes());
+        out.extend((offset as u32).to_be_bytes());
+        out.extend((data.len() as u32).to_be_bytes());
+        if tag == b"head" && data.len() >= 12 {
+            head = Some(offset);
+        }
+        offset += data.len().next_multiple_of(4);
+    }
+    for (_, data) in &tables {
+        out.extend(data);
+        out.resize(out.len().next_multiple_of(4), 0);
+    }
+    if let Some(at) = head {
+        let adjustment = 0xB1B0_AFBAu32.wrapping_sub(checksum(&out));
+        out[at + 8..at + 12].copy_from_slice(&adjustment.to_be_bytes());
+    }
+    out
+}
+
+/// The format's table checksum: big-endian words summed, the last zero-padded.
+fn checksum(data: &[u8]) -> u32 {
+    data.chunks(4).fold(0u32, |sum, chunk| {
+        let mut word = [0u8; 4];
+        word[..chunk.len()].copy_from_slice(chunk);
+        sum.wrapping_add(u32::from_be_bytes(word))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MONTSERRAT: &str =
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../desktop/third_party/fonts/Montserrat-Regular.ttf");
+
+    /// The font with its `cmap` taken out, as an `/Identity-H` subset is embedded.
+    fn without_cmap(font: &[u8]) -> Vec<u8> {
+        let tables = tables_of(font).expect("tables").into_iter().filter(|(tag, _)| tag != b"cmap").collect();
+        sfnt(&font[..4], tables)
+    }
+
+    #[test]
+    fn a_font_without_a_cmap_is_given_one_that_finds_the_same_glyphs() {
+        let original = std::fs::read(MONTSERRAT).expect("the bundled Montserrat");
+        let face = ttf_parser::Face::parse(&original, 0).expect("parses");
+        let text = "Reflector Anodized Aluminium";
+        let glyphs: BTreeMap<char, u16> =
+            text.chars().map(|c| (c, face.glyph_index(c).expect("Montserrat has it").0)).collect();
+
+        let stripped = without_cmap(&original);
+        let bare = ttf_parser::Face::parse(&stripped, 0).expect("still a font");
+        assert!(bare.tables().cmap.is_none(), "the test font must really have lost its cmap");
+        assert_eq!(bare.glyph_index('R'), None);
+
+        let mended = add_unicode_cmap(&stripped, &glyphs).expect("a cmap is added");
+        let mended = ttf_parser::Face::parse(&mended, 0).expect("the rewritten font parses");
+        for c in text.chars() {
+            assert_eq!(mended.glyph_index(c), face.glyph_index(c), "{c:?}");
+        }
+        assert_eq!(mended.glyph_index('Q'), None, "Q was not in the map");
+    }
+
+    #[test]
+    fn a_character_past_the_basic_plane_is_found_too() {
+        let stripped = without_cmap(&std::fs::read(MONTSERRAT).expect("the bundled Montserrat"));
+        let glyphs = BTreeMap::from([('A', 36), ('\u{1D400}', 37), ('\u{1D401}', 38)]);
+        let mended = add_unicode_cmap(&stripped, &glyphs).expect("a cmap is added");
+        let mended = ttf_parser::Face::parse(&mended, 0).expect("parses");
+        assert_eq!(mended.glyph_index('A').map(|g| g.0), Some(36));
+        assert_eq!(mended.glyph_index('\u{1D400}').map(|g| g.0), Some(37));
+        assert_eq!(mended.glyph_index('\u{1D401}').map(|g| g.0), Some(38));
+    }
+
+    #[test]
+    fn a_font_that_has_a_cmap_is_left_alone() {
+        let original = std::fs::read(MONTSERRAT).expect("the bundled Montserrat");
+        assert_eq!(add_unicode_cmap(&original, &BTreeMap::from([('A', 36)])), None);
+    }
+
+    #[test]
+    fn the_rewritten_file_has_the_checksums_the_format_requires() {
+        let original = std::fs::read(MONTSERRAT).expect("the bundled Montserrat");
+        let rebuilt = without_cmap(&original);
+        // A whole file sums to the magic number once `checkSumAdjustment` is in.
+        assert_eq!(checksum(&rebuilt), 0xB1B0_AFBA);
+        let count = u16::from_be_bytes([rebuilt[4], rebuilt[5]]) as usize;
+        for i in 0..count {
+            let record = &rebuilt[12 + 16 * i..28 + 16 * i];
+            let word = |at: usize| u32::from_be_bytes(record[at..at + 4].try_into().unwrap());
+            let (offset, length) = (word(8) as usize, word(12) as usize);
+            assert_eq!(offset % 4, 0);
+            let mut data = rebuilt[offset..offset + length].to_vec();
+            if &record[..4] == b"head" {
+                data[8..12].fill(0);
+            }
+            assert_eq!(checksum(&data), word(4), "{}", String::from_utf8_lossy(&record[..4]));
+        }
+    }
+}
