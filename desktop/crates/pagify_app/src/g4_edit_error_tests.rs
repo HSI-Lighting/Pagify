@@ -503,13 +503,185 @@ fn text_copied_elsewhere_is_picked_up_in_edit_text_too() {
     assert!(!after.contains("Brand new words") && !after.contains("second line"), "one undo should take both lines back: {after:?}");
 }
 
-/// Outside Edit Object / Edit Text nothing changes: ⌘V pastes at once.
+/// **Pagify's own copy is unchanged outside Edit Object / Edit Text: ⌘V pastes
+/// it at once**, beside where it was copied — no ghost. (Until 0.1.75 this test
+/// sent *outside* words and asserted nothing happened; words from outside are
+/// now picked up with no tool in hand too — the next test.)
 #[test]
-fn with_no_editing_tool_in_hand_paste_does_not_pick_anything_up() {
+fn with_no_editing_tool_in_hand_pagifys_own_copy_is_still_pasted_at_once() {
+    let mut h = harness("pictures.pdf");
+    let rect = pdf_core::document::Rect { left: 100.0, top: 100.0, right: 140.0, bottom: 140.0 };
+    h.state_mut().clipboard_state.object_clipboard =
+        Some(ObjectClipboard::Image { rgba: [255u8, 0, 0, 255].repeat(4), width: 2, height: 2, rect });
+    let placed = |h: &Harness<'static, PagifyApp>| h.state().tab().doc.as_ref().unwrap().session.placed_image_marks(0).unwrap().len();
+    let before = placed(&h);
+
+    h.event(egui::Event::Paste(COPIED_IN_PAGIFY.into()));
+    h.run_steps(2);
+    assert!(h.state().clipboard_state.paste_ghost.is_none(), "Pagify's own copy was picked up instead of pasted");
+    assert_eq!(placed(&h), before + 1, "the copy was not pasted at once; said {:?}", history(&h));
+}
+
+/// **Words copied in another program are picked up whichever tool is in
+/// hand**, the way they always were in Edit Object / Edit Text (0.1.75).
+#[test]
+fn text_copied_elsewhere_is_picked_up_with_no_editing_tool_in_hand() {
     let mut h = harness("text-lines.pdf");
     h.event(egui::Event::Paste("Brand new words".into()));
     h.run_steps(2);
+    assert!(
+        matches!(&h.state().clipboard_state.paste_ghost, Some(PasteGhost { content: ObjectClipboard::Text { lines, .. }, .. }) if lines == &["Brand new words"]),
+        "the words were not picked up"
+    );
+
+    { let spot = page_spot(&h, 100.0, 160.0); click(&mut h, spot); }
+    h.run_steps(2);
+    assert!(page_text(&mut h).contains("Brand new words"), "the click did not put them down");
+    h.state_mut().submit("undo");
+    assert!(!page_text(&mut h).contains("Brand new words"), "undo did not take them back");
+}
+
+/// **The system clipboard decides which copy came last.** Words copied outside
+/// Pagify after a Pagify copy win — and leave Pagify's own copy where it was —
+/// while the placeholder Pagify leaves behind still pastes Pagify's copy.
+#[test]
+fn words_copied_elsewhere_beat_a_stale_pagify_copy_and_a_stale_page_copy() {
+    let mut h = harness("pictures.pdf");
+    let pages = |h: &Harness<'static, PagifyApp>| h.state().tab().doc.as_ref().unwrap().page_count;
+    h.state_mut().tab_mut().organize.organize_selected = vec![0];
+    h.event(egui::Event::Copy);
+    h.run_steps(2);
+    assert!(h.state().clipboard_state.page_clipboard.is_some(), "the page was not copied");
+    let stale = ObjectClipboard::Image { rgba: [0u8, 0, 255, 255].repeat(4), width: 2, height: 2, rect: pdf_core::document::Rect { left: 0.0, top: 0.0, right: 10.0, bottom: 10.0 } };
+    h.state_mut().clipboard_state.object_clipboard = Some(stale);
+    let before = pages(&h);
+
+    h.event(egui::Event::Paste("Words from a browser".into()));
+    h.run_steps(2);
+    assert_eq!(pages(&h), before, "the stale page copy was pasted over words from outside");
+    assert!(
+        matches!(&h.state().clipboard_state.paste_ghost, Some(PasteGhost { content: ObjectClipboard::Text { lines, .. }, .. }) if lines == &["Words from a browser"]),
+        "the words from outside were not picked up"
+    );
+    assert!(h.state().clipboard_state.object_clipboard.is_some(), "Pagify's own copy was thrown away");
+
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    h.event(egui::Event::Paste(COPIED_IN_PAGIFY.into()));
+    h.run_steps(2);
+    assert_eq!(pages(&h), before + 1, "the placeholder no longer pastes Pagify's own page copy; said {:?}", history(&h));
+}
+
+/// A picture on the system clipboard, the way a browser or the Snipping Tool
+/// leaves it: 100 × 40 pixels, no text.
+fn a_picture_on_the_clipboard() -> Option<crate::os_clipboard::Outside> {
+    Some(crate::os_clipboard::Outside::Picture(crate::os_clipboard::Picture { rgba: [255u8, 0, 0, 255].repeat(100 * 40), width: 100, height: 40 }))
+}
+
+fn placed_pictures(h: &Harness<'static, PagifyApp>) -> Vec<pdf_core::document::Rect> {
+    h.state().tab().doc.as_ref().unwrap().session.placed_image_marks(0).unwrap().into_iter().map(|m| m.rect).collect()
+}
+
+/// **A picture copied outside Pagify: Ctrl+V picks it up, a click puts it
+/// down, `undo` takes it back.** egui-winit sends nothing for a Ctrl+V with no
+/// text on the clipboard but the V's release, which is what this sends.
+#[test]
+fn a_picture_copied_elsewhere_is_picked_up_by_ctrl_v_and_put_down_where_clicked() {
+    let mut h = harness("text-lines.pdf");
+    h.state_mut().clipboard_state.read_outside = a_picture_on_the_clipboard;
+    let before = placed_pictures(&h).len();
+
+    h.key_up_modifiers(egui::Modifiers::COMMAND, egui::Key::V);
+    h.run_steps(2);
+    let Some(PasteGhost { content: ObjectClipboard::Image { rect, width, height, .. }, .. }) = &h.state().clipboard_state.paste_ghost else {
+        panic!("the picture was not picked up");
+    };
+    assert_eq!((*width, *height), (100, 40));
+    assert!(((rect.right - rect.left) - 75.0).abs() < 1e-3 && ((rect.bottom - rect.top) - 30.0).abs() < 1e-3, "{rect:?}");
+    assert_eq!(placed_pictures(&h).len(), before, "it was placed before the click");
+
+    { let spot = page_spot(&h, 200.0, 150.0); click(&mut h, spot); }
+    h.run_steps(2);
+    let after = placed_pictures(&h);
+    assert_eq!(after.len(), before + 1, "the click did not put the picture down; said {:?}", history(&h));
+    let put = after.last().unwrap();
+    assert!(((put.right - put.left).abs() - 75.0).abs() < 1.0 && ((put.bottom - put.top).abs() - 30.0).abs() < 1.0, "{put:?}");
+    assert!((((put.left + put.right) / 2.0) - 200.0).abs() < 2.0, "not centred on the click: {put:?}");
+    assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+
+    h.state_mut().submit("undo");
+    assert_eq!(placed_pictures(&h).len(), before, "undo did not take the picture back");
+}
+
+/// Ctrl is often let go before V, so the release of V carries no modifier — and
+/// each is a frame of its own. The picture is found all the same, because V's
+/// press never arrived.
+#[test]
+fn a_picture_is_pasted_when_ctrl_is_let_go_before_v() {
+    let mut h = harness("text-lines.pdf");
+    h.state_mut().clipboard_state.read_outside = a_picture_on_the_clipboard;
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::COMMAND));
+    h.run_steps(1);
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::default()));
+    h.run_steps(1);
+    h.key_up(egui::Key::V);
+    h.run_steps(2);
+    assert!(h.state().clipboard_state.paste_ghost.is_some(), "the picture was not picked up");
+}
+
+/// **Typing "v" pastes nothing**, even with a picture on the clipboard: a plain
+/// V arrives as a press and a release, where Ctrl+V's press is swallowed.
+#[test]
+fn typing_v_pastes_nothing() {
+    let mut h = harness("text-lines.pdf");
+    h.state_mut().clipboard_state.read_outside = a_picture_on_the_clipboard;
+    h.key_down(egui::Key::V);
+    h.run_steps(1);
+    h.key_up(egui::Key::V);
+    h.run_steps(2);
     assert!(h.state().clipboard_state.paste_ghost.is_none());
+}
+
+/// **Words and a picture on the clipboard together (an Excel range, say): the
+/// words are pasted once and the release of V does not swap them for the
+/// picture.** Ctrl+V with no tool in hand, so that the words and the picture
+/// go to the same place.
+#[test]
+fn words_and_a_picture_together_paste_the_words_only() {
+    let mut h = harness("text-lines.pdf");
+    h.state_mut().clipboard_state.read_outside = a_picture_on_the_clipboard;
+    h.event(egui::Event::Paste("A1\tB1".into()));
+    h.run_steps(2);
+    h.key_up_modifiers(egui::Modifiers::COMMAND, egui::Key::V);
+    h.run_steps(2);
+    assert!(
+        matches!(&h.state().clipboard_state.paste_ghost, Some(PasteGhost { content: ObjectClipboard::Text { .. }, .. })),
+        "the release of V swapped the words for the picture"
+    );
+
+    // And the next Ctrl+V, with no text this time, is not swallowed by that one.
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    h.key_up_modifiers(egui::Modifiers::COMMAND, egui::Key::V);
+    h.run_steps(2);
+    assert!(
+        matches!(&h.state().clipboard_state.paste_ghost, Some(PasteGhost { content: ObjectClipboard::Image { .. }, .. })),
+        "the picture-only Ctrl+V after a text one was swallowed"
+    );
+}
+
+/// The typed `paste` reads the clipboard too.
+#[test]
+fn the_typed_paste_command_picks_up_a_picture_copied_elsewhere() {
+    let mut h = harness("text-lines.pdf");
+    h.state_mut().clipboard_state.read_outside = a_picture_on_the_clipboard;
+    h.state_mut().submit("paste");
+    h.run_steps(2);
+    assert!(
+        matches!(&h.state().clipboard_state.paste_ghost, Some(PasteGhost { content: ObjectClipboard::Image { .. }, .. })),
+        "the typed paste did not pick the picture up; said {:?}",
+        history(&h)
+    );
 }
 
 /// A picture copied from the page is picked up and put down where clicked —

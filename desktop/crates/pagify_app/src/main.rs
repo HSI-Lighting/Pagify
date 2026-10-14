@@ -21,6 +21,7 @@ mod home;
 mod hub;
 mod instance;
 mod logo;
+mod os_clipboard;
 mod overlay;
 mod edit;
 mod panels;
@@ -1106,6 +1107,13 @@ struct ClipboardState {
     /// adding it would mean every test calling them directly would need one
     /// too).
     clipboard_mirror_wanted: bool,
+    /// What the *system* clipboard holds from outside Pagify — see
+    /// [`os_clipboard`]. A field, not a call, so a test never reads the real
+    /// clipboard (the default under `cfg!(test)` finds nothing).
+    read_outside: fn() -> Option<os_clipboard::Outside>,
+    /// Finds the Ctrl+V that carried no text from the release of V — see
+    /// [`os_clipboard::PasteKey`].
+    paste_key: os_clipboard::PasteKey,
 }
 
 /// Where the signature library, predefined-text and snippet files live on disk, and the
@@ -3230,18 +3238,32 @@ impl PagifyApp {
         // command box legitimately re-focuses itself after (see
         // Focus::allows_clipboard_keys), so it needs to keep working right
         // after a typed `copy`/`paste`, not just once focus is empty.
-        if keys.paste && focus.allows_clipboard_keys(command_id) && self.tab_mut().doc.is_some() {
+        //
+        // Fed every frame, before the gate: a Ctrl+V whose text went to a field
+        // that had focus still had its `Event::Paste`, and its release must not
+        // then paste a picture.
+        let picture_paste = ctx.input(|i| self.clipboard_state.paste_key.frame(&i.events, i.time));
+        let may_paste = focus.allows_clipboard_keys(command_id) && self.tab_mut().doc.is_some();
+        if keys.paste && may_paste {
             let pasted = ctx.input(|i| {
                 i.events.iter().find_map(|e| match e {
                     egui::Event::Paste(text) => Some(text.clone()),
                     _ => None,
                 })
             });
-            if self.current_page_clipboard().is_some() {
+            // Words copied since, somewhere else, beat anything Pagify copied
+            // before — pages included — because the system clipboard is the one
+            // place that knows which copy came last.
+            let from_elsewhere = pasted.as_deref().is_some_and(os_clipboard::is_text);
+            if !from_elsewhere && self.current_page_clipboard().is_some() {
                 self.paste_organize_selection();
             } else if !self.start_paste_ghost(pasted) {
                 self.paste_object_selection();
             }
+        } else if picture_paste && may_paste {
+            // Ctrl+V with no text on the clipboard: egui-winit sent nothing, so
+            // a picture (or a copied image file) is looked for now.
+            self.paste_outside_picture();
         }
     }
 
@@ -4251,7 +4273,9 @@ impl PagifyApp {
                 ))
             } else {
                 Self::shared_clipboard_dir()
-            }, clipboard_mirror_wanted: false, },
+            }, clipboard_mirror_wanted: false,
+                read_outside: if cfg!(test) { || None } else { os_clipboard::read },
+                paste_key: Default::default(), },
             faces_state: FacesState { outlined_fonts: if quiet {
                 pagify_shell::outlined_fonts::OutlinedFonts::default()
             } else {
@@ -8619,33 +8643,54 @@ impl PagifyApp {
     /// down.** It follows the pointer at half strength ([`Self::draw_paste_ghost`])
     /// and goes where the next click on a page lands ([`Self::place_paste_ghost`]).
     /// `pasted` is the text the system clipboard held: anything but our own
-    /// placeholder means words were copied since, somewhere else, and those win.
-    /// `false` when this is not the time (no such tool in hand) or there is
-    /// nothing to paste, and the caller pastes the old way.
+    /// placeholder means words were copied since, somewhere else, and those win
+    /// — with any tool in hand or none. Pagify's own copy is picked up only in
+    /// Edit Object / Edit Text; with no such tool in hand, or nothing to paste,
+    /// this is `false` and the caller pastes the old way.
     fn start_paste_ghost(&mut self, pasted: Option<String>) -> bool {
         let in_hand = self.tab().tool_state.object_tool.is_some()
             || self.tab().edit.editing_run.is_some()
             || self.tab().tool.as_ref().is_some_and(|t| matches!(t.kind, Tool::PickText));
-        if !in_hand {
-            return false;
-        }
-        let from_elsewhere = pasted.filter(|text| text != COPIED_IN_PAGIFY && !text.trim().is_empty());
-        let content = match from_elsewhere {
-            Some(text) => ObjectClipboard::Text {
-                lines: text.lines().map(str::to_string).collect(),
-                size: 12.0,
-                color: pdf_core::document::Color { r: 0, g: 0, b: 0, a: 255 },
-                face: None,
-                track: 1.0,
-            },
-            None => match self.clipboard_state.object_clipboard.clone() {
+        let content = match pasted.filter(|text| os_clipboard::is_text(text)) {
+            Some(text) => os_clipboard::text_content(&text),
+            None if in_hand => match self.clipboard_state.object_clipboard.clone() {
                 Some(content) => content,
                 None => return false,
             },
+            None => return false,
         };
+        self.pick_up(content);
+        true
+    }
+
+    /// Pick `content` up: it follows the pointer until a click puts it down.
+    fn pick_up(&mut self, content: ObjectClipboard) {
         self.clipboard_state.paste_ghost = Some(PasteGhost { content, textures: Default::default() });
         self.say_info("pasting — move to where it goes and click to put it down. Escape cancels.");
-        true
+    }
+
+    /// `outside` — words or a picture read off the system clipboard — as
+    /// something to paste, a picture sized for the page in view.
+    fn outside_content(&self, outside: os_clipboard::Outside) -> ObjectClipboard {
+        match outside {
+            os_clipboard::Outside::Text(text) => os_clipboard::text_content(&text),
+            os_clipboard::Outside::Picture(picture) => {
+                let page = self.tab().view_state.page;
+                let size = self.tab().doc.as_ref().and_then(|d| d.strip.size_of(page)).unwrap_or((612.0, 792.0));
+                os_clipboard::picture_content(picture, size)
+            }
+        }
+    }
+
+    /// Ctrl+V when the system clipboard held no text: a picture copied in a
+    /// browser or the Snipping Tool, or an image file copied in Explorer, is
+    /// picked up like any other paste. Says nothing when there is none — that
+    /// Ctrl+V did nothing before, and a file that is not a PNG/JPEG still does.
+    fn paste_outside_picture(&mut self) {
+        if let Some(outside @ os_clipboard::Outside::Picture(_)) = (self.clipboard_state.read_outside)() {
+            let content = self.outside_content(outside);
+            self.pick_up(content);
+        }
     }
 
     /// The click that puts a picked-up paste down, with the pointer at `at`:

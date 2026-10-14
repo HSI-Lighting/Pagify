@@ -21,6 +21,10 @@ rfd    = "0.15"
 # Decodes the embedded logo. PNG only — every other decoder is dead weight in
 # the binary and attack surface with nothing asking for it.
 image  = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Reads a picture (or an image file) off the system clipboard — egui-winit only
+# reads text. The version egui-winit already links, so this adds an edge to the
+# graph, not a new crate.
+arboard = "3.6"
 # The Linux windowing backends are additive and only meaningful there; on macOS
 # and Windows eframe uses the platform's own and these features do not apply.
 [target.'cfg(target_os = "linux")'.dependencies]

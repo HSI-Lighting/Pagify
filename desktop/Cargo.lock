@@ -2698,8 +2698,9 @@ dependencies = [
 
 [[package]]
 name = "pagify_app"
-version = "0.1.74"
+version = "0.1.75"
 dependencies = [
+ "arboard",
  "cad_kernel",
  "eframe",
  "egui",
@@ -2720,7 +2721,7 @@ dependencies = [
 
 [[package]]
 name = "pagify_issue"
-version = "0.1.74"
+version = "0.1.75"
 dependencies = [
  "const-oid",
  "der",
@@ -2737,7 +2738,7 @@ dependencies = [
 
 [[package]]
 name = "pagify_shell"
-version = "0.1.74"
+version = "0.1.75"
 dependencies = [
  "cad_kernel",
  "pdf_core",

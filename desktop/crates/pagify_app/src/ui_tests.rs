@@ -2631,7 +2631,9 @@ fn pasting_after_a_real_copy_adds_a_page() {
     h.run_steps(3);
     assert!(h.state().clipboard_state.page_clipboard.is_some(), "the copy half of this didn't take");
 
-    h.event(egui::Event::Paste("placeholder".to_string()));
+    // What a real copy leaves on the system clipboard — not just any text, which
+    // since 0.1.75 counts as words copied elsewhere and wins over the copy.
+    h.event(egui::Event::Paste(COPIED_IN_PAGIFY.to_string()));
     h.run_steps(3);
 
     let after = h.state().tab().doc.as_ref().unwrap().page_count;
@@ -2677,7 +2679,7 @@ fn the_shortcut_still_copies_and_pastes_while_the_command_box_has_focus() {
 
     h.state_mut().tab_mut().organize.organize_selected.clear();
     let before = h.state().tab().doc.as_ref().unwrap().page_count;
-    h.event(egui::Event::Paste("placeholder".to_string()));
+    h.event(egui::Event::Paste(COPIED_IN_PAGIFY.to_string()));
     h.run_steps(3);
     let after = h.state().tab().doc.as_ref().unwrap().page_count;
     assert_eq!(

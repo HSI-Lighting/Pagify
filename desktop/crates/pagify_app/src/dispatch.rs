@@ -486,7 +486,13 @@ impl crate::PagifyApp {
                 }
             }
             Effect::Paste => {
-                if self.current_page_clipboard().is_some() {
+                // Something copied outside Pagify since its own last copy is
+                // what was meant — the system clipboard knows which came last.
+                let outside = self.tab().doc.is_some().then(|| (self.clipboard_state.read_outside)()).flatten();
+                if let Some(outside) = outside {
+                    let content = self.outside_content(outside);
+                    self.pick_up(content);
+                } else if self.current_page_clipboard().is_some() {
                     self.paste_organize_selection();
                 } else {
                     self.paste_object_selection();
