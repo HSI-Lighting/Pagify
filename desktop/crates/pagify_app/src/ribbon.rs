@@ -121,6 +121,7 @@ impl Tab {
                 ("\u{E5CD}", "Close", Command::Verb("close")),
                 ("\u{E161}", "Save", Command::Verb("save")),
                 ("\u{E161}", "Save As…", Command::Verb("saveas")),
+                ("\u{E80D}", "Save for sharing…", Command::Verb("sharecopy")),
                 ("\u{E8B8}", "PDFium", Command::Verb("pdfium")),
                 ("\u{F8C7}", "Quit", Command::Verb("quit")),
     ];

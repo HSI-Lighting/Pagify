@@ -434,6 +434,8 @@ impl crate::PagifyApp {
                 self.save(Some(path));
             }
             Effect::SaveAsDialog => self.save_as_dialog(),
+            Effect::SaveShareCopy(path) => self.save_share_copy(path),
+            Effect::ShareCopyDialog => self.share_copy_dialog(),
             Effect::RunExtract { pages, dest } => self.extract(&pages, &dest),
             Effect::RunImport { source, pages } => self.import(&source, &pages),
             Effect::RunDeletePages(pages) => self.delete_pages(&pages),

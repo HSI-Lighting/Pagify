@@ -161,6 +161,10 @@ pub enum Effect {
     SaveFileAs(std::path::PathBuf),
     /// Ask the platform where to save.
     SaveAsDialog,
+    /// Write a copy for sending to this path — see [`crate::Verb::ShareCopy`].
+    SaveShareCopy(std::path::PathBuf),
+    /// Ask the platform where to write that copy.
+    ShareCopyDialog,
     /// Extract pages to a file.
     RunExtract { pages: String, dest: std::path::PathBuf },
     /// Import pages from a file.
@@ -352,6 +356,8 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::Save => vec![Effect::SaveFile],
         Verb::SaveAs(path) => vec![Effect::SaveFileAs(path.clone())],
         Verb::SaveAsDialog => vec![Effect::SaveAsDialog],
+        Verb::ShareCopy(path) => vec![Effect::SaveShareCopy(path.clone())],
+        Verb::ShareCopyDialog => vec![Effect::ShareCopyDialog],
         Verb::Extract { pages, dest } => {
             vec![Effect::RunExtract { pages: pages.clone(), dest: dest.clone() }]
         }
@@ -598,6 +604,8 @@ mod tests {
             (Verb::Save, vec![Effect::SaveFile]),
             (Verb::SaveAs("a.pdf".into()), vec![Effect::SaveFileAs("a.pdf".into())]),
             (Verb::SaveAsDialog, vec![Effect::SaveAsDialog]),
+            (Verb::ShareCopy("s.pdf".into()), vec![Effect::SaveShareCopy("s.pdf".into())]),
+            (Verb::ShareCopyDialog, vec![Effect::ShareCopyDialog]),
             (
                 Verb::Extract { pages: "1-2".into(), dest: "o.pdf".into() },
                 vec![Effect::RunExtract { pages: "1-2".into(), dest: "o.pdf".into() }],

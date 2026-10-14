@@ -43,4 +43,21 @@ impl Session {
             registry::with_session(self.handle, |s| pdf_core::engine::save(s, file, incremental))
         })
     }
+
+    /// Write a copy of the document to send to somebody, its placed pictures
+    /// baked into the pages — see [`pdf_core::pdf::flatten`].
+    ///
+    /// The document in hand is read, never changed, and the file is written the
+    /// way [`Self::save_to`] writes one: somewhere else first, then renamed into
+    /// place, so a path that already holds a copy is replaced whole or not at all.
+    /// Always a full rewrite, so a signature over the document is void in the
+    /// copy — see [`Self::signature_count`] for what to tell the person.
+    pub fn save_flattened_to(&self, path: &Path) -> Result<pdf_core::pdf::flatten::Flattened> {
+        let copy = registry::with_session(self.handle, pdf_core::engine::flattened_copy)?;
+        write_then_rename(path, |file| {
+            use std::io::Write;
+            file.write_all(&copy.bytes).map_err(Into::into)
+        })?;
+        Ok(copy)
+    }
 }

@@ -673,3 +673,226 @@ fn a_paragraph_with_line_end_hyphens_pastes_with_no_control_character_and_no_oth
 fn placed_text(app: &PagifyApp) -> usize {
     app.tab().doc.as_ref().unwrap().session.text_runs(0).unwrap().len()
 }
+
+// ---- a letter is words, not a picture (0.1.77) ----
+//
+// Reported from use, with the session log: two characters were copied with Edit
+// Object and pasted, and neither could be edited. The log said `what=the letter`,
+// then `copy image 25x24px`, then `picture pasted`: Edit Object calls a
+// one-character text object "the letter" (clicking a word splits it into them),
+// and the copy treated only "the words" as text, so every letter went down as a
+// picture of itself — which Edit Text, rightly, finds no text in.
+
+/// A page whose words are single letters, each a text object of its own — the
+/// objects Edit Object calls "the letter".
+fn page_of_letters(content: &[u8]) -> egui_kittest::Harness<'static, PagifyApp> {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let bytes = crate::g4_edit_error_tests::page_with(content, "", &[]);
+    let dir = std::env::temp_dir().join("pagify-copy-letter-tests");
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let path = dir.join(format!("letters-{}-{}.pdf", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    std::fs::write(&path, bytes).expect("write the page");
+    crate::ui_tests::harness_from(PagifyApp::new(Some(&path.to_string_lossy())))
+}
+
+fn spot(h: &egui_kittest::Harness<'static, PagifyApp>, x: f64, y: f64) -> egui::Pos2 {
+    h.state().tab().view_state.last_view.expect("the page was never drawn").to_screen(AppPoint { x, y })
+}
+
+/// The page's text runs: `(object, text, rect)`.
+fn text_of(h: &egui_kittest::Harness<'static, PagifyApp>) -> Vec<(usize, String, pdf_core::document::Rect)> {
+    h.state().tab().doc.as_ref().unwrap().session.text_runs(0).unwrap().into_iter().map(|r| (r.object, r.text, r.rect)).collect()
+}
+
+/// A 24 pt "Q" at (100, 700): in the app's space, its box is about x 100-117, y 75-96.
+const ONE_LETTER: &[u8] = b"BT /F1 24 Tf 100 700 Td (Q) Tj ET";
+
+/// **The break this catches:** a letter copied as a picture of itself. Picked with
+/// Edit Object (which calls it "the letter"), copied, it is the letter as text —
+/// its size and colour with it — so that a paste is words.
+#[test]
+fn a_letter_picked_with_edit_object_is_copied_as_text_not_as_a_picture() {
+    let mut h = page_of_letters(ONE_LETTER);
+    h.state_mut().submit("editobject");
+    h.run_steps(1);
+    { let at = spot(&h, 108.0, 86.0); click(&mut h, at); }
+    h.run_steps(2);
+    let picked = h.state().tab().selection.selected.as_ref().map(|s| s.what);
+    assert_eq!(picked, Some("the letter"), "setup: Edit Object should call a one-character text object a letter");
+
+    h.event(egui::Event::Copy);
+    h.run_steps(3);
+    match &h.state().clipboard_state.object_clipboard {
+        Some(ObjectClipboard::Text { lines, size, .. }) => {
+            assert_eq!(lines, &["Q".to_string()]);
+            assert!((size - 24.0).abs() < 0.5, "copied at {size} pt");
+        }
+        Some(ObjectClipboard::Image { .. }) => panic!("the letter was copied as a picture"),
+        _ => panic!("nothing, or the wrong thing, was copied: {}", said(h.state())),
+    }
+}
+
+/// **The reported break, end to end.** Copy a letter, paste it, put it down, and
+/// click it with Edit Text: it opens as text, as the original does.
+#[test]
+fn a_pasted_letter_opens_in_edit_text_as_text() {
+    let mut h = page_of_letters(ONE_LETTER);
+    h.state_mut().submit("editobject");
+    h.run_steps(1);
+    { let at = spot(&h, 108.0, 86.0); click(&mut h, at); }
+    h.run_steps(2);
+    h.event(egui::Event::Copy);
+    h.run_steps(3);
+    h.event(egui::Event::Paste(COPIED_IN_PAGIFY.into()));
+    h.run_steps(3);
+    assert!(h.state().clipboard_state.paste_ghost.is_some(), "setup: the copy was not picked up; said {}", said(h.state()));
+    { let at = spot(&h, 300.0, 200.0); click(&mut h, at); }
+    h.run_steps(3);
+
+    let pasted = text_of(&h).into_iter().find(|(_, text, rect)| text.trim() == "Q" && rect.left > 250.0).expect("the pasted letter is on the page as text");
+    h.state_mut().submit("edittext");
+    h.run_steps(1);
+    { let at = spot(&h, ((pasted.2.left + pasted.2.right) / 2.0) as f64, ((pasted.2.top + pasted.2.bottom) / 2.0) as f64); click(&mut h, at); }
+    h.run_steps(3);
+    let editing = h.state().tab().edit.editing_run.as_ref().map(|e| e.buffer.trim().to_string());
+    assert_eq!(editing.as_deref(), Some("Q"), "the pasted letter did not open as text; said {}", said(h.state()));
+}
+
+/// **The break:** the same fault in the group copy, where a marquee over letters
+/// sent them down the picture path with the shapes. Every letter of the group is
+/// copied as text.
+#[test]
+fn letters_picked_together_are_copied_as_text() {
+    let mut h = page_of_letters(b"BT /F1 24 Tf 100 700 Td (A) Tj ET BT /F1 24 Tf 160 700 Td (B) Tj ET");
+    let letters = text_of(&h);
+    assert_eq!(letters.len(), 2, "setup: {letters:?}");
+    let group: Vec<Selected> = letters.iter().map(|(object, _, rect)| Selected { page: 0, object: *object, rect: *rect, what: "the letter" }).collect();
+    h.state_mut().tab_mut().selection.group = group;
+
+    h.event(egui::Event::Copy);
+    h.run_steps(3);
+    let Some(ObjectClipboard::Group(items)) = &h.state().clipboard_state.object_clipboard else {
+        panic!("a group was not copied: {}", said(h.state()));
+    };
+    let texts: Vec<&Vec<String>> = items.iter().filter_map(|(c, ..)| if let ObjectClipboard::Text { lines, .. } = c { Some(lines) } else { None }).collect();
+    assert_eq!(texts.len(), 2, "the letters were not both copied as text: {} of {}", texts.len(), items.len());
+}
+
+/// **The break:** a letter picked with a picture dragging the picture down with it.
+/// Words in a group are set apart before the rest is lifted as lines; with the
+/// letter counted among the drawings, the lift was refused for all of them
+/// ("words are copied as words") and the picture was copied as pixels.
+#[test]
+fn a_letter_picked_with_a_picture_does_not_stop_the_picture_being_lifted() {
+    let image = b"<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length 3 >>\nstream\n\xff\x00\x00\nendstream".to_vec();
+    let bytes = crate::g4_edit_error_tests::page_with(
+        b"q 80 0 0 80 300 600 cm /Im Do Q BT /F1 24 Tf 100 700 Td (Q) Tj ET",
+        "/XObject << /Im 6 0 R >>",
+        &[image],
+    );
+    let dir = std::env::temp_dir().join("pagify-copy-letter-tests");
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let path = dir.join(format!("mixed-{}.pdf", std::process::id()));
+    std::fs::write(&path, bytes).expect("write");
+    let mut h = crate::ui_tests::harness_from(PagifyApp::new(Some(&path.to_string_lossy())));
+
+    let session = &h.state().tab().doc.as_ref().unwrap().session;
+    let picture = session.images_on(0).expect("images").remove(0);
+    let letter = session.text_runs(0).expect("runs").into_iter().find(|r| r.text.trim() == "Q").expect("the letter");
+    let group = vec![
+        Selected { page: 0, object: letter.object, rect: letter.rect, what: "the letter" },
+        Selected { page: 0, object: picture.object, rect: picture.rect, what: "the picture" },
+    ];
+    h.state_mut().tab_mut().selection.group = group;
+    h.event(egui::Event::Copy);
+    h.run_steps(3);
+
+    let Some(ObjectClipboard::Group(items)) = &h.state().clipboard_state.object_clipboard else {
+        panic!("a group was not copied: {}", said(h.state()));
+    };
+    assert!(items.iter().any(|(c, ..)| matches!(c, ObjectClipboard::Lifted { .. })), "the picture was not lifted as lines: {}", said(h.state()));
+    assert!(items.iter().any(|(c, ..)| matches!(c, ObjectClipboard::Text { lines, .. } if lines == &["Q".to_string()])), "the letter was not copied as text");
+}
+
+/// **Your file, your click.** The session log of 2026-10-14: on the VIVO datasheet
+/// Edit Object picked a header letter (object 168, "the letter"), and copying it
+/// made a picture. Now it is the letter as text, and pasted it opens in Edit Text.
+/// Skipped when the file is not on this machine.
+#[test]
+fn the_vivo_headers_letter_is_copied_as_text_and_edits_when_pasted() {
+    if !std::path::Path::new(VIVO).exists() {
+        eprintln!("skipped: VIVO mini.pdf is not at {VIVO}");
+        return;
+    }
+    let mut h = crate::ui_tests::harness_from(PagifyApp::new(Some(VIVO)));
+    h.state_mut().submit("editobject");
+    h.run_steps(1);
+    // The centre of object 168, which the log names: (45.8, 26.0)-(54.4, 34.0).
+    { let at = spot(&h, 50.1, 30.0); click(&mut h, at); }
+    h.run_steps(3);
+    let picked = h.state().tab().selection.selected.as_ref().map(|s| (s.what, s.object));
+    assert_eq!(picked.map(|p| p.0), Some("the letter"), "setup: picked {picked:?}");
+
+    h.event(egui::Event::Copy);
+    h.run_steps(3);
+    assert!(
+        matches!(h.state().clipboard_state.object_clipboard, Some(ObjectClipboard::Text { .. })),
+        "the letter was not copied as text: {}",
+        said(h.state())
+    );
+    let before = text_of(&h).len();
+    h.event(egui::Event::Paste(COPIED_IN_PAGIFY.into()));
+    h.run_steps(3);
+    // Bare paper well inside the page: the strip's top-right, beside the title.
+    { let at = spot(&h, 440.0, 45.0); click(&mut h, at); }
+    h.run_steps(3);
+    let now = text_of(&h);
+    let pasted = now.iter().skip(before.saturating_sub(1)).find(|(_, _, rect)| rect.left > 420.0 && rect.top < 60.0).expect("the pasted letter is on the page as text").clone();
+    h.state_mut().submit("edittext");
+    h.run_steps(1);
+    { let at = spot(&h, ((pasted.2.left + pasted.2.right) / 2.0) as f64, ((pasted.2.top + pasted.2.bottom) / 2.0) as f64); click(&mut h, at); }
+    h.run_steps(3);
+    assert!(h.state().tab().edit.editing_run.is_some(), "the pasted letter did not open in Edit Text; said {}", said(h.state()));
+}
+
+/// **The break:** the letters of a word, whose boxes touch, merged into one box —
+/// the way touching shapes are — so that all but one were lost from the copy. A
+/// marquee over part of a word is exactly this selection.
+#[test]
+fn touching_letters_picked_together_are_all_copied() {
+    let mut h = page_of_letters(b"BT /F1 24 Tf 100 700 Td (A) Tj ET BT /F1 24 Tf 116 700 Td (B) Tj ET");
+    let letters = text_of(&h);
+    assert_eq!(letters.len(), 2, "setup: {letters:?}");
+    // Boxes made to overlap, as the letters of a word do.
+    let group: Vec<Selected> = letters
+        .iter()
+        .map(|(object, _, rect)| Selected {
+            page: 0,
+            object: *object,
+            rect: pdf_core::document::Rect { right: rect.right + 3.0, ..*rect },
+            what: "the letter",
+        })
+        .collect();
+    h.state_mut().tab_mut().selection.group = group;
+    h.event(egui::Event::Copy);
+    h.run_steps(3);
+
+    let Some(ObjectClipboard::Group(items)) = &h.state().clipboard_state.object_clipboard else {
+        panic!("a group was not copied: {}", said(h.state()));
+    };
+    let texts: Vec<String> = items.iter().filter_map(|(c, ..)| if let ObjectClipboard::Text { lines, .. } = c { Some(lines.concat()) } else { None }).collect();
+    assert_eq!(texts.len(), 2, "letters were merged away: {texts:?}");
+}
+
+/// **The break:** a sideways letter (size 0, so copied as a picture) pasted with
+/// the page's white paper round it, hiding what it is put down over. A letter is
+/// sideways words like any other: the paper is made see-through.
+#[test]
+fn a_sideways_letter_is_a_picture_with_its_paper_cleared() {
+    let Some(mut app) = vivo() else { return };
+    let run = app.tab().doc.as_ref().unwrap().session.text_runs(0).unwrap().into_iter().find(|r| !(r.size > 0.0)).expect("VIVO's sideways label");
+    app.tab_mut().selection.selected = Some(Selected { page: 0, object: run.object, rect: run.rect, what: "the letter" });
+    assert!(app.copy_object_selection());
+    let Some(ObjectClipboard::Image { rgba, .. }) = &app.clipboard_state.object_clipboard else { panic!("not a picture") };
+    assert_eq!(rgba[3], 0, "the paper round the letter was left white (alpha {})", rgba[3]);
+}

@@ -47,6 +47,12 @@ impl Focus {
         Focus { widget }
     }
 
+    /// Whether this one widget had focus when the frame began — for a decision
+    /// about what to do with an event that widget is about to receive.
+    pub fn is_on(&self, widget: egui::Id) -> bool {
+        self.widget == Some(widget)
+    }
+
     /// Keys that submit or edit the command line — Enter, history recall.
     /// Only when the command box itself has focus. (Not Space: that is a
     /// space; see the note in `ui` where it used to submit.)

@@ -1230,3 +1230,93 @@ fn a_width_dragged_to_stays() {
     assert!((back - start).abs() < 3.0, "dragged back by 100 pt from {wider}, expected about {start}, now {back}");
 }
 
+
+// ---- Ctrl+V with the Edit Text box open (0.1.78) ----
+//
+// Found while looking into a pasted letter: after any Pagify copy the system
+// clipboard holds the placeholder `(copied in Pagify)` so that Ctrl+V has an
+// event to fire on. In an open Edit Text box the box's own text field takes that
+// event and types it — the words "(copied in Pagify)" in the middle of somebody's
+// sentence.
+
+const HELLO: &[u8] = b"BT /F1 12 Tf 72 700 Td (Hello) Tj ET";
+
+fn buffer(h: &Harness<'static, PagifyApp>) -> String {
+    h.state().tab().edit.editing_run.as_ref().expect("the editor is open").buffer.clone()
+}
+
+/// The box's words with its own line breaks flattened: it wraps at spaces, so
+/// "from a browser" arrives in the buffer one word to a line.
+fn flat(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn pagify_copied_words(h: &mut Harness<'static, PagifyApp>, words: &str) {
+    h.state_mut().clipboard_state.object_clipboard = Some(ObjectClipboard::Text {
+        lines: vec![words.to_string()],
+        size: 12.0,
+        color: pdf_core::document::Color { r: 0, g: 0, b: 0, a: 255 },
+        face: None,
+        track: 1.0,
+    });
+}
+
+/// **The reported break.** Pagify's own copy of words, pasted into the box, types
+/// those words — and never the placeholder that stands in for the copy.
+#[test]
+fn ctrl_v_in_an_open_box_after_a_pagify_copy_types_the_copied_words_not_the_placeholder() {
+    let mut h = editing_first_thing_of(HELLO);
+    pagify_copied_words(&mut h, "ZZTOP");
+    h.event(egui::Event::Paste(COPIED_IN_PAGIFY.into()));
+    h.run_steps(3);
+
+    let typed = flat(&buffer(&h));
+    assert!(!typed.contains("copied in Pagify"), "the placeholder was typed into the box: {typed:?}");
+    assert!(typed.contains("ZZTOP"), "the copied words were not typed: {typed:?}");
+}
+
+/// **The break:** a copy that is not words (a picture) typing its placeholder, or
+/// anything, into a box that can only hold words.
+#[test]
+fn ctrl_v_in_an_open_box_after_copying_a_picture_types_nothing() {
+    let mut h = editing_first_thing_of(HELLO);
+    let before = buffer(&h);
+    let rect = pdf_core::document::Rect { left: 0.0, top: 0.0, right: 10.0, bottom: 10.0 };
+    h.state_mut().clipboard_state.object_clipboard =
+        Some(ObjectClipboard::Image { rgba: [255u8, 0, 0, 255].repeat(4), width: 2, height: 2, rect });
+    h.event(egui::Event::Paste(COPIED_IN_PAGIFY.into()));
+    h.run_steps(3);
+
+    assert_eq!(buffer(&h), before, "something was typed into the box");
+}
+
+/// What this must not take away: words copied in another program still go into
+/// the box, as they always did.
+#[test]
+fn words_copied_elsewhere_still_go_into_an_open_box() {
+    let mut h = editing_first_thing_of(HELLO);
+    pagify_copied_words(&mut h, "NOT THESE");
+    h.event(egui::Event::Paste("from a browser".into()));
+    h.run_steps(3);
+
+    let typed = flat(&buffer(&h));
+    assert!(typed.contains("from a browser"), "words from outside were not typed: {typed:?}");
+    assert!(!typed.contains("NOT THESE"), "Pagify's own copy was typed over the words from outside: {typed:?}");
+}
+
+/// **The break:** the swap reaching a text field that is not the box — the
+/// command line, say — and typing Pagify's copied words into it. Only the box
+/// that is focused is given them.
+#[test]
+fn the_copied_words_are_not_typed_into_the_command_line_while_the_box_is_open() {
+    let mut h = editing_first_thing_of(HELLO);
+    pagify_copied_words(&mut h, "ZZTOP");
+    h.ctx.memory_mut(|m| m.request_focus(egui::Id::new(COMMAND_INPUT)));
+    h.run_steps(2);
+    assert!(h.ctx.memory(|m| m.has_focus(egui::Id::new(COMMAND_INPUT))), "setup: the command line should have focus");
+
+    h.event(egui::Event::Paste(COPIED_IN_PAGIFY.into()));
+    h.run_steps(3);
+
+    assert!(!h.state().cmd.input().contains("ZZTOP"), "Pagify's words were typed into the command line: {:?}", h.state().cmd.input());
+}

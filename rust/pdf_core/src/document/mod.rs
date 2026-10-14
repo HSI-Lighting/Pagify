@@ -985,6 +985,19 @@ pub trait Document: Send + Sync {
         Err(PdfError::Unsupported("copying drawings as lines"))
     }
 
+    /// The whole document as it stands, as a copy to send to somebody: every
+    /// visible mark annotation — a placed picture, a highlight — baked into its
+    /// page, because a thumbnail or preview renderer draws a page and not what
+    /// is laid over it. See [`crate::pdf::flatten`] for what is and is not
+    /// flattened, and why pictures go down as plain images.
+    ///
+    /// **Reads, never changes**: the document in hand keeps its annotations and
+    /// stays editable. Refused for a document with a password, whose copy would
+    /// otherwise come out without one.
+    fn flattened_copy(&self) -> Result<crate::pdf::flatten::Flattened> {
+        Err(PdfError::Unsupported("saving a copy for sharing"))
+    }
+
     /// The paths of a page — exactly the entries of [`Document::drawn_objects`]
     /// whose kind is [`DrawnKind::Shape`], the same ones in the same order — for
     /// a caller that has no use for the rest.

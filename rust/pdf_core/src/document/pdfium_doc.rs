@@ -2172,6 +2172,20 @@ impl Document for PdfiumDocument {
         self.lift(page_index, objects)
     }
 
+    /// See [`Document::flattened_copy`].
+    ///
+    /// Starts from `readable_bytes`, PDFium's own account of the document as it
+    /// stands, so an edit not yet saved is in the copy — and never from the file
+    /// on disk, whose signature, if any, the rewrite would void either way.
+    fn flattened_copy(&self) -> Result<crate::pdf::flatten::Flattened> {
+        // Refused, not written without: `readable_bytes` is plain, so a copy of
+        // a document with a password would come out with none.
+        if self.already_secured || self.security.is_some() || self.secure_plus {
+            return Err(PdfError::Unsupported("a copy for sharing of a document with a password"));
+        }
+        crate::pdf::flatten::flatten_annotations(&self.readable_bytes()?)
+    }
+
     fn drawn_objects(&self, page_index: usize) -> Result<Vec<crate::document::DrawnObject>> {
         self.drawn_walk(page_index, false)
     }

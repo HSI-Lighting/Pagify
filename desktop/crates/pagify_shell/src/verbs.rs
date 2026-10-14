@@ -157,6 +157,12 @@ pub enum Verb {
     /// Ask for a destination, rather than being told one. `saveas` with no
     /// path — see [`Verb::OpenDialog`], which is the same idea for opening.
     SaveAsDialog,
+    /// Write a copy to send to somebody to this path: the placed pictures
+    /// baked into the pages, so a preview that draws only the page shows them.
+    /// The open document is left as it is, still editable.
+    ShareCopy(PathBuf),
+    /// Ask where, rather than being told: bare `sharecopy`.
+    ShareCopyDialog,
     Page(PageTarget),
     Zoom(ZoomTarget),
     /// Rotate the *page*, in degrees clockwise. Quarter turns only — PDF stores
@@ -953,7 +959,7 @@ fn split_path_and_extra(tail: &str) -> Option<(String, String)> {
 /// Every token this table claims, for the collision test and for help.
 pub fn claimed_tokens() -> Vec<&'static str> {
     let mut tokens = vec![
-        "open", "close", "save", "saveas", "page", "p", "next", "zoom", "z", "fit",
+        "open", "close", "save", "saveas", "sharecopy", "page", "p", "next", "zoom", "z", "fit",
         "rotate", "undo", "redo", "pdfium", "version", "checkupdate", "quit", "exit", "help",
         "close!", "quit!", "exit!",
         // Several page operations are spelt out rather than taking the short
@@ -1351,6 +1357,14 @@ fn parse_file_and_view(head: &str, rest: &[&str], tail: &str) -> Option<Result<V
                 Ok(Verb::SaveAsDialog)
             } else {
                 Ok(Verb::SaveAs(resolve_path(tail)))
+            }
+        }
+        // The same shape as `saveas`: bare asks where, a path means that path.
+        "sharecopy" => {
+            if tail.is_empty() {
+                Ok(Verb::ShareCopyDialog)
+            } else {
+                Ok(Verb::ShareCopy(resolve_path(tail)))
             }
         }
 

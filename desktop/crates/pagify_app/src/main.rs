@@ -2177,6 +2177,17 @@ struct Selected {
     what: &'static str,
 }
 
+impl Selected {
+    /// Whether this is written text: a run of words, or the one-character text
+    /// object Edit Object calls "the letter" (clicking a word splits it into
+    /// them). Both are copied as words; anything else is a picture or a shape.
+    /// Comparing against `"the words"` alone sent every letter down the picture
+    /// path — pasted, it was a picture of a letter, and Edit Text found no text.
+    fn is_text(&self) -> bool {
+        matches!(self.what, "the words" | "the letter")
+    }
+}
+
 /// See [`PagifyApp::right_click_text_actions`]'s own doc for why this
 /// exists as a cache rather than being computed where it is used.
 #[derive(Debug, Clone, Copy, Default)]
@@ -3029,9 +3040,46 @@ impl PagifyApp {
     /// submit gate, document keys and the shortcuts. `command_id` and `frame`
     /// are passed in because widgets drawn later in the same frame need them
     /// too.
+    /// **Ctrl+V with the Edit Text box focused.** egui-winit sends the system
+    /// clipboard's text, and after any Pagify copy that is the placeholder
+    /// `(copied in Pagify)` — which the box's own text field would type into the
+    /// words. Swapped, before the box sees it, for the words Pagify copied; and
+    /// dropped when the copy was not words (a picture), since nothing it holds
+    /// can be typed. Words copied somewhere else are left as they came.
+    fn give_the_open_box_the_copy_not_its_placeholder(&mut self, ctx: &egui::Context, focus: &Focus) {
+        let Some(edit) = self.tab().edit.editing_run.as_ref() else { return };
+        if !focus.is_on(egui::Id::new(("run-editor", edit.page, edit.object))) {
+            return;
+        }
+        let own = match &self.clipboard_state.object_clipboard {
+            Some(ObjectClipboard::Text { lines, .. }) => Some(lines.join("\n")),
+            _ => None,
+        };
+        let mut refused = false;
+        ctx.input_mut(|i| {
+            i.events.retain_mut(|event| match event {
+                egui::Event::Paste(text) if text == COPIED_IN_PAGIFY => match &own {
+                    Some(own) => {
+                        *text = own.clone();
+                        true
+                    }
+                    None => {
+                        refused = true;
+                        false
+                    }
+                },
+                _ => true,
+            })
+        });
+        if refused {
+            self.say_info("that copy is not words, so there is nothing to type into the box.");
+        }
+    }
+
     fn handle_input(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame, command_id: egui::Id) {
         // The focus guard — §5.5. Read once, before any widget runs.
         let focus = Focus::capture(&ctx);
+        self.give_the_open_box_the_copy_not_its_placeholder(ctx, &focus);
 
         // **Space is a space.** It used to be a second Enter here — swallowed
         // from the box and the line run as it stood — on the strength of a
@@ -8377,7 +8425,7 @@ impl PagifyApp {
             // that overlap are copied as one picture of the page over their
             // joint box, as before — see [`merge_overlapping`].
             let (words, drawn): (Vec<Selected>, Vec<Selected>) =
-                members.into_iter().partition(|s| s.what == "the words");
+                members.into_iter().partition(Selected::is_text);
             let lifted = if drawn.is_empty() { None } else { self.lift_members(page, &drawn) };
             let members = match lifted {
                 Some(_) => words,
@@ -8490,7 +8538,7 @@ impl PagifyApp {
     /// [`clear_paper_around`]) so that it can be set down over other things.
     fn copy_page_object(&mut self, sel: &Selected) -> bool {
         // A picture or shape goes as lines when the page can be followed.
-        let lines = (sel.what != "the words").then(|| self.lift_members(sel.page, std::slice::from_ref(sel))).flatten();
+        let lines = (!sel.is_text()).then(|| self.lift_members(sel.page, std::slice::from_ref(sel))).flatten();
         let Some(content) = lines.or_else(|| self.content_for_selected(sel)) else { return false };
         // The source rect only — never logged by `put_on_clipboard` itself,
         // since `ObjectClipboard` carries no rect for `Text`. Matched up
@@ -8509,7 +8557,7 @@ impl PagifyApp {
     /// [`Self::copy_object_selection`].
     fn content_for_selected(&self, sel: &Selected) -> Option<ObjectClipboard> {
         let page = sel.page;
-        let run = if sel.what == "the words" {
+        let run = if sel.is_text() {
             Some(
                 self.tab()
                     .doc
@@ -8538,7 +8586,7 @@ impl PagifyApp {
             let raster = self.tab().doc.as_ref().and_then(|d| d.session.render_page_region(page, sel.rect, 3.0).ok())?;
             let mut rgba = raster.pixels;
             // The paper round a shape, or round sideways words, is the page's.
-            if sel.what == "the shape" || sel.what == "the words" {
+            if sel.what == "the shape" || sel.is_text() {
                 clear_paper_around(&mut rgba, raster.width as usize, raster.height as usize);
             }
             Some(ObjectClipboard::Image { rgba, width: raster.width, height: raster.height, rect: sel.rect })
@@ -9447,6 +9495,81 @@ impl PagifyApp {
                 self.save(Some(path));
             }
             None => self.say_info("nothing chosen."),
+        }
+    }
+
+    /// Ask where to write a copy for sending, offering `<name> (for sharing).pdf`
+    /// beside the document so that the first thing it suggests is not the file
+    /// being edited.
+    fn share_copy_dialog(&mut self) {
+        let Some(doc) = &self.tab_mut().doc else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let current = doc.session.path().to_path_buf();
+        let stem = current.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "document".into());
+
+        let mut dialog = rfd::FileDialog::new().set_title("Save a copy for sharing").add_filter("PDF", &["pdf"]);
+        if let Some(dir) = current.parent() {
+            dialog = dialog.set_directory(dir);
+        }
+        match dialog.set_file_name(format!("{stem} (for sharing).pdf")).save_file() {
+            Some(path) => self.save_share_copy(path),
+            None => self.say_info("nothing chosen."),
+        }
+    }
+
+    /// `sharecopy`: write a copy of the document to send to somebody, its placed
+    /// pictures baked into the pages — see [`pagify_shell::Session::save_flattened_to`].
+    /// The document open is left as it is, still editable.
+    fn save_share_copy(&mut self, dest: PathBuf) {
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            self.say_error("nothing open.");
+            return;
+        };
+        // **Never the document's own file.** The one way to flatten the original,
+        // whose pictures could then no longer be dragged by their handles.
+        let own = std::fs::canonicalize(session.path()).ok();
+        if own.is_some() && own == std::fs::canonicalize(&dest).ok() {
+            self.say_error("that is the open document itself — choose another name for the copy.");
+            return;
+        }
+        // Drawn ink goes in too: the copy is what the document would save.
+        if self.commit_markup_for_writing(&session).is_none() {
+            return;
+        }
+        let signatures = session.signature_count();
+        match session.save_flattened_to(&dest) {
+            Ok(report) => {
+                let plural = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+                let baked = match (report.pictures, report.forms) {
+                    (0, 0) => "nothing needed baking in".to_string(),
+                    (p, 0) => format!("{} baked into the page", plural(p, "picture", "pictures")),
+                    (0, f) => format!("{} baked into the page", plural(f, "mark", "marks")),
+                    (p, f) => format!(
+                        "{} and {} baked into the page",
+                        plural(p, "picture", "pictures"),
+                        plural(f, "other mark", "other marks")
+                    ),
+                };
+                self.say_info(format!("saved a copy for sharing to {} — {baked}. Your open document is unchanged.", dest.display()));
+                if report.bare > 0 {
+                    self.say_info(format!(
+                        "{} (highlights, underlines or ink) {} no appearance to bake in, so a preview will not show {}.",
+                        plural(report.bare, "mark", "marks"),
+                        if report.bare == 1 { "has" } else { "have" },
+                        if report.bare == 1 { "it" } else { "them" },
+                    ));
+                }
+                if signatures > 0 {
+                    self.say_error(format!(
+                        "the copy was rewritten, which breaks the {} in it — your open document keeps {}.",
+                        plural(signatures, "signature", "signatures"),
+                        if signatures == 1 { "its" } else { "them" },
+                    ));
+                }
+            }
+            Err(e) => self.say_error(format!("could not write the copy: {e}")),
         }
     }
 
@@ -10917,6 +11040,31 @@ impl PagifyApp {
         }
     }
 
+    /// Commit every marked page into the document before it is written: real
+    /// ink for any reader, plus the live geometry so it is still editable next
+    /// time. How many marks were stored, and what could not be — or `None`,
+    /// after saying why, when a page could not be written.
+    fn commit_markup_for_writing(&mut self, session: &pagify_shell::Session) -> Option<(usize, Vec<&'static str>)> {
+        let mut stored = 0;
+        let mut skipped = Vec::new();
+        let marked_pages = self.tab().markup.marked_pages();
+        for page in marked_pages {
+            if let Some(layer) = self.tab_mut().markup.existing(page) {
+                match session.commit_markup(page, layer, MARKUP_INK, 1.5) {
+                    Ok(committed) => {
+                        stored += committed.objects_stored;
+                        skipped.extend(committed.skipped.into_iter().map(|s| s.what));
+                    }
+                    Err(e) => {
+                        self.say_error(format!("could not write the markup on page {}: {e}", page + 1));
+                        return None;
+                    }
+                }
+            }
+        }
+        Some((stored, skipped))
+    }
+
     fn save(&mut self, dest: Option<PathBuf>) -> SaveOutcome {
         let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
             self.say_error("nothing open.");
@@ -10959,25 +11107,9 @@ impl PagifyApp {
             return SaveOutcome::Asking;
         }
 
-        // Commit every marked page before writing: real ink for any reader,
-        // plus the live geometry so it is still editable next time.
-        let mut stored = 0;
-        let mut skipped = Vec::new();
-        let marked_pages = self.tab().markup.marked_pages();
-        for page in marked_pages {
-            if let Some(layer) = self.tab_mut().markup.existing(page) {
-                match session.commit_markup(page, layer, MARKUP_INK, 1.5) {
-                    Ok(committed) => {
-                        stored += committed.objects_stored;
-                        skipped.extend(committed.skipped.into_iter().map(|s| s.what));
-                    }
-                    Err(e) => {
-                        self.say_error(format!("could not write the markup on page {}: {e}", page + 1));
-                        return SaveOutcome::Failed;
-                    }
-                }
-            }
-        }
+        let Some((stored, skipped)) = self.commit_markup_for_writing(&session) else {
+            return SaveOutcome::Failed;
+        };
 
         // **Incremental only when there is a signature to keep**: a signature
         // covers a byte range, and a full rewrite relocates every object in the
@@ -16000,7 +16132,7 @@ fn merge_overlapping(members: Vec<Selected>) -> Vec<Selected> {
     let touches = |a: &pdf_core::document::Rect, b: &pdf_core::document::Rect| {
         a.left <= b.right + NEAR && b.left <= a.right + NEAR && a.top <= b.bottom + NEAR && b.top <= a.bottom + NEAR
     };
-    let (mut merged, pieces): (Vec<Selected>, Vec<Selected>) = members.into_iter().partition(|s| s.what == "the words");
+    let (mut merged, pieces): (Vec<Selected>, Vec<Selected>) = members.into_iter().partition(Selected::is_text);
     let mut boxes: Vec<Selected> = Vec::new();
     for mut piece in pieces {
         while let Some(i) = boxes.iter().position(|b| touches(&b.rect, &piece.rect)) {
@@ -16251,6 +16383,9 @@ mod raster_scale_tests;
 
 #[cfg(test)]
 mod g4_edit_error_tests;
+
+#[cfg(test)]
+mod share_copy_tests;
 
 #[cfg(test)]
 mod run_editor_font_size_tests;
