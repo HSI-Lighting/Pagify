@@ -46,7 +46,7 @@ impl Session {
     /// Hide an area, keeping a sealed copy a passcode can bring back.
     ///
     /// The passcode is borrowed and never stored — not here, not in the command
-    /// history, not in the recorder. `outlined_fonts` is the same candidate list
+    /// history. `outlined_fonts` is the same candidate list
     /// [`Session::preview_redaction`] takes, for the same reason.
     /// Hide an area, keeping a sealed copy so a passcode can bring it back.
     ///

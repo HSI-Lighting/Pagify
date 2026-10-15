@@ -149,8 +149,7 @@ pub enum Verb {
     /// `force` is the `!` form — `close!` — which discards unsaved marks.
     ///
     /// Spelt as a separate word rather than answered at a prompt so that it is
-    /// typeable, scriptable and recordable like everything else. A modal dialog
-    /// would be a fourth kind of thing the Automate tab could not replay.
+    /// typeable and scriptable like everything else.
     Close { force: bool },
     Save,
     SaveAs(PathBuf),
@@ -360,8 +359,8 @@ pub enum Verb {
     ///
     /// §7's claim is that anything clickable is typeable. Without this, every
     /// interactive tool — fillet, trim, offset, measure — is reachable only
-    /// with a pointer, which makes them unscriptable, unrecordable by the
-    /// Automate tab, and untestable without a window.
+    /// with a pointer, which makes them unscriptable and untestable without a
+    /// window.
     Pick(AppPointArg),
 
     // Organize — phase 10.
@@ -416,11 +415,6 @@ pub enum Verb {
     /// Report the calibration currently in force.
     Scale,
     Measure(MeasureKind),
-
-    // Automate — phase 11.
-    Record(String),
-    StopRecording,
-    Replay(PathBuf),
 
     /// List every annotation on this page, including ones made elsewhere.
     ListMarks,
@@ -971,7 +965,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "highlight", "hl", "note", "calibrate", "cal", "pagescale", "measure",
         "find", "findnext", "fn", "findprev", "fp", "replace", "spelling", "bookmark",
         "articlebox", "weblinks", "jointext", "reflow",
-        "record", "stop", "endrecord", "replay", "pick", "textlayer", "whytext",
+        "pick", "textlayer", "whytext",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
         "unsecure", "redact",
@@ -1013,7 +1007,6 @@ pub fn help_text(topic: Option<&str>) -> Vec<String> {
         "text       find <text>   findnext / fn   findprev / fp   — ⌘C copies a selection".into(),
         "           reflow — rebuild this page's reading order, when it does not read right".into(),
         "measure    calibrate <distance> [unit]   pagescale   measure <distance|area>".into(),
-        "automate   record [name]   stop   replay <script.json>".into(),
         "edit       undo redo".into(),
         "text       textlayer   — what kind of text this page has, and why selection".into(),
         "           may be doing nothing".into(),
@@ -1501,18 +1494,6 @@ fn parse_marks_and_misc(head: &str, rest: &[&str], tail: &str) -> Option<Result<
             Some("area") | Some("a") => Ok(Verb::Measure(MeasureKind::Area)),
             Some(other) => Err(format!("measure: expected distance or area, got '{other}'")),
         },
-
-        "record" => Ok(Verb::Record(
-            rest.join(" ").trim().to_string(),
-        )),
-        "stop" | "endrecord" => Ok(Verb::StopRecording),
-        "replay" => {
-            if tail.is_empty() {
-                Err("usage: replay <script.json>".into())
-            } else {
-                Ok(Verb::Replay(resolve_path(tail)))
-            }
-        }
 
         "pick" => match rest.first() {
             Some(pair) => match pair.split_once(',') {

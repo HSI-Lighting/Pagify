@@ -71,6 +71,35 @@ pub(crate) struct DocCaches {
     /// The words a page draws rather than writes — see
     /// [`crate::PagifyApp::drawn_words_on`].
     pub(super) drawn_words: Option<((usize, u64, u64), Vec<pdf_core::document::RecognisedWord>)>,
+    /// What a click on a page can pick — see [`crate::PagifyApp::page_hits`].
+    pub(super) hits: std::cell::RefCell<Option<((usize, u64, u64), std::rc::Rc<PageHits>)>>,
+}
+
+/// A page's words, pictures and shapes as a click finds them, read once for the page
+/// as it is — see [`crate::PagifyApp::page_hits`].
+pub(crate) struct PageHits {
+    pub(crate) words: Vec<(usize, pdf_core::document::Rect)>,
+    pub(crate) pictures: Vec<pdf_core::document::PageImage>,
+    pub(crate) drawn: Vec<pdf_core::document::DrawnObject>,
+    /// Each shape's outline, read the first time a point is measured against it;
+    /// `None` for one that could not be read.
+    outlines: std::cell::RefCell<std::collections::HashMap<usize, Option<std::rc::Rc<Vec<Vec<(f32, f32)>>>>>>,
+}
+
+impl PageHits {
+    /// `object`'s outline on `page`, read the first time it is asked for.
+    pub(crate) fn outline(
+        &self,
+        session: &pagify_shell::session::Session,
+        page: usize,
+        object: usize,
+    ) -> Option<std::rc::Rc<Vec<Vec<(f32, f32)>>>> {
+        self.outlines
+            .borrow_mut()
+            .entry(object)
+            .or_insert_with(|| session.object_outline(page, object).ok().filter(|o| !o.is_empty()).map(std::rc::Rc::new))
+            .clone()
+    }
 }
 
 impl DocCaches {
@@ -93,6 +122,7 @@ impl DocCaches {
         self.foreign = None;
         self.internal_links = None;
         self.drawn_words = None;
+        self.hits.get_mut().take();
     }
 
     /// Drop the whole-page textures and the detail crop for pages that have
@@ -341,6 +371,30 @@ impl crate::PagifyApp {
         let weight = doc.session.page_scale(page).ok()?;
         doc.caches.weight.set(Some((stamp, weight)));
         Some(weight)
+    }
+
+    /// **What a click on `page` can pick, read once for the page as it is** and kept:
+    /// the boxes [`Self::thing_at`] ranks. Edit Object's hover box asks on every frame
+    /// the pointer moves, and every read takes the one lock over PDFium — measured, the
+    /// shapes alone took 32 ms on VIVO's page (838) and 74 ms on the datasheet's (1,400).
+    /// Stamped like [`Self::page_weight`], and dropped with everything else by
+    /// `rendered_is_stale`.
+    pub(crate) fn page_hits(&self, page: usize) -> Option<std::rc::Rc<PageHits>> {
+        let doc = self.tab().doc.as_ref()?;
+        let stamp = (page, doc.render_epoch, doc.session.undo_generation());
+        if let Some((held, hits)) = doc.caches.hits.borrow().as_ref() {
+            if *held == stamp {
+                return Some(hits.clone());
+            }
+        }
+        let hits = std::rc::Rc::new(PageHits {
+            words: doc.session.text_run_rects(page).unwrap_or_default(),
+            pictures: doc.session.images_on(page).unwrap_or_default(),
+            drawn: doc.session.drawn_objects(page).unwrap_or_default(),
+            outlines: Default::default(),
+        });
+        *doc.caches.hits.borrow_mut() = Some((stamp, hits.clone()));
+        Some(hits)
     }
 
     /// **The page's text objects and nothing else** — where each one is and,

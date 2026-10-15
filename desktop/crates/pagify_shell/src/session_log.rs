@@ -1,14 +1,9 @@
 //! A running, on-disk transcript of what the command box has said.
 //!
-//! **Not** [`crate::automate`]. That module's whole premise is a script of
-//! *recordable* lines — text that can be typed back in and replayed, and
-//! deliberately nothing else, because a line that could not be typed could
-//! not be replayed either. A bug report needs the other half: what the app
+//! A bug report needs more than the commands that were typed: what the app
 //! actually *said happened* — a resize that landed as a move, a font that
 //! could not be spelled, a refusal and its reason — almost none of which is
-//! typeable, so none of it belongs in a script. Mixing the two would also
-//! make Automate's own scripts unreplayable the moment an outcome line got
-//! mistaken for a command.
+//! typeable. Both are kept.
 //!
 //! Written as it happens, one JSON object per line, so a crash mid-bug loses
 //! nothing already flushed — the whole reason this is a file and not just the

@@ -909,7 +909,7 @@ fn a_restored_editor_applies_when_corrected_and_is_refused_when_the_page_changed
 }
 
 /// **A line typed through the command path is not kept open when it is refused**: that is
-/// a script, a recording or a test, nobody is at the box to correct it, and the next line
+/// a script or a test, nobody is at the box to correct it, and the next line
 /// must run as the command it is — not be taken for more words to type into a box that is
 /// still there.
 #[test]

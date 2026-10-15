@@ -676,10 +676,10 @@ fn an_encrypted_file_asks_for_its_password() {
 }
 
 /// The password must reach PDFium and nothing else. `CommandBox::submit`
-/// echoes every line into the visible history and the recorder keeps it for
-/// replay, so a password typed as an ordinary command would be written into
-/// both — and a recorded session would carry it to whoever it is shared
-/// with.
+/// echoes every line into the visible history and the session log keeps it,
+/// so a password typed as an ordinary command would be written into both —
+/// and a log handed over with a bug report would carry it to whoever it is
+/// shared with.
 #[test]
 fn a_password_is_never_written_into_the_history() {
     let mut app = PagifyApp::new(None);

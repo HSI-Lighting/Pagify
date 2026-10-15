@@ -237,6 +237,20 @@ impl crate::PagifyApp {
             }
         }
 
+        // **A double click on selected words retypes them**: Edit Text's own click, at
+        // the same place — so the same paragraph opens — and Edit Text is then the tool in
+        // hand. Before the click below, which would only select again. The selection is what
+        // is under the pointer: the double's first click has just made it so, and egui
+        // counts a double only within a few pixels of the click before.
+        if response.double_clicked() && self.tab().selection.selected.as_ref().is_some_and(|s| s.is_text()) {
+            self.arm_tool_without_saying(Tool::PickText, page);
+            if let Some(armed) = self.tab_mut().tool.as_mut() {
+                armed.points.push(at);
+            }
+            self.resolve_tool();
+            return;
+        }
+
         if response.clicked() {
             // Ctrl (Cmd on a Mac) or Shift: add to, or take out of, the selection.
             if ui.input(|i| i.modifiers.shift || i.modifiers.command) {
@@ -540,6 +554,50 @@ impl crate::PagifyApp {
                 (outline, style)
             })
             .collect()
+    }
+
+    /// **The thing a click in Edit Object would pick, boxed on screen**, so what is
+    /// pickable is something to see rather than to find out. It is [`Self::thing_at`] —
+    /// the function a click uses — so the box and the click cannot disagree.
+    ///
+    /// `None` unless Edit Object is in hand, while something is being dragged (the
+    /// pointer is the drag's), and on a page too heavy to read for paragraphs:
+    /// `thing_at` reads every shape, and on each frame that would stand the window
+    /// still. Edit Text makes the same exception.
+    pub(crate) fn object_hover_box(&self, page: usize, view: PageView, pointer: egui::Pos2) -> Option<egui::Rect> {
+        let pictures_first = self.tab().tool_state.object_tool?;
+        let sel = &self.tab().selection;
+        if sel.grab.is_some() || sel.group_grab.is_some() || sel.marquee.is_some() {
+            return None;
+        }
+        if self.page_weight(page).filter(crate::page_is_heavy).is_some() {
+            return None;
+        }
+        let (_, r, _) = self.thing_at(page, view.to_page(pointer), pictures_first)?;
+        let corner = |x: f32, y: f32| view.to_screen(AppPoint::new(x as f64, y as f64));
+        Some(egui::Rect::from_two_pos(corner(r.left, r.top), corner(r.right, r.bottom)))
+    }
+
+    /// Paints [`Self::object_hover_box`] in Edit Text's lit-box style, on the page the
+    /// pointer is over.
+    pub(crate) fn draw_object_hover(
+        &mut self,
+        ui: &mut egui::Ui,
+        page: usize,
+        rect: egui::Rect,
+        view: PageView,
+        hover: Option<egui::Pos2>,
+    ) {
+        let Some(pointer) = hover.filter(|at| rect.contains(*at)) else { return };
+        let Some(outline) = self.object_hover_box(page, view, pointer) else { return };
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(outline, egui::CornerRadius::same(2), theme::violet().gamma_multiply(0.10));
+        painter.rect_stroke(
+            outline,
+            egui::CornerRadius::same(2),
+            egui::Stroke::new(1.5, theme::violet()),
+            egui::StrokeKind::Outside,
+        );
     }
 
     /// The selection's outline, its handles, and — mid-drag — where it is
@@ -1149,6 +1207,7 @@ impl crate::PagifyApp {
                         // Under the editor, over the page: what a click on
                         // Edit Text would open, boxed.
                         self.draw_paragraph_boxes(ui, page, rect, view, hover);
+                        self.draw_object_hover(ui, page, rect, view, hover);
                         // The editor, for the same reason, learned twice.
                         //
                         // Reported from use: "if i click somewhere else the

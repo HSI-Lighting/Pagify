@@ -13,7 +13,6 @@
 
 pub mod appearance;
 pub mod passphrase;
-pub mod automate;
 pub mod block_input;
 pub mod blocks;
 pub mod command;

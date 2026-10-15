@@ -7,8 +7,8 @@
 //! The ribbon buttons all run command strings. That is not a shortcut: §7's
 //! claim is that the command box *is* the interface, so anything clickable must
 //! be typeable and anything typeable must be scriptable. A button that called a
-//! function directly would be a fourth thing that the Automate tab could not
-//! record.
+//! function directly would also be missing from the session log, which keeps
+//! the commands.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -51,7 +51,6 @@ use std::path::PathBuf;
 
 use focus::Focus;
 use overlay::PageView;
-use pagify_shell::automate::{Recorder, Script};
 use pagify_shell::block_input::{self, looks_rotated, PageBlocks, PickPath, PickTrace};
 use pagify_shell::command::{CommandBox, Dispatch, Escaped, Kind, Submit};
 use pagify_shell::markup::{Markup, HIT_TOLERANCE_PT};
@@ -826,8 +825,7 @@ struct SecureState {
     ///
     /// Never the passcode itself. Only what is waiting on one — a path, an area
     /// to lock — so that the secret goes from the input to the engine and is
-    /// dropped, never touching the visible history, the recorder, or this
-    /// struct.
+    /// dropped, never touching the visible history or this struct.
     awaiting_password: Option<Awaiting>,
     /// The passcode this document's locks are already made under.
     ///
@@ -1155,9 +1153,6 @@ struct LibraryState {
     /// enough for that to matter.
     signature_textures: std::collections::HashMap<String, egui::TextureHandle>,
     signatures_path: Option<std::path::PathBuf>,
-    /// Where recorded scripts are written: Pagify's own folder, and nowhere
-    /// in a test.
-    scripts_dir: Option<std::path::PathBuf>,
     /// The pad, while a signature is being drawn on it.
     pad: Option<SignaturePad>,
     /// The Manage Signatures panel, while it is open.
@@ -1213,27 +1208,15 @@ struct UiState {
     errors_said: u64,
 }
 
-/// The session recorder and how deep a replay is running.
+/// The session log.
 struct RecordingState {
     /// This run's on-disk transcript of every command and every line the app
     /// has said about it — see [`pagify_shell::session_log`]. One continuous
-    /// transcript for the whole run, tabs included, not one per document —
-    /// not the same thing as [`Self::recorder`] (Automate): that keeps only
-    /// what could be typed back in and replayed; this keeps the outcomes
-    /// too, almost none of which are typeable, so a bug can be reproduced
-    /// once and the file handed over instead of described from memory.
+    /// transcript for the whole run, tabs included, not one per document. It
+    /// keeps the outcomes too, almost none of which are typeable, so a bug can
+    /// be reproduced once and the file handed over instead of described from
+    /// memory.
     session_log: pagify_shell::session_log::SessionLog,
-    /// Shared across every tab — recording a macro follows what you actually
-    /// did, tab switches included, rather than one silently-incomplete
-    /// recording per document.
-    recorder: Recorder,
-    /// How many `replay`s are on the stack right now.
-    ///
-    /// A script that names itself — or two that name each other — recurses
-    /// with nothing else to stop it; `replay`'s own guard against a bad step
-    /// only catches a step that fails to *dispatch*, and a further `replay`
-    /// dispatches just fine. Found by audit.
-    replay_depth: usize,
 }
 
 /// The hub windows: the Windows build's multi-window state, the
@@ -3604,17 +3587,12 @@ impl PagifyApp {
                     let zoom_pct = self.resolved_zoom() * 100.0;
                     ui.small(match page_count {
                         Some(page_count) => format!(
-                            "page {} of {}   ·   {:.0}%   ·   {marks} mark{}{}{}",
+                            "page {} of {}   ·   {:.0}%   ·   {marks} mark{}{}",
                             page + 1,
                             page_count,
                             zoom_pct,
                             if marks == 1 { "" } else { "s" },
                             if calibrated { "   ·   calibrated" } else { "" },
-                            if self.recording_state.recorder.is_recording() {
-                                format!("   ·   recording ({})", self.recording_state.recorder.steps())
-                            } else {
-                                String::new()
-                            },
                         ),
                         None => "no document".to_string(),
                     });
@@ -3880,8 +3858,7 @@ impl PagifyApp {
     fn run_submitted(&mut self, dispatch: pagify_shell::command::Dispatch) {
         // **Read before anything is said.** `say_info` adds its message to this
         // same history, so reading the last entry after the cancel below stored
-        // "that pick was cancelled." as the command — in the log, and in a
-        // recorded script that a replay would then fail on.
+        // "that pick was cancelled." as the command in the log.
         let line = self
             .cmd
             .history()
@@ -3894,7 +3871,6 @@ impl PagifyApp {
         if self.tab_mut().tool.take().is_some() {
             self.say_info("that pick was cancelled.");
         }
-        self.recording_state.recorder.observe(&line);
         self.recording_state.session_log.record("command", &line);
         self.run(dispatch);
     }
@@ -4325,16 +4301,12 @@ impl PagifyApp {
                 pagify_shell::predefined::Predefined::default()
             } else {
                 pagify_shell::predefined::Predefined::load()
-            }, recent: if quiet { Recent::default() } else { Recent::load() }, recogniser: None, signature_textures: std::collections::HashMap::new(), signatures_path: if cfg!(test) { None } else { pagify_shell::signatures::Signatures::path() }, scripts_dir: if cfg!(test) {
-                None
-            } else {
-                pagify_shell::state::state_dir().map(|d| d.join("scripts"))
-            }, pad: None, signature_list: None, predefined_path: if cfg!(test) { None } else { pagify_shell::predefined::Predefined::path() }, snippets: None, },
+            }, recent: if quiet { Recent::default() } else { Recent::load() }, recogniser: None, signature_textures: std::collections::HashMap::new(), signatures_path: if cfg!(test) { None } else { pagify_shell::signatures::Signatures::path() }, pad: None, signature_list: None, predefined_path: if cfg!(test) { None } else { pagify_shell::predefined::Predefined::path() }, snippets: None, },
             recording_state: RecordingState { session_log: if quiet {
                 pagify_shell::session_log::SessionLog::default()
             } else {
                 pagify_shell::session_log::SessionLog::start()
-            }, recorder: Recorder::default(), replay_depth: 0, },
+            }, },
             prefs_state: PrefsState { ortho: false, defaults: tools::Defaults::default(), draw_fill: false, snaps: SnapSet::defaults(), grid_pt: 0.0, },
             render_state: RenderState { renders: None, async_render: !cfg!(test), render_stats: RenderStats::default(), },
             ui_state: UiState { show_thumbs: true, organize_open: false, show_layers: false, command_open: false, errors_said: 0, },
@@ -5017,8 +4989,8 @@ impl PagifyApp {
     ///
     /// Intercepted **before** the command box sees it, which is the whole
     /// point: `CommandBox::submit` echoes every line into the visible history
-    /// and the recorder keeps it for replay. A password must reach PDFium and
-    /// nothing else — not the history, not the recording, not the recent list.
+    /// and the session log keeps it. A password must reach PDFium and nothing
+    /// else — not the history, not the log, not the recent list.
     ///
     /// Returns whether the line was taken.
     ///
@@ -5662,16 +5634,16 @@ impl PagifyApp {
                 && y <= r.top.max(r.bottom) + near
         };
         let doc = self.tab().doc.as_ref()?;
+        // Read once for the page as it is, not at every click and every hover.
+        let hits = self.page_hits(page)?;
 
         // `text_run_rects`, not `text_runs` — a hit-test only needs to know
         // where things are, and `text_runs` pays to extract every run's
         // words to answer that, which on a page of a few hundred runs was
         // most of a second on every single click. See its own doc.
         let words = || {
-            doc.session
-                .text_run_rects(page)
-                .ok()?
-                .into_iter()
+            hits.words
+                .iter()
                 .filter(|(_, rect)| holds(rect))
                 .min_by(|(_, a), (_, b)| {
                     let area = |r: &pdf_core::document::Rect| {
@@ -5679,13 +5651,11 @@ impl PagifyApp {
                     };
                     area(a).total_cmp(&area(b))
                 })
-                .map(|(object, rect)| (object, rect, "the words"))
+                .map(|(object, rect)| (*object, *rect, "the words"))
         };
         let pictures = || {
-            doc.session
-                .images_on(page)
-                .ok()?
-                .into_iter()
+            hits.pictures
+                .iter()
                 .filter(|image| holds(&image.rect))
                 .min_by(|a, b| {
                     let area = |r: &pdf_core::document::PageImage| {
@@ -5716,32 +5686,26 @@ impl PagifyApp {
             // against is preferred over the fallback, not merely likely to
             // win it by coincidence of scale.
             let rank = |d: &pdf_core::document::DrawnObject| -> (bool, f32) {
-                match doc.session.object_outline(page, d.object) {
-                    Ok(outline) if !outline.is_empty() => {
-                        (false, Self::distance_to_outline((x, y), &outline))
-                    }
-                    _ => (true, area(d)),
+                match hits.outline(&doc.session, page, d.object) {
+                    Some(outline) => (false, Self::distance_to_outline((x, y), &outline)),
+                    None => (true, area(d)),
                 }
             };
-            doc.session
-                .drawn_objects(page)
-                .ok()?
-                .into_iter()
+            hits.drawn
+                .iter()
                 .filter(|d| {
                     d.depth == 0
                         && d.kind == pdf_core::document::DrawnKind::Shape
                         && holds(&d.rect)
                 })
-                .min_by(|a, b| {
-                    let (a_precise, a_val) = rank(a);
-                    let (b_precise, b_val) = rank(b);
-                    match (a_precise, b_precise) {
-                        (false, true) => std::cmp::Ordering::Less,
-                        (true, false) => std::cmp::Ordering::Greater,
-                        _ => a_val.total_cmp(&b_val),
-                    }
+                // Each ranked once, not once per comparison: an outline is a read.
+                .map(|d| (rank(d), d))
+                .min_by(|((a_precise, a_val), _), ((b_precise, b_val), _)| match (a_precise, b_precise) {
+                    (false, true) => std::cmp::Ordering::Less,
+                    (true, false) => std::cmp::Ordering::Greater,
+                    _ => a_val.total_cmp(b_val),
                 })
-                .map(|d| (d.object, d.rect, "the shape"))
+                .map(|(_, d)| (d.object, d.rect, "the shape"))
         };
 
         // **Inside a group, if nothing of the page's own is there.** A brochure
@@ -5750,10 +5714,8 @@ impl PagifyApp {
         // not be selected. What comes back names the *group*, because that is
         // what can be moved; the outline is the thing that was clicked.
         let grouped = || {
-            doc.session
-                .drawn_objects(page)
-                .ok()?
-                .into_iter()
+            hits.drawn
+                .iter()
                 .filter(|d| d.depth > 0 && holds(&d.rect))
                 .min_by(|a, b| {
                     let area = |d: &pdf_core::document::DrawnObject| {
@@ -9847,8 +9809,8 @@ impl PagifyApp {
         if let Some(edit) = self.tab_mut().edit.editing_run.as_mut() {
             edit.buffer = line.to_string();
             // **Not kept open when the engine refuses it**, as an apply from the page
-            // is: nobody is at the box to correct the words — this is a script, a
-            // recording or a test — and the line after this one must run as the command
+            // is: nobody is at the box to correct the words — this is a script or a
+            // test — and the line after this one must run as the command
             // it is, not be taken for more words to type into a box left open.
             if self.apply_editing_page() {
                 self.tab_mut().edit.editing_run = None;
@@ -9863,7 +9825,6 @@ impl PagifyApp {
         }
         if let Some(dispatch) = pagify_shell::command::dispatch(line) {
             self.cmd.say(Kind::Echo, line);
-            self.recording_state.recorder.observe(line);
             self.recording_state.session_log.record("command", line);
             self.run(dispatch);
         }
@@ -10057,9 +10018,8 @@ impl PagifyApp {
     /// Hide an area, sealed under a passcode.
     ///
     /// **The passcode arrives borrowed and leaves with the call.** It reaches
-    /// the engine and nothing else — not the command history, which is visible;
-    /// not the recorder, which replays; and not the undo stack, where it would
-    /// outlive the moment it was typed.
+    /// the engine and nothing else — not the command history, which is visible,
+    /// and not the undo stack, where it would outlive the moment it was typed.
     /// Hide one rectangle — a dragged area, which is a list of one shape.
     fn lock_area(
         &mut self,
@@ -14273,103 +14233,6 @@ impl PagifyApp {
         }
     }
 
-    // -- automate -----------------------------------------------------------
-
-    fn stop_recording(&mut self) {
-        match self.recording_state.recorder.finish() {
-            None => self.say_error("not recording."),
-            Some(script) => {
-                // **Into Pagify's own folder, under a name that is only a
-                // name.** It used to be `<name>.json` relative to wherever the
-                // process was started, with the name unchecked — so
-                // `record ../../x` wrote `../../x.json`. Found by audit.
-                let written = pagify_shell::state::file_name_only(&script.name)
-                    .and_then(|name| {
-                        self.library_state.scripts_dir
-                            .as_ref()
-                            .map(|dir| dir.join(format!("{name}.json")))
-                            .ok_or_else(|| "there is nowhere to keep scripts on this system".into())
-                    })
-                    .and_then(|path| {
-                        pagify_shell::state::write_own(&path, script.to_json().as_bytes())
-                            .map(|()| path)
-                            .map_err(|e| e.to_string())
-                    });
-                match written {
-                    Ok(path) => self.say_info(format!(
-                        "{} step(s) written to {}",
-                        script.steps.len(),
-                        path.display()
-                    )),
-                    Err(e) => self.say_error(format!("could not write the script: {e}")),
-                }
-            }
-        }
-    }
-
-    /// Scripts nested this deep are not automation, they are a mistake — one
-    /// that names itself, or two that name each other.
-    const MAX_REPLAY_DEPTH: usize = 16;
-
-    fn replay(&mut self, path: &std::path::Path) {
-        if self.recording_state.replay_depth >= Self::MAX_REPLAY_DEPTH {
-            self.say_error(format!(
-                "replay: {} scripts deep — a script is replaying itself, directly or through \
-                 others. Stopped rather than recursing forever.",
-                self.recording_state.replay_depth
-            ));
-            return;
-        }
-        let script = match std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(|t| Script::from_json(&t)) {
-            Ok(script) => script,
-            Err(e) => {
-                self.say_error(format!("replay: {e}"));
-                return;
-            }
-        };
-
-        // Collected first, then run: `replay` itself must not be recorded into
-        // whatever is recording, and the steps must not be borrowed from a
-        // script this loop could replace.
-        let steps = script.steps.clone();
-        self.recording_state.replay_depth += 1;
-        let mut ran = 0;
-        let mut stopped = None;
-        for (index, line) in steps.iter().enumerate() {
-            // A replay stops at the first step that cannot run. Carrying on
-            // would apply the rest of the script to a document in a state it
-            // was never written for, which is how a batch run quietly ruins a
-            // folder full of files.
-            match pagify_shell::command::dispatch(line) {
-                Some(Dispatch::Unknown(token)) => {
-                    stopped = Some((index + 1, line.clone(), format!("unknown command '{token}'")));
-                    break;
-                }
-                Some(Dispatch::Bad(why)) => {
-                    stopped = Some((index + 1, line.clone(), why));
-                    break;
-                }
-                Some(Dispatch::Refused { token, why }) => {
-                    stopped = Some((index + 1, line.clone(), format!("{token} — {why}")));
-                    break;
-                }
-                Some(dispatch) => {
-                    self.run(dispatch);
-                    ran += 1;
-                }
-                None => {}
-            }
-        }
-        self.recording_state.replay_depth -= 1;
-        match stopped {
-            None => self.say_info(format!("replayed {ran} step(s).")),
-            Some((step, line, why)) => {
-                self.say_error(format!("stopped at step {step} (`{line}`): {why}. {ran} ran first."))
-            }
-        }
-    }
-
-
     // -- rendering ----------------------------------------------------------
 
     /// The sharpest scale a *whole page* this size can be rendered at as one
@@ -16503,6 +16366,8 @@ mod guide_tests;
 mod nudge_tests;
 #[cfg(test)]
 mod marquee_tests;
+#[cfg(test)]
+mod object_hover_tests;
 
 /// **Asked for with a screenshot: a rotate handle on a selected object, like the
 /// move and resize handles, and the angle shown while it is turned.**

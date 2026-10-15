@@ -73,15 +73,14 @@ pub(crate) enum Tab {
     Accessibility,
     Help,
     Draw,
-    Automate,
 }
 
 impl Tab {
-    pub(crate) const ALL: [Tab; 15] = [
+    pub(crate) const ALL: [Tab; 14] = [
         Tab::File, Tab::Home, Tab::Edit, Tab::Convert,
         Tab::Organize, Tab::Comment, Tab::View, Tab::Form,
         Tab::Protect, Tab::PagiSign, Tab::Share, Tab::Accessibility,
-        Tab::Help, Tab::Draw, Tab::Automate,
+        Tab::Help, Tab::Draw,
     ];
 
     pub(crate) fn label(self) -> &'static str {
@@ -100,7 +99,6 @@ impl Tab {
             Tab::Accessibility => "Accessibility",
             Tab::Help => "Help",
             Tab::Draw => "Draw",
-            Tab::Automate => "Automate",
         }
     }
 
@@ -421,13 +419,6 @@ impl Tab {
                 ("\u{EAF6}", "Page Scale", Command::Verb("pagescale")),
     ];
 
-    /// The Automate tab's ribbon buttons, in order.
-    const AUTOMATE_BUTTONS: &[Tool] = &[
-                ("\u{E837}", "Record", Command::Verb("record")),
-                ("\u{EF71}", "Stop", Command::Verb("stop")),
-                ("\u{E037}", "Replay", Command::Verb("replay ")),
-    ];
-
     pub(crate) fn buttons(self) -> &'static [Tool] {
         match self {
             Tab::File => Self::FILE_BUTTONS,
@@ -444,7 +435,6 @@ impl Tab {
             Tab::Accessibility => Self::ACCESSIBILITY_BUTTONS,
             Tab::Help => Self::HELP_BUTTONS,
             Tab::Draw => Self::DRAW_BUTTONS,
-            Tab::Automate => Self::AUTOMATE_BUTTONS,
         }
     }
 

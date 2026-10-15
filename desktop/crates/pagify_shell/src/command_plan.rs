@@ -90,12 +90,6 @@ pub enum Effect {
     ReportScale,
     /// Arm the distance or area measure tool.
     ArmMeasure(MeasureKind),
-    /// Start recording a script under this name.
-    Record(String),
-    /// Stop recording and write the script out.
-    StopRecording,
-    /// Replay a recorded script.
-    Replay(std::path::PathBuf),
     /// Say a line in the error colour.
     SayError(String),
     /// Deliver a typed pick, already flipped from kernel space to app space.
@@ -277,9 +271,6 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         }
         Verb::Scale => vec![Effect::ReportScale],
         Verb::Measure(kind) => vec![Effect::ArmMeasure(*kind)],
-        Verb::Record(name) => vec![Effect::Record(name.clone())],
-        Verb::StopRecording => vec![Effect::StopRecording],
-        Verb::Replay(path) => vec![Effect::Replay(path.clone())],
         // Tools: the guards and the one coordinate flip live here now, where
         // they can be tested without a window.
         Verb::Pick(at) => {
@@ -468,12 +459,6 @@ mod tests {
             ),
             (Verb::Scale, vec![Effect::ReportScale]),
             (Verb::Measure(MeasureKind::Distance), vec![Effect::ArmMeasure(MeasureKind::Distance)]),
-            (Verb::Record("r".into()), vec![Effect::Record("r".into())]),
-            (Verb::StopRecording, vec![Effect::StopRecording]),
-            (
-                Verb::Replay(std::path::PathBuf::from("r.json")),
-                vec![Effect::Replay(std::path::PathBuf::from("r.json"))],
-            ),
         ];
         for (verb, want) in cases {
             assert_eq!(plan(&verb, &CommandEnv::default()), Some(want), "planning {verb:?}");

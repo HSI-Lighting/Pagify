@@ -216,22 +216,6 @@ impl crate::PagifyApp {
                 let page = self.tab_mut().view_state.page;
                 self.arm_tool(Tool::Measure(kind), page);
             }
-            Effect::Record(name) => {
-                let name = if name.trim().is_empty() { "script".to_string() } else { name };
-                // A name, checked now rather than when the script is written,
-                // so nothing is recorded under a name that cannot be kept.
-                let name = match pagify_shell::state::file_name_only(&name) {
-                    Ok(name) => name,
-                    Err(why) => {
-                        self.say_error(format!("record: {why}."));
-                        return;
-                    }
-                };
-                self.recording_state.recorder.start(name.clone());
-                self.say_info(format!("recording `{name}` — every command from here is a step."));
-            }
-            Effect::StopRecording => self.stop_recording(),
-            Effect::Replay(path) => self.replay(&path),
             Effect::SayError(text) => self.say_error(text),
             Effect::TakePick(at) => self.take_pick(at),
             Effect::Sensitivity(what) => self.act_sensitivity(what),

@@ -564,20 +564,19 @@ fn words_a_font_cannot_draw_are_written_in_one_that_can_and_the_paste_says_which
     assert!(said(&app).contains(&format!("Words written in {font}")), "the paste did not say which face: {}", said(&app));
 }
 
-// ---- the command the log and the recorder keep (0.1.73) ----
+// ---- the command the log keeps (0.1.73) ----
 //
 // Reported from the owner's session log: `editobject` pressed while Edit Text
 // waited for a click was stored as "that pick was cancelled.", the message the
 // cancelling said first.
 
 #[test]
-fn a_command_started_over_a_pick_is_logged_and_recorded_as_itself() {
+fn a_command_started_over_a_pick_is_logged_as_itself() {
     let mut app = opened("command-over-pick.pdf", b"", "", &[]);
     let dir = std::env::temp_dir().join(format!("pagify-test-command-log-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     app.recording_state.session_log = pagify_shell::session_log::SessionLog::start_in(dir.clone());
     let path = app.recording_state.session_log.path().expect("a writable folder").to_path_buf();
-    app.recording_state.recorder.start("test");
 
     // A pick is waiting for its click.
     app.tab_mut().tool = Some(ArmedTool { kind: Tool::PickText, page: 0, objects: Vec::new(), points: Vec::new() });
@@ -595,8 +594,6 @@ fn a_command_started_over_a_pick_is_logged_and_recorded_as_itself() {
         .collect();
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(logged, ["editobject"], "the log's command line");
-    let script = app.recording_state.recorder.finish().expect("recording");
-    assert_eq!(script.steps, ["editobject"], "a replay would run the message, not the command");
     assert!(said(&app).contains("that pick was cancelled."), "the pick was still cancelled and said so");
 }
 

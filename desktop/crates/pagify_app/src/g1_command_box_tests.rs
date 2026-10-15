@@ -98,16 +98,13 @@ fn a_space_typed_into_the_command_box_is_a_space_and_runs_nothing() {
     assert!(errors(&h).is_empty(), "typing a Space raised an error: {:?}", errors(&h));
 }
 
-/// The whole of it end to end: a typed line with spaces runs on Enter, and
-/// is still recorded — only the bare dialog-or-prefill lines are not.
+/// The whole of it end to end: a typed line with spaces runs on Enter.
 #[test]
-fn a_typed_line_with_spaces_runs_on_enter_and_is_still_recorded() {
+fn a_typed_line_with_spaces_runs_on_enter() {
     let out = std::env::temp_dir().join(format!("pagify-g1-extract-{}.pdf", std::process::id()));
     let _ = std::fs::remove_file(&out);
 
     let mut h = harness("pages-ladder.pdf");
-    h.state_mut().submit("record g1test");
-    assert!(h.state().recording_state.recorder.is_recording());
     focus_box(&mut h);
 
     type_text(&mut h, &format!("extract 1-2 {}", out.display()));
@@ -116,7 +113,6 @@ fn a_typed_line_with_spaces_runs_on_enter_and_is_still_recorded() {
     let wrote = out.is_file();
     let _ = std::fs::remove_file(&out);
     assert!(wrote, "the typed extract did not write its file; errors: {:?}", errors(&h));
-    assert_eq!(h.state().recording_state.recorder.steps(), 1, "the fully specified line was not recorded");
 }
 
 /// Ctrl+F puts `find ` in the box. A search for two words could not be
@@ -229,19 +225,16 @@ fn a_button_whose_bare_command_cannot_succeed_waits_for_its_arguments() {
     }
 }
 
-/// A click that only fills the box is not a command: a recording does not
-/// take it, and a tool armed for a pick is not cancelled by it.
+/// A click that only fills the box is not a command: a tool armed for a pick
+/// is not cancelled by it.
 #[test]
-fn a_click_that_only_fills_the_box_is_not_recorded_and_keeps_the_armed_tool() {
+fn a_click_that_only_fills_the_box_keeps_the_armed_tool() {
     let mut h = on_organize("pages-ladder.pdf");
-    h.state_mut().submit("record g1test");
     h.state_mut().submit("measure");
     assert!(h.state().tab().tool.is_some(), "measure did not arm");
-    let steps = h.state().recording_state.recorder.steps();
 
     click_label(&mut h, "Delete");
 
-    assert_eq!(h.state().recording_state.recorder.steps(), steps, "the fill was recorded");
     assert!(h.state().tab().tool.is_some(), "the fill cancelled the armed tool");
     assert!(
         !h.state().cmd.history().iter().any(|e| e.text.contains("cancelled")),
@@ -282,7 +275,7 @@ fn a_click_runs_fills_or_asks_for_a_file_by_what_the_bare_command_would_get() {
         assert_eq!(ribbon_click(command), RibbonClick::Run, "{command}");
     }
     // The table's own fill-and-wait buttons keep waiting, with no usage line added.
-    for command in ["swappages ", "croppages all ", "note ", "calibrate ", "replay "] {
+    for command in ["swappages ", "croppages all ", "note ", "calibrate "] {
         assert_eq!(ribbon_click(command), RibbonClick::Fill(None), "{command}");
     }
     // A bare command the parser refuses fills the box instead, usage line in hand.

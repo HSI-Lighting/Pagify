@@ -2296,30 +2296,6 @@ fn a_picture_declaring_an_absurd_size_is_refused_before_it_is_decoded() {
     let _ = std::fs::remove_file(&sig_path);
 }
 
-/// **Found by audit.** A script that names itself — or two that name
-/// each other — has nothing else to stop it recursing forever; the
-/// existing "stop at the first bad step" guard does not apply, since a
-/// further `replay` dispatches just fine every time.
-#[test]
-fn a_script_that_replays_itself_stops_rather_than_recursing_forever() {
-    let mut app = app("two-column.pdf");
-    let path = std::env::temp_dir()
-        .join(format!("pagify-test-replay-self-{}.json", std::process::id()));
-    let script = Script {
-        version: pagify_shell::automate::SCRIPT_VERSION,
-        name: "self".into(),
-        steps: vec![format!("replay {}", path.display())],
-    };
-    std::fs::write(&path, script.to_json()).expect("write the scratch script");
-
-    app.replay(&path);
-
-    assert!(said(&app).contains("scripts deep"), "{}", said(&app));
-    assert_eq!(app.recording_state.replay_depth, 0, "the depth counter was not unwound");
-
-    let _ = std::fs::remove_file(&path);
-}
-
 /// **A file that is not a picture is refused, plainly, and nothing is
 /// kept.**
 #[test]
@@ -5090,30 +5066,6 @@ fn smartredact_says_what_it_could_not_reach_instead_of_claiming_it_gone() {
     let _ = std::fs::remove_file(&out);
     assert!(!text.contains("4111"), "the invisible text survived: {text}");
     assert!(!text.contains("7946"), "the telephone number survived: {text}");
-}
-
-/// **A recording's name is a name, and the script lands in Pagify's own
-/// folder.** Found by audit: `record ../../x` wrote `../../x.json`
-/// relative to wherever the process happened to be.
-#[test]
-fn a_recording_named_like_a_path_is_refused_and_a_good_one_lands_in_pagifys_folder() {
-    let mut app = app("two-column.pdf");
-    app.submit("record ../../x");
-    assert!(said(&app).contains("not a name"), "{}", said(&app));
-    assert!(!app.recording_state.recorder.is_recording(), "it recorded under a path");
-
-    let dir = std::env::temp_dir().join(format!("pagify-scripts-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    app.library_state.scripts_dir = Some(dir.clone());
-    app.submit("record stamp every page");
-    app.submit("rotate 90");
-    app.submit("stop");
-    let told = said(&app);
-    assert!(told.contains("written to"), "{told}");
-    let written = dir.join("stamp-every-page.json");
-    assert!(written.is_file(), "the script is not where it was said to be: {told}");
-    assert!(!std::path::Path::new("stamp-every-page.json").exists(), "it also wrote beside the process");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// **What Pagify keeps about somebody can be cleared, and they are told

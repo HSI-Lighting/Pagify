@@ -7,7 +7,7 @@
 //! Every card and every row emits a command string rather than calling a
 //! function, for the same reason the ribbon does: §7's claim is that anything
 //! clickable is typeable, and a control that reached past the command box would
-//! be a fourth thing the Automate tab could not record.
+//! be missing from the session log, which keeps the commands.
 
 use egui::{Align2, Color32, CornerRadius, FontId, Rect, Sense, Stroke, StrokeKind, Ui, Vec2};
 use egui_extras::{Column, TableBuilder};
