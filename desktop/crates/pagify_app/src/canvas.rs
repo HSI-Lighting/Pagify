@@ -190,7 +190,7 @@ impl crate::PagifyApp {
                 if !ui.input(|i| i.modifiers.shift || i.modifiers.command) {
                     self.tab_mut().selection.group = Vec::new();
                 }
-                self.tab_mut().selection.marquee = Some((at, at));
+                self.tab_mut().selection.marquee = Some((page, at, at));
             }
         }
 
@@ -214,7 +214,7 @@ impl crate::PagifyApp {
                     }
                 });
             }
-            if let Some((_, current)) = self.tab_mut().selection.marquee.as_mut() {
+            if let Some((_, _, current)) = self.tab_mut().selection.marquee.as_mut() {
                 *current = at;
             }
             // Pulled onto a reference line, unless Alt is held.
@@ -231,9 +231,9 @@ impl crate::PagifyApp {
             if let Some(grab) = self.tab_mut().selection.group_grab.take() {
                 self.finish_group_grab(grab, view.scale);
             }
-            if let Some((start, end)) = self.tab_mut().selection.marquee.take() {
+            if let Some((on, start, end)) = self.tab_mut().selection.marquee.take() {
                 let extend = ui.input(|i| i.modifiers.shift || i.modifiers.command);
-                self.select_group_in(page, start, end, extend);
+                self.select_group_in(on, start, end, extend);
             }
         }
 

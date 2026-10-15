@@ -49,15 +49,112 @@ impl crate::PagifyApp {
         match decision {
             None => {}
             Some(false) => self.update_state.update_available = None,
-            Some(true) => {
-                // The same walk a plain `quit` makes — an update is a quit
-                // that relaunches a newer build, not a second "is anything
-                // unsaved" check of its own. `exit_program` is where it actually
-                // happens, once every tab has agreed it is safe to close.
-                self.update_state.update_available = None;
-                self.hub_state.pending_update = Some(source);
-                self.act(Verb::Quit { force: false });
+            Some(true) => self.begin_update(source),
+        }
+    }
+
+    /// Install the build published in `source`, then relaunch.
+    ///
+    /// The same walk a plain `quit` makes — an update is a quit that relaunches a
+    /// newer build, not a second "is anything unsaved" check of its own.
+    /// `exit_program` is where it actually happens, once every tab has agreed it is
+    /// safe to close.
+    fn begin_update(&mut self, source: std::path::PathBuf) {
+        self.update_state.update_available = None;
+        self.update_state.update_report = None;
+        self.hub_state.pending_update = Some(source);
+        self.act(Verb::Quit { force: false });
+    }
+
+    /// The reader pointed at the folder builds are published in: remember it, and look again.
+    pub(crate) fn use_update_folder(&mut self, folder: std::path::PathBuf) {
+        crate::update::remember(&folder);
+        self.update_state.update_report = None;
+        self.spawn_update_check(true);
+    }
+
+    /// What a check the reader asked for found — **always**, so that "you are up to
+    /// date" and "this PC cannot see the update folder" are told apart. The one place
+    /// an update can be **forced**: with the same (or an older) build published, the
+    /// button installs it over this one anyway.
+    pub(crate) fn draw_update_report(&mut self, ctx: &egui::Context) {
+        use crate::update::UpdateOutcome;
+        let Some(outcome) = self.update_state.update_report.clone() else { return };
+        let mut install: Option<std::path::PathBuf> = None;
+        let mut choose = false;
+        let mut close = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        egui::Modal::new(egui::Id::new("update_report")).show(ctx, |ui| {
+            ui.set_width(420.0);
+            ui.heading("Check for updates");
+            ui.add_space(6.0);
+            ui.label(format!("This is Pagify {}.", pagify_shell::VERSION));
+            ui.add_space(6.0);
+            // With no build to install, the reader can point at where it is, once.
+            let found_a_build = matches!(outcome, UpdateOutcome::Newer { .. } | UpdateOutcome::Current { .. });
+            let mut buttons = |ui: &mut egui::Ui, install_label: Option<(&str, &std::path::PathBuf)>| {
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if let Some((label, folder)) = install_label {
+                        if ui.button(label).clicked() {
+                            install = Some(folder.clone());
+                        }
+                    }
+                    if !found_a_build && ui.button("Choose folder…").clicked() {
+                        choose = true;
+                    }
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+            };
+            match &outcome {
+                UpdateOutcome::Newer { version, folder } => {
+                    ui.label(format!("Pagify {version} is available."));
+                    buttons(ui, Some(("Update now", folder)));
+                }
+                UpdateOutcome::Current { version, folder } => {
+                    if crate::newer_version(version, pagify_shell::VERSION) {
+                        ui.label(format!("The published build ({version}) is older than this one."));
+                    } else {
+                        ui.label(format!("You have the latest build (published: {version})."));
+                    }
+                    ui.label("Installing the published build anyway puts it over this one and restarts Pagify.");
+                    buttons(ui, Some(("Install it anyway", folder)));
+                }
+                UpdateOutcome::Incomplete { folder } => {
+                    ui.label(format!(
+                        "Found {} but it holds no readable version.txt, or no Pagify.exe to install.                          Dropbox may still be syncing — try again in a minute.",
+                        folder.display()
+                    ));
+                    buttons(ui, None);
+                }
+                UpdateOutcome::NoFolder { tried, searched } => {
+                    ui.label("This PC cannot see the folder updates are published to. Looked in:");
+                    for folder in tried {
+                        ui.label(format!("   {}", folder.display()));
+                    }
+                    if searched.is_empty() {
+                        ui.label("No Dropbox was found on this PC.");
+                    } else {
+                        ui.label("and searched inside Dropbox at:");
+                        for root in searched {
+                            ui.label(format!("   {}", root.display()));
+                        }
+                    }
+                    ui.label("If you know where it is, choose that folder — Pagify remembers it.");
+                    buttons(ui, None);
+                }
             }
+        });
+        if let Some(source) = install {
+            self.begin_update(source);
+        } else if choose {
+            let picked = rfd::FileDialog::new().set_title("Where is the published Pagify folder?").pick_folder();
+            if let Some(folder) = picked {
+                self.use_update_folder(folder);
+            }
+        } else if close {
+            self.update_state.update_report = None;
         }
     }
 

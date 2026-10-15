@@ -9,6 +9,11 @@ description = "Pagify Desktop: the eframe binary."
 # freed memory — see `PagifyApp::held_passcode`.
 zeroize = "1"
 
+# Reads Dropbox's own `info.json` to find where it syncs on this PC (`update.rs`),
+# and the session log's JSON lines back in a wiring test — already resolved via
+# pagify_shell/pdf_core, so this adds an edge, not a new crate.
+serde_json = "1"
+
 pagify_shell = { path = "../pagify_shell" }
 pdf_core.workspace   = true
 cad_kernel.workspace = true
@@ -58,10 +63,6 @@ raw-window-handle = "0.6"
 
 [dev-dependencies]
 egui_kittest = "0.36"
-# Reads the session log's own JSON lines back out in its wiring test —
-# already resolved via pagify_shell/pdf_core, so this adds an edge, not a
-# new crate.
-serde_json = "1"
 
 # Finder hands a double-clicked document to an application through an Apple
 # Event, never through `argv`. Without a handler for it macOS answers for the

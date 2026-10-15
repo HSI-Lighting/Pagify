@@ -771,7 +771,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("calculator", "the annotation phase", "the Accounting Calculator tool"),
     ("callout", "the annotation phase", "the Callout tool"),
     ("changecolor", "the viewing phase", "the Change Color tool"),
-    ("checkupdates", "the documentation phase", "the Check for Updates tool"),
     ("clipboard", "the capture phase", "the Clipboard tool"),
     ("cloudstorage", "the sharing phase", "the Cloud Storage tool"),
     ("combfield", "the forms phase", "the Comb Field tool"),

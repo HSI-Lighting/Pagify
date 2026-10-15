@@ -17,6 +17,7 @@ mod caches;
 mod dispatch;
 mod mac_open;
 mod nudge;
+mod update;
 mod focus;
 mod home;
 mod hub;
@@ -615,11 +616,16 @@ struct SelectionState {
     /// A drag in progress on the selection — where it started, what part of
     /// the selection was grabbed, and how far it has come.
     grab: Option<Grab>,
-    /// A rectangle being dragged out to build [`Self::group`]: where the
-    /// drag started, and where the pointer is now. Only the two corners —
+    /// A rectangle being dragged out to build [`Self::group`]: the page it is on,
+    /// where the drag started, and where the pointer is now. Only the two corners —
     /// which page objects fall inside it is worked out once, when the drag
     /// ends, not recomputed every frame while it is still being dragged.
-    marquee: Option<(AppPoint, AppPoint)>,
+    ///
+    /// **The page matters.** The corners are in that page's own coordinates, and
+    /// every visible page runs the drawing: without it the one rectangle was drawn
+    /// on all of them, at the same place on each, while only one page's drag was
+    /// real.
+    marquee: Option<(usize, AppPoint, AppPoint)>,
     /// The handle under the pointer as of the last frame it was only
     /// *hovering* — read by [`Self::interact_objects`] when a drag starts,
     /// instead of hit-testing the drag's own current position. Same reason
@@ -1009,6 +1015,10 @@ impl DocTab {
 struct UpdateState {
     update_check: Option<UpdateCheck>,
     update_available: Option<(String, std::path::PathBuf)>,
+    /// What a check the reader **asked for** found — shown as a window whatever it
+    /// found, so "nothing newer" and "cannot see the update folder" are not the
+    /// same silence. See [`update`].
+    update_report: Option<update::UpdateOutcome>,
 }
 
 /// Editor faces and fonts: the document face installed in the run editor, the
@@ -2079,11 +2089,11 @@ struct PageResult {
 /// so it gets the same "spawn a thread, poll a channel" treatment `Reading`
 /// above already uses for OCR.
 struct UpdateCheck {
-    /// `Some((newer version, the folder it lives in))` once a genuinely
-    /// newer build is found; `None` for "nothing newer" or "could not even
-    /// look" — the two are not told apart, since neither is ever worth
-    /// telling the user about.
-    done: std::sync::mpsc::Receiver<Option<(String, std::path::PathBuf)>>,
+    /// What the look found — see [`update::check`].
+    done: std::sync::mpsc::Receiver<update::UpdateOutcome>,
+    /// Asked for by the reader (Help ▸ Check for Updates, or `checkupdate`), not the
+    /// launch-time look: the answer is always shown, not only when it is "newer".
+    explicit: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3039,6 +3049,7 @@ impl PagifyApp {
         self.collect_spell_scan(&ctx);
         self.collect_update_check(&ctx);
         self.draw_update_prompt(&ctx);
+        self.draw_update_report(&ctx);
     }
 
     /// The keyboard half of a frame: the focus guard, Escape, copy/paste, the
@@ -4344,7 +4355,7 @@ impl PagifyApp {
             } else {
                 pagify_shell::outlined_fonts::OutlinedFonts::load()
             }, editor_face: None, editor_face_ready: false, editor_face_metrics: None, editor_face_coverage: None, pending_face: None, text_to_offer: None, face_cache: FaceCache::default(), system_fonts: None, font_picker_open: false, font_picker_filter: String::new(), },
-            update_state: UpdateState { update_check: None, update_available: None },
+            update_state: UpdateState { update_check: None, update_available: None, update_report: None },
             tabs: vec![DocTab::new()],
             active_tab: 0,
             cmd: CommandBox::default(),
@@ -4380,7 +4391,7 @@ impl PagifyApp {
         // filesystem check of a real Dropbox folder. Nor in a second window:
         // the update is offered once, by the first.
         if !quiet {
-            app.spawn_update_check();
+            app.spawn_update_check(false);
         }
         // Same reasoning as `recent`/`session_log` above: a test run must not
         // read the real, developer-machine appearance preference, or every
@@ -4943,37 +4954,61 @@ impl PagifyApp {
 
     /// Look for a newer build, without holding the window up.
     ///
-    /// `UPDATE_FOLDER` may be a Dropbox mount that is not syncing, on a
-    /// machine that does not have Dropbox at all, or simply absent — all of
-    /// that is a plain filesystem read away, but "plain" still means it can
-    /// stall (a network drive gone quiet) or fail, and neither is allowed to
-    /// delay the window appearing. Same shape as `extract_text` above: a
-    /// thread, a channel, a per-frame poll.
-    fn spawn_update_check(&mut self) {
+    /// The folder may be a Dropbox mount that is not syncing, on a machine that does
+    /// not have Dropbox at all, or simply absent — all of that is a plain filesystem
+    /// read away, but "plain" still means it can stall (a network drive gone quiet)
+    /// or fail, and neither is allowed to delay the window appearing. Same shape as
+    /// `extract_text` above: a thread, a channel, a per-frame poll.
+    ///
+    /// `explicit` is a check the reader asked for: its answer is always shown
+    /// (see [`Self::draw_update_report`]). The launch-time one (`false`) only speaks
+    /// when a newer build is there, as before — but both leave a line in the
+    /// session log saying what they found.
+    fn spawn_update_check(&mut self, explicit: bool) {
+        // A look already under way answers this one too, once, as an asked-for one.
+        if let Some(check) = self.update_state.update_check.as_mut() {
+            check.explicit |= explicit;
+            return;
+        }
         let current = pagify_shell::VERSION.to_string();
         let (tx, done) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let found = read_update_manifest(std::path::Path::new(UPDATE_FOLDER))
-                .filter(|candidate| newer_version(&current, candidate))
-                .map(|version| (version, std::path::PathBuf::from(UPDATE_FOLDER)));
-            let _ = tx.send(found);
+            let _ = tx.send(update::look(&current, &update::Places::this_pc()));
         });
-        self.update_state.update_check = Some(UpdateCheck { done });
+        self.update_state.update_check = Some(UpdateCheck { done, explicit });
     }
 
     /// Collect the update check, if it has answered.
     fn collect_update_check(&mut self, ctx: &egui::Context) {
         let Some(check) = &self.update_state.update_check else { return };
+        let explicit = check.explicit;
         match check.done.try_recv() {
-            Ok(found) => {
+            Ok(outcome) => {
                 self.update_state.update_check = None;
-                self.update_state.update_available = found;
+                self.recording_state.session_log.record(
+                    "update",
+                    &format!("explicit={explicit} {}", outcome.log_line(pagify_shell::VERSION)),
+                );
+                // Where a build was found is where to look first next time.
+                if let Some(folder) = outcome.found_in() {
+                    update::remember(folder);
+                }
+                if explicit {
+                    // The report takes over from a launch-time prompt for the same build.
+                    self.update_state.update_available = None;
+                    self.update_state.update_report = Some(outcome);
+                } else if let update::UpdateOutcome::Newer { version, folder } = outcome {
+                    self.update_state.update_available = Some((version, folder));
+                }
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
                 ctx.request_repaint_after(std::time::Duration::from_millis(200));
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.update_state.update_check = None;
+                if explicit {
+                    self.say_error("the update check stopped without an answer — try again.");
+                }
             }
         }
     }
@@ -6954,7 +6989,7 @@ impl PagifyApp {
         };
         let painter = ui.painter();
 
-        if let Some((start, current)) = self.tab_mut().selection.marquee {
+        if let Some((_, start, current)) = self.tab_mut().selection.marquee.filter(|(on, ..)| *on == page) {
             let rect = egui::Rect::from_two_pos(view.to_screen(start), view.to_screen(current));
             painter.rect_filled(rect, egui::CornerRadius::ZERO, theme::violet().gamma_multiply(0.08));
             painter.rect_stroke(
@@ -16466,6 +16501,8 @@ mod g1_command_box_tests;
 mod guide_tests;
 #[cfg(test)]
 mod nudge_tests;
+#[cfg(test)]
+mod marquee_tests;
 
 /// **Asked for with a screenshot: a rotate handle on a selected object, like the
 /// move and resize handles, and the angle shown while it is turned.**
