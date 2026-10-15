@@ -165,7 +165,7 @@ impl PdfiumDocument {
 ///
 /// The *n*th of a kind in the stream is the *n*th of that kind PDFium lists,
 /// once the counts agree — as `object_spans` matches them, without its words.
-fn drawing_spans(
+pub(super) fn drawing_spans(
     census: &[Drawn],
     operations: &[crate::pdf::content::Operation],
     images: &std::collections::BTreeSet<Vec<u8>>,

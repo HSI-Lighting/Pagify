@@ -3782,6 +3782,46 @@ fn dragging_the_group_moves_every_member_by_the_same_amount() {
     assert_eq!(app.tab_mut().selection.group.len(), 2, "the group should still hold both, at their new spots");
 }
 
+/// **A group move is one edit of the page, not one per member.** Reported
+/// from use (0.1.78): 96 things moved together froze the app, and on a
+/// low-spec machine it was closed as not responding — each member wrote and
+/// reloaded the whole document. Undo names it as one move of all of them.
+#[test]
+fn a_group_move_is_one_move_of_all_its_members() {
+    let mut app = app("pictures.pdf");
+    app.submit("editobject");
+    let pictures = app.tab_mut().doc.as_ref().expect("open").session.images_on(0).expect("images");
+    app.tab_mut().selection.group = pictures
+        .iter()
+        .map(|p| Selected { page: 0, object: p.object, rect: p.rect, what: "the picture" })
+        .collect();
+
+    app.finish_group_grab(Grab { handle: None, from: AppPoint { x: 0.0, y: 0.0 }, by: (12.0, -7.0) }, 1.0);
+    app.submit("undo");
+
+    let said: String = app.cmd.history().iter().map(|e| e.text.as_str()).collect::<Vec<_>>().join("\n");
+    assert!(said.contains("Move 2 things on page 1"), "{said}");
+}
+
+/// **A group resize is one edit of the page too** — it was one rewrite of the
+/// whole document per member (two for a run of words).
+#[test]
+fn a_group_resize_is_one_resize_of_all_its_members() {
+    let mut app = app("pictures.pdf");
+    app.submit("editobject");
+    let pictures = app.tab_mut().doc.as_ref().expect("open").session.images_on(0).expect("images");
+    app.tab_mut().selection.group = pictures
+        .iter()
+        .map(|p| Selected { page: 0, object: p.object, rect: p.rect, what: "the picture" })
+        .collect();
+
+    app.finish_group_grab(Grab { handle: Some(Handle::BottomRight), from: AppPoint { x: 0.0, y: 0.0 }, by: (30.0, 20.0) }, 1.0);
+    app.submit("undo");
+
+    let said: String = app.cmd.history().iter().map(|e| e.text.as_str()).collect::<Vec<_>>().join("\n");
+    assert!(said.contains("Resize 2 things on page 1"), "{said}");
+}
+
 /// **Dragging one of the group's own handles resizes every member about
 /// the same shared anchor** — the group's own bounding box, the same
 /// way a single object's own handle anchors on its own opposite corner.

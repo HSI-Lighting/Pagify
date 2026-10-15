@@ -40,7 +40,9 @@ impl Session {
     /// Make one thing more or less see-through — see
     /// [`pdf_core::document::DocumentMut::set_opacity`].
     pub fn set_opacity(&self, page: usize, object: usize, opacity: f32) -> Result<()> {
-        registry::with_session(self.handle, |s| s.document.set_opacity(page, object, opacity))
+        // Through the undo history: it went straight to the document, and
+        // undo after it could not take it back (0.1.80).
+        self.execute(pdf_core::command::Command::SetOpacity { page_index: page, object, opacity }).map(|_| ())
     }
 
     /// What one step up or down would pass: the nearest thing that overlaps
@@ -67,6 +69,10 @@ impl Session {
         object: usize,
         where_to: pdf_core::document::Stacking,
     ) -> Result<()> {
-        registry::with_session(self.handle, |s| s.document.restack(page_index, object, where_to))
+        // **Through the undo history.** Straight to the document, undo could
+        // not take it back — "it goes behind an invisible layer" — and, since
+        // a restack renumbers the page's objects, the undo of an earlier move
+        // then moved the wrong ones (0.1.80).
+        self.execute(pdf_core::command::Command::Restack { page_index, object, where_to }).map(|_| ())
     }
 }

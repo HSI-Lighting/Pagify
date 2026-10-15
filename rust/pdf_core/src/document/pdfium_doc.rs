@@ -35,6 +35,7 @@ use crate::render::bitmap::{self, Bitmap, PixelOrder};
 use crate::render::{RegionPixels, RenderTarget};
 
 mod lift;
+mod moving;
 
 /// The process-wide PDFium binding.
 ///
@@ -2564,7 +2565,8 @@ impl Document for PdfiumDocument {
         let operations = content::parse(&stream)?;
         let states = content::states(&operations);
         let placed = content::placed(&operations);
-        let site = self.object_wrap_site(page_index, object, &file, &page, &operations, &states, &placed)?;
+        let facts = PageFacts::new(self, page_index);
+        let site = self.object_wrap_site(&facts, page_index, object, &file, &page, &operations, &states, &placed)?;
 
         // **A resource of its own on the page.** Opacity is a graphics-state
         // parameter set through an `ExtGState`, which has to be named in the
@@ -4659,6 +4661,22 @@ impl DocumentMut for PdfiumDocument {
     // `&mut dyn DocumentMut`, a way to reach it.
     fn move_object_mut(&mut self, page_index: usize, object: usize, by: Point) -> Result<()> {
         <Self as Document>::move_object(self, page_index, object, by)
+    }
+
+    fn move_objects_mut(&mut self, page_index: usize, objects: &[usize], by: Point) -> Result<()> {
+        self.move_objects_in_stream(page_index, objects, by)
+    }
+
+    fn restack_mut(&mut self, page_index: usize, object: usize, where_to: crate::document::Stacking) -> Result<()> {
+        <Self as Document>::restack(self, page_index, object, where_to)
+    }
+
+    fn set_opacity_mut(&mut self, page_index: usize, object: usize, opacity: f32) -> Result<()> {
+        <Self as Document>::set_opacity(self, page_index, object, opacity)
+    }
+
+    fn scale_objects_mut(&mut self, page_index: usize, objects: &[usize], anchor: Point, sx: f32, sy: f32) -> Result<()> {
+        self.scale_objects_in_stream(page_index, objects, anchor, sx, sy)
     }
 
     fn scale_object_mut(
@@ -8101,11 +8119,6 @@ fn font_to_unicode(
     fn move_run_in_stream(&mut self, page_index: usize, object: usize, by: Point) -> Result<()> {
         use crate::pdf::content;
 
-        let run = self
-            .text_run_at(page_index, object)?
-            .ok_or_else(|| PdfError::InvalidArgument("that is not a run of text".into()))?;
-        let height = self.page_size(page_index)?.height_pt;
-
         let was_secured = self.already_secured;
         let plus = self.secure_plus;
         let permissions = self.permissions();
@@ -8117,6 +8130,38 @@ fn font_to_unicode(
         let operations = content::parse(&stream)?;
         let placed = content::placed(&operations);
         let states = content::states(&operations);
+
+        let run = self
+            .text_run_at(page_index, object)?
+            .ok_or_else(|| PdfError::InvalidArgument("that is not a run of text".into()))?;
+        let facts = PageFacts::new(self, page_index);
+        let edits =
+            self.run_move_edits(&facts, page_index, &run, by, &file, &page, &stream, &operations, &states, &placed)?;
+        let edited = content::splice(&stream, &edits);
+        let rewritten = Self::write_edit(&base, &file, &stream_replacements(&streams, &edited)?, &[])?;
+        self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
+    }
+
+    /// The stream edits [`Self::move_run_in_stream`] makes for one run,
+    /// planned against a page read once — shared with the group move.
+    #[allow(clippy::too_many_arguments)]
+    fn run_move_edits(
+        &self,
+        facts: &PageFacts<'_>,
+        page_index: usize,
+        run: &crate::document::TextRun,
+        by: Point,
+        file: &crate::pdf::File<'_>,
+        page: &crate::pdf::Object,
+        stream: &[u8],
+        operations: &[crate::pdf::content::Operation],
+        states: &[crate::pdf::content::State],
+        placed: &[crate::pdf::content::Placed],
+    ) -> Result<Vec<(std::ops::Range<usize>, Vec<u8>)>> {
+        use crate::pdf::content;
+
+        let object = run.object;
+        let height = self.page_size(page_index)?.height_pt;
 
         // How many codes each show-text operator draws, which is what says
         // where this run's own operators stop — see `run_operators`.
@@ -8137,7 +8182,7 @@ fn font_to_unicode(
                 })
                 .sum()
         };
-        let order = self.text_order(page_index, object);
+        let order = facts.text_order(object);
         let (first, last, continues) =
             run_operators(&run, height, &placed, &operations, &codes_in, order)?;
 
@@ -8211,20 +8256,7 @@ fn font_to_unicode(
                 ),
             ]
         };
-        let edited = content::splice(&stream, &edits);
-
-        let mut replacements = Vec::new();
-        for (index, (number, dict)) in streams.iter().enumerate() {
-            let data = if index == 0 { edited.clone() } else { Vec::new() };
-            let packed = content::encode(&data)?;
-            let mut dict = dict.clone();
-            dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
-            dict.remove(b"DecodeParms");
-            replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
-        }
-
-        let rewritten = Self::write_edit(&base, &file, &replacements, &[])?;
-        self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
+        Ok(edits)
     }
 
     /// Resize a run along one or both axes independently: `sy` as a `Tf`
@@ -8275,8 +8307,6 @@ fn font_to_unicode(
     ) -> Result<()> {
         use crate::pdf::content;
 
-        let height = self.page_size(page_index)?.height_pt;
-
         let was_secured = self.already_secured;
         let plus = self.secure_plus;
         let permissions = self.permissions();
@@ -8287,14 +8317,41 @@ fn font_to_unicode(
         let (stream, streams) = self.page_content(&file, &page)?;
         let operations = content::parse(&stream)?;
         let placed = content::placed(&operations);
+        let states = content::states(&operations);
 
-        let fonts = self.page_fonts(&file, &page);
+        let facts = PageFacts::new(self, page_index);
+        let edits = self.resize_run_edits(&facts, page_index, run, sx, sy, &file, &page, &operations, &states, &placed)?;
+        let edited = content::splice(&stream, &edits);
+        let rewritten = Self::write_edit(&base, &file, &stream_replacements(&streams, &edited)?, &[])?;
+        self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
+    }
+
+    /// The stream edits [`Self::resize_run_in_stream`] makes for one run,
+    /// planned against a page read once — shared with the group resize.
+    #[allow(clippy::too_many_arguments)]
+    fn resize_run_edits(
+        &self,
+        facts: &PageFacts<'_>,
+        page_index: usize,
+        run: &crate::document::TextRun,
+        sx: f32,
+        sy: f32,
+        file: &crate::pdf::File<'_>,
+        page: &crate::pdf::Object,
+        operations: &[crate::pdf::content::Operation],
+        states: &[crate::pdf::content::State],
+        placed: &[crate::pdf::content::Placed],
+    ) -> Result<Vec<(std::ops::Range<usize>, Vec<u8>)>> {
+        use crate::pdf::content;
+
+        let height = self.page_size(page_index)?.height_pt;
+        let fonts = self.page_fonts(file, page);
         let codes_in = |p: &content::Placed| -> usize {
             let width = p
                 .font
                 .as_ref()
                 .zip(fonts.as_ref())
-                .and_then(|(name, dict)| code_width(&file, dict, name))
+                .and_then(|(name, dict)| code_width(file, dict, name))
                 .unwrap_or(1)
                 .max(1);
             content::pieces(&operations[p.origin.operation])
@@ -8305,8 +8362,8 @@ fn font_to_unicode(
                 })
                 .sum()
         };
-        let order = self.text_order(page_index, run.object);
-        let (first, last, _) = run_operators(run, height, &placed, &operations, &codes_in, order)?;
+        let order = facts.text_order(run.object);
+        let (first, last, _) = run_operators(run, height, placed, operations, &codes_in, order)?;
 
         // The font and size already in force where the run starts — written
         // back afterward, unconditionally, because both are graphics state
@@ -8331,7 +8388,7 @@ fn font_to_unicode(
         // already in force (`governing.horizontal_scale`), not an assumed
         // 100%, is what makes two resizes in a row compound correctly
         // instead of the second one erasing the first's stretch.
-        let was_tz = content::states(&operations)[first].horizontal_scale * 100.0;
+        let was_tz = states[first].horizontal_scale * 100.0;
         let new_tz = (was_tz * sx / sy).max(1.0);
 
         let before_ops = format!("/{name} {new_size} Tf\n{new_tz} Tz\n");
@@ -8339,23 +8396,7 @@ fn font_to_unicode(
 
         let before = operations[first].span.start;
         let after = operations[last].span.end;
-        let edits = [
-            (before..before, before_ops.into_bytes()),
-            (after..after, after_ops.into_bytes()),
-        ];
-        let edited = content::splice(&stream, &edits);
-
-        let mut replacements = Vec::new();
-        for (index, (number, dict)) in streams.iter().enumerate() {
-            let data = if index == 0 { edited.clone() } else { Vec::new() };
-            let packed = content::encode(&data)?;
-            let mut dict = dict.clone();
-            dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
-            dict.remove(b"DecodeParms");
-            replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
-        }
-        let rewritten = Self::write_edit(&base, &file, &replacements, &[])?;
-        self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
+        Ok(vec![(before..before, before_ops.into_bytes()), (after..after, after_ops.into_bytes())])
     }
 
     /// Every object on a page: what kind it is and where it sits.
@@ -8959,8 +9000,10 @@ fn font_to_unicode(
     /// opacity — so that each of them lands in the same place: inside a
     /// picture's frame (with its placeholder), around a shape, around a text
     /// box holding only this run.
+    #[allow(clippy::too_many_arguments)]
     fn object_wrap_site(
         &self,
+        facts: &PageFacts<'_>,
         page_index: usize,
         object: usize,
         file: &crate::pdf::File<'_>,
@@ -8970,7 +9013,7 @@ fn font_to_unicode(
         placed: &[crate::pdf::content::Placed],
     ) -> Result<WrapSite> {
         use crate::pdf::content;
-        let pictures = self.images_on(page_index)?;
+        let pictures = facts.pictures()?;
         if let Some(which) = pictures.iter().position(|i| i.object == object) {
             let names = self.image_names(file, page)?;
             let drawn = image_operators(operations, &names);
@@ -8998,7 +9041,7 @@ fn font_to_unicode(
             });
         }
 
-        if let Some((which, paths)) = self.path_ordinal(page_index, object)? {
+        if let Some((which, paths)) = facts.path_ordinal(object)? {
             let painted = path_operators(operations);
             if painted.len() != paths {
                 return Err(PdfError::Unsupported(
@@ -9020,8 +9063,8 @@ fn font_to_unicode(
             });
         }
 
-        let runs = self.text_runs(page_index)?;
-        if let Some(run) = runs.iter().find(|r| r.object == object) {
+        if let Some(run) = self.text_run_at(page_index, object)? {
+            let run = &run;
             let height = self.page_size(page_index)?.height_pt;
             let fonts = self.page_fonts(file, page);
             let codes_in = |p: &content::Placed| -> usize {
@@ -9040,7 +9083,7 @@ fn font_to_unicode(
                     })
                     .sum()
             };
-            let order = self.text_order(page_index, object);
+            let order = facts.text_order(object);
             let (first, last, _) = run_operators(run, height, placed, operations, &codes_in, order)?;
             return match frame_scope(operations, first..last + 1) {
                 Some((open, close)) => Ok(WrapSite { span: open..close + 1, own_scope: true, ctm: states[open].ctm }),
@@ -9091,7 +9134,31 @@ fn font_to_unicode(
         let states = content::states(&operations);
         let placed = content::placed(&operations);
 
-        let site = self.object_wrap_site(page_index, object, &file, &page, &operations, &states, &placed)?;
+        let facts = PageFacts::new(self, page_index);
+        let edits =
+            self.transform_edits(&facts, page_index, object, page_matrix, &file, &page, &operations, &states, &placed)?;
+        let edited = content::splice(&stream, &edits);
+        let rewritten = Self::write_edit(&base, &file, &stream_replacements(&streams, &edited)?, &[])?;
+        self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
+    }
+
+    /// The stream edits [`Self::transform_in_stream`] makes for one object,
+    /// planned against a page read once — shared with the group move, which
+    /// plans every member against the same read.
+    #[allow(clippy::too_many_arguments)]
+    fn transform_edits(
+        &self,
+        facts: &PageFacts<'_>,
+        page_index: usize,
+        object: usize,
+        page_matrix: [f32; 6],
+        file: &crate::pdf::File<'_>,
+        page: &crate::pdf::Object,
+        operations: &[crate::pdf::content::Operation],
+        states: &[crate::pdf::content::State],
+        placed: &[crate::pdf::content::Placed],
+    ) -> Result<Vec<(std::ops::Range<usize>, Vec<u8>)>> {
+        let site = self.object_wrap_site(facts, page_index, object, file, page, operations, states, placed)?;
         let back = inverse(site.ctm).ok_or(PdfError::Unsupported(
             "this is placed by a transform this cannot invert",
         ))?;
@@ -9099,27 +9166,15 @@ fn font_to_unicode(
 
         let from = operations[site.span.start].span.start;
         let to = operations[site.span.end - 1].span.end;
-        let edited = if site.own_scope {
+        Ok(if site.own_scope {
             // Just inside the scope's `q`.
             let at = operations[site.span.start].span.end;
-            content::splice(&stream, &[(at..at, concat_matrix(&local)?)])
+            vec![(at..at, concat_matrix(&local)?)]
         } else {
             let mut opening: Vec<u8> = b"q\n".to_vec();
             opening.extend_from_slice(&concat_matrix(&local)?);
-            content::splice(&stream, &[(from..from, opening), (to..to, b"\nQ".to_vec())])
-        };
-
-        let mut replacements = Vec::new();
-        for (index, (number, dict)) in streams.iter().enumerate() {
-            let data = if index == 0 { edited.clone() } else { Vec::new() };
-            let packed = content::encode(&data)?;
-            let mut dict = dict.clone();
-            dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
-            dict.remove(b"DecodeParms");
-            replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
-        }
-        let rewritten = Self::write_edit(&base, &file, &replacements, &[])?;
-        self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
+            vec![(from..from, opening), (to..to, b"\nQ".to_vec())]
+        })
     }
 
     /// The byte-safe move, exposed so a probe can ask *why* it refused.
@@ -11993,6 +12048,86 @@ struct WrapSite {
     own_scope: bool,
     /// The transform in force where the edit is written.
     ctm: [f32; 6],
+}
+
+/// What PDFium says is on one page — its pictures, which object is which
+/// shape, the order of its text objects — each asked the first time it is
+/// needed and kept for the rest of one edit.
+///
+/// **Why kept.** Each of these walks every object on the page; asked once per
+/// object of a 96-piece group move they were a page scan per piece on top of
+/// everything else (see `Self::move_objects_in_stream`).
+struct PageFacts<'d> {
+    doc: &'d PdfiumDocument,
+    page_index: usize,
+    pictures: std::cell::OnceCell<Vec<crate::document::PageImage>>,
+    /// Object → which shape it is, and how many shapes there are.
+    shapes: std::cell::OnceCell<(HashMap<usize, usize>, usize)>,
+    text_objects: std::cell::OnceCell<Vec<usize>>,
+}
+
+impl<'d> PageFacts<'d> {
+    fn new(doc: &'d PdfiumDocument, page_index: usize) -> Self {
+        PageFacts {
+            doc,
+            page_index,
+            pictures: std::cell::OnceCell::new(),
+            shapes: std::cell::OnceCell::new(),
+            text_objects: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn pictures(&self) -> Result<&[crate::document::PageImage]> {
+        if self.pictures.get().is_none() {
+            let _ = self.pictures.set(self.doc.images_on(self.page_index)?);
+        }
+        Ok(self.pictures.get().expect("just set"))
+    }
+
+    /// `(which shape, how many shapes)`, as [`PdfiumDocument::path_ordinal`].
+    fn path_ordinal(&self, object: usize) -> Result<Option<(usize, usize)>> {
+        if self.shapes.get().is_none() {
+            let mut which = HashMap::new();
+            for (index, drawn) in self.doc.object_census(self.page_index)?.iter().enumerate() {
+                if drawn.kind as u32 == pdfium_render::prelude::FPDF_PAGEOBJ_PATH {
+                    let next = which.len();
+                    which.insert(index, next);
+                }
+            }
+            let count = which.len();
+            let _ = self.shapes.set((which, count));
+        }
+        let (which, count) = self.shapes.get().expect("just set");
+        Ok(which.get(&object).map(|w| (*w, *count)))
+    }
+
+    /// `(which text object, how many)`, as [`PdfiumDocument::text_order`].
+    fn text_order(&self, object: usize) -> Option<(usize, usize)> {
+        if self.text_objects.get().is_none() {
+            let _ = self.text_objects.set(self.doc.text_objects_in_order(self.page_index).ok()?);
+        }
+        let text = self.text_objects.get()?;
+        Some((text.iter().position(|o| *o == object)?, text.len()))
+    }
+}
+
+/// The page's content, edited, as the stream objects to write back: the
+/// whole of it in the first, the rest emptied — how every stream edit here
+/// writes a page.
+fn stream_replacements(
+    streams: &[(u32, crate::pdf::Dict)],
+    edited: &[u8],
+) -> Result<Vec<(u32, Vec<u8>)>> {
+    let mut replacements = Vec::new();
+    for (index, (number, dict)) in streams.iter().enumerate() {
+        let data = if index == 0 { edited } else { &[][..] };
+        let packed = crate::pdf::content::encode(data)?;
+        let mut dict = dict.clone();
+        dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
+        dict.remove(b"DecodeParms");
+        replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
+    }
+    Ok(replacements)
 }
 
 /// One thing drawn on a page, as the move guard sees it.

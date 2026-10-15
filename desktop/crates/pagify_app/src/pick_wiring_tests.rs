@@ -636,13 +636,14 @@ fn a_page_read_before_an_edit_or_an_undo_is_not_used_after_it() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The other half of the cache's key, and of its clearing. Splitting a run
-/// into its letters is the one page change that does not go through the
-/// history (it moves no undo generation); what makes the next click read
-/// the page again is [`Doc::rendered_is_stale`], which the app calls right
-/// after — the render epoch it moves, and the cache it empties.
+/// A run split into its letters is read again by the next click. The split
+/// went outside the undo history until 0.1.81 — the page renumbered with no
+/// undo generation moved, which left earlier undos on the page pointing at the
+/// wrong objects — and only [`Doc::rendered_is_stale`], which the app calls
+/// right after, made the next click read the page again. It is a history
+/// command now; the click reads the page again either way.
 #[test]
-fn a_page_changed_outside_the_history_is_read_again_once_it_is_declared_stale() {
+fn a_page_split_into_letters_is_read_again_by_the_next_click() {
     let (mut app, (dir, log)) = app_with_log("text-lines.pdf", "split");
     let first = text_runs(&app, 0)[0].clone();
     let at = AppPoint { x: (first.rect.left + 2.0) as f64, y: ((first.rect.top + first.rect.bottom) / 2.0) as f64 };
@@ -652,7 +653,7 @@ fn a_page_changed_outside_the_history_is_read_again_once_it_is_declared_stale() 
     let session = app.tab().doc.as_ref().expect("open").session.clone();
     let generation = session.undo_generation();
     session.split_run_into_characters(0, first.object).expect("split");
-    assert_eq!(session.undo_generation(), generation, "setup: a split does not move the history");
+    assert_ne!(session.undo_generation(), generation, "setup: a split is in the history now (0.1.81)");
     app.tab_mut().doc.as_mut().expect("open").rendered_is_stale();
 
     let (_, line) = click_logged(&mut app, &log, 0, at);

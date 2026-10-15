@@ -896,3 +896,85 @@ fn a_sideways_letter_is_a_picture_with_its_paper_cleared() {
     let Some(ObjectClipboard::Image { rgba, .. }) = &app.clipboard_state.object_clipboard else { panic!("not a picture") };
     assert_eq!(rgba[3], 0, "the paper round the letter was left white (alpha {})", rgba[3]);
 }
+
+/// **Reported from use on 0.1.79: "undo also stopped working".** The session
+/// log showed a placed picture dragged, then "nothing to undo" every time.
+/// Moving, resizing or turning a placed picture (or a picture signature) went
+/// straight to the document, never through the undo history — it had since
+/// 0.1.x, and became common once pictures pasted from outside are placed ones.
+#[test]
+fn moving_and_turning_a_placed_picture_are_undone() {
+    let mut app = opened("placed-picture.pdf", b"0 0 1 rg 72 600 50 50 re f", "", &[]);
+    let rect = pdf_core::document::Rect { left: 100.0, top: 100.0, right: 140.0, bottom: 140.0 };
+    app.clipboard_state.object_clipboard =
+        Some(ObjectClipboard::Image { rgba: [255u8, 0, 0, 255].repeat(4), width: 2, height: 2, rect });
+    app.paste_object_selection();
+    let was = app_mark(&app);
+
+    app.finish_placed_image_grab(
+        PlacedImageSelected { page: 0, index: was.index, rect: was.rect, rotation: was.rotation },
+        Grab { handle: None, from: AppPoint { x: 0.0, y: 0.0 }, by: (50.0, 30.0) },
+    );
+    assert!((app_mark(&app).rect.left - was.rect.left - 50.0).abs() < 0.5, "not moved: {:?}", app_mark(&app).rect);
+    app.submit("undo");
+    assert!((app_mark(&app).rect.left - was.rect.left).abs() < 0.5 && (app_mark(&app).rect.top - was.rect.top).abs() < 0.5,
+        "the move was not undone: {:?} (was {:?}); said {}", app_mark(&app).rect, was.rect, said(&app));
+
+    let now = app_mark(&app);
+    app.finish_placed_image_grab(
+        PlacedImageSelected { page: 0, index: now.index, rect: now.rect, rotation: now.rotation },
+        Grab { handle: Some(Handle::Rotate), from: AppPoint { x: 160.0, y: 138.0 }, by: (-20.0, 20.0) },
+    );
+    assert!(app_mark(&app).rotation.abs() > 1.0, "not turned");
+    app.submit("undo");
+    assert!(app_mark(&app).rotation.abs() < 0.5, "the turn was not undone: {}", app_mark(&app).rotation);
+}
+
+fn app_mark(app: &PagifyApp) -> pdf_core::document::PlacedImageMark {
+    let marks = app.tab().doc.as_ref().expect("open").session.placed_image_marks(0).expect("marks");
+    assert_eq!(marks.len(), 1, "one placed picture");
+    marks.into_iter().next().unwrap()
+}
+
+/// **Reported from use on 0.1.80: "the app freezes while I undo, and it goes
+/// behind an invisible layer"** (session log: 227 things moved, then "brought
+/// to the front", then every click "the group it is drawn in"). Bringing a
+/// layer to the front went straight to the document, never into the undo
+/// history — so undo could not take it back — and it renumbers the page's
+/// objects, so the undo of the earlier group move then moved the wrong ones
+/// (one of them the group, which only the slow way can try to move).
+#[test]
+fn bringing_a_layer_to_the_front_is_undone_and_the_move_before_it_still_undoes_right() {
+    // An invisible page-size group at the bottom, then two squares.
+    let form = b"<< /Type /XObject /Subtype /Form /BBox [0 0 612 792] /Resources << /ExtGState << /G0 << /ca 0 >> >> >> /Length 29 >>\nstream\n/G0 gs 1 1 1 rg 0 0 612 792 re f\nendstream".to_vec();
+    let mut app = opened(
+        "invisible-layer.pdf",
+        b"q /Fm0 Do Q 1 0 0 rg 72 600 50 50 re f 0 0 1 rg 200 600 50 50 re f",
+        "/XObject << /Fm0 6 0 R >>",
+        &[form],
+    );
+    let top = |app: &PagifyApp| -> Vec<(pdf_core::document::DrawnKind, pdf_core::document::Rect)> {
+        let drawn = app.tab().doc.as_ref().expect("open").session.drawn_objects(0).expect("drawn");
+        drawn.into_iter().filter(|d| d.depth == 0).map(|d| (d.kind, d.rect)).collect()
+    };
+    let start = top(&app);
+    assert_eq!(start.len(), 3, "{start:?}");
+    assert_eq!(start[0].0, pdf_core::document::DrawnKind::Group);
+
+    // The two squares moved together …
+    app.tab_mut().selection.group = (1..3)
+        .map(|object| Selected { page: 0, object, rect: start[object].1, what: "the shape" })
+        .collect();
+    app.finish_group_grab(Grab { handle: None, from: AppPoint { x: 0.0, y: 0.0 }, by: (10.0, 20.0) }, 1.0);
+    let moved = top(&app);
+    // … then the invisible group brought to the front, over everything.
+    app.restack(0, 0, pdf_core::document::Stacking::Front).expect("bring to front");
+    assert_eq!(top(&app).last().map(|d| d.0), Some(pdf_core::document::DrawnKind::Group));
+
+    app.submit("undo");
+    assert_eq!(top(&app), moved, "undo should take the group back to the bottom: {}", said(&app));
+    let started = std::time::Instant::now();
+    app.submit("undo");
+    assert_eq!(top(&app), start, "the move should be undone, the squares back where they were: {}", said(&app));
+    assert!(started.elapsed().as_millis() < 1000, "the undo took {} ms", started.elapsed().as_millis());
+}

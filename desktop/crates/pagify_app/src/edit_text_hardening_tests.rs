@@ -329,19 +329,20 @@ fn editor_with_a_rectangle(name: &str) -> PagifyApp {
     app
 }
 
-/// **A page change that is not in the undo history refuses the open editor.** The
-/// Layers panel restacks an object: the page is rewritten, every object number
-/// after it moves, and the undo generation does not — the stamp the editor carried
-/// before. The words typed would have landed on the objects that now have the old
-/// numbers (reported with a reproduction: a word outside the paragraph was written
-/// over). The epoch is the other half of the stamp.
+/// **A restacked page refuses the open editor.** The Layers panel restacks an
+/// object: the page is rewritten and every object number after it moves. The
+/// words typed would have landed on the objects that now have the old numbers
+/// (reported with a reproduction: a word outside the paragraph was written
+/// over). A restack went outside the undo history until 0.1.81, so the epoch
+/// half of the editor's stamp caught it; it is a history command now, and the
+/// generation half does.
 #[test]
 fn an_editor_whose_page_was_restacked_is_refused_and_the_page_is_untouched() {
     let mut app = editor_with_a_rectangle("stale-restack");
     let generation = app.doc_generation();
     // The rectangle to the back: it is object 0 now, and the text objects are 1 to 4.
     app.restack(0, 4, pdf_core::document::Stacking::Back).expect("restacked");
-    assert_eq!(app.doc_generation(), generation, "setup: a restack does not move the history");
+    assert_ne!(app.doc_generation(), generation, "setup: a restack is in the history now (0.1.81)");
     let (runs_before, picture_before) = (runs_on(&app, 0), picture(&app, 0));
     assert!(runs_before.iter().all(|r| r.object >= 1), "setup: the page was renumbered: {runs_before:?}");
 

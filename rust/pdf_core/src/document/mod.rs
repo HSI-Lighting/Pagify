@@ -1342,6 +1342,30 @@ pub trait DocumentMut {
         Err(PdfError::Unsupported("moving an object on this page"))
     }
 
+    /// Move several objects of one page by the same distance in one edit — see
+    /// [`crate::command::Command::MoveObjects`]. A refusal changes nothing,
+    /// and the command then moves them one at a time.
+    fn move_objects_mut(&mut self, _page_index: usize, _objects: &[usize], _by: Point) -> Result<()> {
+        Err(PdfError::Unsupported("moving several objects in one go"))
+    }
+
+    /// See [`Document::restack`].
+    fn restack_mut(&mut self, _page_index: usize, _object: usize, _where_to: Stacking) -> Result<()> {
+        Err(PdfError::Unsupported("changing the drawing order"))
+    }
+
+    /// See [`Document::set_opacity`].
+    fn set_opacity_mut(&mut self, _page_index: usize, _object: usize, _opacity: f32) -> Result<()> {
+        Err(PdfError::Unsupported("changing how see-through this is"))
+    }
+
+    /// Resize several objects of one page about the same point in one edit —
+    /// see [`crate::command::Command::ScaleObjects`]. A refusal changes
+    /// nothing, and the command then resizes them one at a time.
+    fn scale_objects_mut(&mut self, _page_index: usize, _objects: &[usize], _anchor: Point, _sx: f32, _sy: f32) -> Result<()> {
+        Err(PdfError::Unsupported("resizing several objects in one go"))
+    }
+
     /// See [`Document::scale_object`].
     fn scale_object_mut(
         &mut self,

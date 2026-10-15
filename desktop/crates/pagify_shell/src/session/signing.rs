@@ -126,33 +126,26 @@ impl Session {
         })
     }
 
-    /// Move or resize a placed picture signature, before it is applied —
+    /// Move or resize a placed picture or picture signature to `rect` —
     /// see [`pdf_core::document::DocumentMut::set_image_signature_rect`].
+    /// Through the undo history (`Command::SetPlacedImageRect`), with `was`,
+    /// where it is now, for undo to put back: it went straight to the
+    /// document before, and "undo stopped working" (0.1.79).
     pub fn set_image_signature_rect(
         &self,
         page: usize,
         index: usize,
         rect: pdf_core::document::Rect,
+        was: pdf_core::document::Rect,
     ) -> Result<()> {
-        registry::with_session(self.handle, |s| {
-            let doc = s
-                .document
-                .as_document_mut()
-                .ok_or(pdf_core::PdfError::Unsupported("editing this document"))?;
-            doc.set_image_signature_rect(page, index, rect)
-        })
+        self.execute(pdf_core::command::Command::SetPlacedImageRect { page_index: page, index, rect, was }).map(|_| ())
     }
 
-    /// Turn a placed picture signature, before it is applied — see
-    /// [`pdf_core::document::DocumentMut::rotate_image_signature`].
-    pub fn rotate_image_signature(&self, page: usize, index: usize, degrees: f32) -> Result<()> {
-        registry::with_session(self.handle, |s| {
-            let doc = s
-                .document
-                .as_document_mut()
-                .ok_or(pdf_core::PdfError::Unsupported("editing this document"))?;
-            doc.rotate_image_signature(page, index, degrees)
-        })
+    /// Turn a placed picture or picture signature to `degrees`, from `was` —
+    /// see [`pdf_core::document::DocumentMut::rotate_image_signature`]. Through
+    /// the undo history (`Command::TurnPlacedImage`).
+    pub fn rotate_image_signature(&self, page: usize, index: usize, degrees: f32, was: f32) -> Result<()> {
+        self.execute(pdf_core::command::Command::TurnPlacedImage { page_index: page, index, degrees, was }).map(|_| ())
     }
 
     /// The picture signatures placed on a page, as opposed to any other

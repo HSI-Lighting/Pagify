@@ -128,6 +128,15 @@ impl Session {
     /// One object per character, in place of a run of them — see
     /// [`pdf_core::document::Document::split_run_into_characters`].
     pub fn split_run_into_characters(&self, page: usize, object: usize) -> Result<()> {
-        registry::with_session(self.handle, |s| s.document.split_run_into_characters(page, object))
+        // Through the undo history, as `Command::SplitRunIntoCharacters`: it
+        // renumbers the page's objects, and done behind the history's back it
+        // left every earlier undo on this page pointing at the wrong ones.
+        // A run of one letter is left alone — splitting it changes nothing,
+        // and an undo step that changes nothing reads as undo not working.
+        let letters = self.text_run_at(page, object)?.map(|run| run.text.trim().chars().count()).unwrap_or(0);
+        if letters <= 1 {
+            return Ok(());
+        }
+        self.execute(pdf_core::command::Command::SplitRunIntoCharacters { page_index: page, object }).map(|_| ())
     }
 }

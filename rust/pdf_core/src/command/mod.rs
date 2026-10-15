@@ -155,6 +155,50 @@ pub enum Command {
         object: usize,
         by: crate::document::Point,
     },
+    /// Move several objects of one page by the same distance: Edit Object's
+    /// group move. Planned against one read of the page and written once
+    /// ([`crate::document::DocumentMut::move_objects_mut`]); where that refuses,
+    /// the members are moved one at a time as a `Batch`, the way a group always
+    /// moved. Either way, one undo.
+    ///
+    /// **Why not a `Batch` of `MoveObject`.** Each of those wrote and reloaded
+    /// the whole document: 96 things moved together froze the app for seconds
+    /// and on a low-spec machine it was closed as not responding (0.1.78).
+    MoveObjects {
+        page_index: usize,
+        objects: Vec<usize>,
+        by: crate::document::Point,
+    },
+    /// Resize several objects of one page about the same point: Edit
+    /// Object's group resize. Planned against one read of the page and written
+    /// once ([`crate::document::DocumentMut::scale_objects_mut`]); where that
+    /// refuses, the members are resized one at a time as a `Batch`. One undo.
+    ScaleObjects {
+        page_index: usize,
+        objects: Vec<usize>,
+        anchor: crate::document::Point,
+        sx: f32,
+        sy: f32,
+    },
+    /// Move or resize a placed picture or a picture signature (an
+    /// annotation, not page content) to `rect`; `was` is where it was, which
+    /// undo puts back. **Reported from use (0.1.79): "undo stopped working"**
+    /// — these went straight to the document, so undo after one did nothing,
+    /// or took away whatever came before it.
+    SetPlacedImageRect {
+        page_index: usize,
+        index: usize,
+        rect: crate::document::Rect,
+        was: crate::document::Rect,
+    },
+    /// Turn a placed picture or a picture signature to `degrees`; `was` is the
+    /// angle it had. See [`Command::SetPlacedImageRect`].
+    TurnPlacedImage {
+        page_index: usize,
+        index: usize,
+        degrees: f32,
+        was: f32,
+    },
     /// Resize one page object about `anchor` — see
     /// [`crate::document::Document::scale_object`].
     ScaleObject {
@@ -219,6 +263,27 @@ pub enum Command {
     SplitRunIntoCharacters {
         page_index: usize,
         object: usize,
+    },
+    /// Bring an object to the front or send it to the back of the page's
+    /// drawing order, or step it once — see
+    /// [`crate::document::Document::restack`]. Undoes by one page snapshot.
+    ///
+    /// **Reported from use (0.1.80): "it goes behind an invisible layer", and
+    /// undo froze.** A restack went straight to the document: undo could not
+    /// take it back, and since it renumbers the page's objects, the undo of an
+    /// earlier move then moved the wrong ones.
+    Restack {
+        page_index: usize,
+        object: usize,
+        where_to: crate::document::Stacking,
+    },
+    /// Make one object more or less see-through — see
+    /// [`crate::document::Document::set_opacity`]. Undoes by one page
+    /// snapshot; it too went straight to the document before.
+    SetOpacity {
+        page_index: usize,
+        object: usize,
+        opacity: f32,
     },
 
     /// Put pages from somewhere else into this document at `at`.
@@ -463,6 +528,32 @@ pub enum UndoRecord {
         object: usize,
         by: crate::document::Point,
     },
+    /// See [`Command::MoveObjects`]: moved back in one edit, or one at a time.
+    MoveObjects {
+        page_index: usize,
+        objects: Vec<usize>,
+        by: crate::document::Point,
+    },
+    /// See [`Command::ScaleObjects`]: resized back in one edit, or one at a time.
+    ScaleObjects {
+        page_index: usize,
+        objects: Vec<usize>,
+        anchor: crate::document::Point,
+        sx: f32,
+        sy: f32,
+    },
+    /// See [`Command::SetPlacedImageRect`]: back where it was.
+    SetPlacedImageRect {
+        page_index: usize,
+        index: usize,
+        rect: crate::document::Rect,
+    },
+    /// See [`Command::TurnPlacedImage`]: back to the angle it had.
+    TurnPlacedImage {
+        page_index: usize,
+        index: usize,
+        degrees: f32,
+    },
     /// The reciprocal scale, about the same anchor.
     ScaleObject {
         page_index: usize,
@@ -652,6 +743,29 @@ impl Command {
                     by: crate::document::Point { x: -by.x, y: -by.y },
                 })
             }
+            Command::SetPlacedImageRect { page_index, index, rect, was } => {
+                doc.set_image_signature_rect(*page_index, *index, *rect)?;
+                Ok(UndoRecord::SetPlacedImageRect { page_index: *page_index, index: *index, rect: *was })
+            }
+            Command::TurnPlacedImage { page_index, index, degrees, was } => {
+                doc.rotate_image_signature(*page_index, *index, *degrees)?;
+                Ok(UndoRecord::TurnPlacedImage { page_index: *page_index, index: *index, degrees: *was })
+            }
+            Command::MoveObjects { page_index, objects, by } => match doc.move_objects_mut(*page_index, objects, *by) {
+                Ok(()) => Ok(UndoRecord::MoveObjects {
+                    page_index: *page_index,
+                    objects: objects.clone(),
+                    by: crate::document::Point { x: -by.x, y: -by.y },
+                }),
+                Err(PdfError::Unsupported(_)) => Command::Batch {
+                    commands: objects
+                        .iter()
+                        .map(|&object| Command::MoveObject { page_index: *page_index, object, by: *by })
+                        .collect(),
+                }
+                .execute(doc),
+                Err(other) => Err(other),
+            },
             Command::ScaleObject { page_index, object, anchor, sx, sy } => {
                 doc.scale_object_mut(*page_index, *object, *anchor, *sx, *sy)?;
                 Ok(UndoRecord::ScaleObject {
@@ -661,6 +775,25 @@ impl Command {
                     sx: 1.0 / *sx,
                     sy: 1.0 / *sy,
                 })
+            }
+            Command::ScaleObjects { page_index, objects, anchor, sx, sy } => {
+                match doc.scale_objects_mut(*page_index, objects, *anchor, *sx, *sy) {
+                    Ok(()) => Ok(UndoRecord::ScaleObjects {
+                        page_index: *page_index,
+                        objects: objects.clone(),
+                        anchor: *anchor,
+                        sx: 1.0 / *sx,
+                        sy: 1.0 / *sy,
+                    }),
+                    Err(PdfError::Unsupported(_)) => Command::Batch {
+                        commands: objects
+                            .iter()
+                            .map(|&object| Command::ScaleObject { page_index: *page_index, object, anchor: *anchor, sx: *sx, sy: *sy })
+                            .collect(),
+                    }
+                    .execute(doc),
+                    Err(other) => Err(other),
+                }
             }
             Command::RotateObject { page_index, object, pivot, degrees } => {
                 doc.rotate_object_mut(*page_index, *object, *pivot, *degrees)?;
@@ -691,6 +824,16 @@ impl Command {
             Command::SplitRunIntoCharacters { page_index, object } => {
                 let page = doc.snapshot_page(*page_index)?;
                 doc.split_run_into_characters_mut(*page_index, *object)?;
+                Ok(UndoRecord::RestoreRedactedPage { index: *page_index, page })
+            }
+            Command::Restack { page_index, object, where_to } => {
+                let page = doc.snapshot_page(*page_index)?;
+                doc.restack_mut(*page_index, *object, *where_to)?;
+                Ok(UndoRecord::RestoreRedactedPage { index: *page_index, page })
+            }
+            Command::SetOpacity { page_index, object, opacity } => {
+                let page = doc.snapshot_page(*page_index)?;
+                doc.set_opacity_mut(*page_index, *object, *opacity)?;
                 Ok(UndoRecord::RestoreRedactedPage { index: *page_index, page })
             }
             Command::AddAnnotation {
@@ -843,7 +986,19 @@ impl Command {
             }
             Command::SetPageSize { index, .. } => format!("Resize page {}", index + 1),
             Command::MoveObject { page_index, .. } => format!("Move on page {}", page_index + 1),
+            Command::MoveObjects { page_index, objects, .. } => {
+                format!("Move {} things on page {}", objects.len(), page_index + 1)
+            }
+            Command::SetPlacedImageRect { page_index, rect, was, .. } => {
+                let same_size = ((rect.right - rect.left) - (was.right - was.left)).abs() < 0.01
+                    && ((rect.bottom - rect.top) - (was.bottom - was.top)).abs() < 0.01;
+                format!("{} a picture on page {}", if same_size { "Move" } else { "Resize" }, page_index + 1)
+            }
+            Command::TurnPlacedImage { page_index, .. } => format!("Turn a picture on page {}", page_index + 1),
             Command::ScaleObject { page_index, .. } => format!("Resize on page {}", page_index + 1),
+            Command::ScaleObjects { page_index, objects, .. } => {
+                format!("Resize {} things on page {}", objects.len(), page_index + 1)
+            }
             Command::RotateObject { page_index, .. } => format!("Rotate on page {}", page_index + 1),
             Command::RemoveObject { page_index, .. } => format!("Delete on page {}", page_index + 1),
             Command::RemoveObjects { page_index, objects } => {
@@ -852,6 +1007,16 @@ impl Command {
             Command::SplitRunIntoCharacters { page_index, .. } => {
                 format!("Split into characters on page {}", page_index + 1)
             }
+            Command::Restack { page_index, where_to, .. } => {
+                let how = match where_to {
+                    crate::document::Stacking::Front => "Bring to front",
+                    crate::document::Stacking::Back => "Send to back",
+                    crate::document::Stacking::Up => "Move up",
+                    crate::document::Stacking::Down => "Move down",
+                };
+                format!("{how} on page {}", page_index + 1)
+            }
+            Command::SetOpacity { page_index, .. } => format!("Opacity on page {}", page_index + 1),
             Command::PasteLifted { page_index, .. } => format!("Paste on page {}", page_index + 1),
             // Named by what the user drew, not by "annotation" — the label goes
             // straight onto an undo button, and "Undo add annotation" tells nobody
@@ -906,12 +1071,18 @@ impl Command {
             | Command::RemoveAnnotation { page_index, .. }
             | Command::RemoveText { page_index, .. }
             | Command::MoveObject { page_index, .. }
+            | Command::MoveObjects { page_index, .. }
+            | Command::ScaleObjects { page_index, .. }
+            | Command::SetPlacedImageRect { page_index, .. }
+            | Command::TurnPlacedImage { page_index, .. }
             | Command::ScaleObject { page_index, .. }
             | Command::RotateObject { page_index, .. }
             | Command::RemoveObject { page_index, .. }
             | Command::RemoveObjects { page_index, .. }
             | Command::PasteLifted { page_index, .. }
             | Command::SplitRunIntoCharacters { page_index, .. }
+            | Command::Restack { page_index, .. }
+            | Command::SetOpacity { page_index, .. }
             // Invisible text changes no pixels, but the cache is not only for
             // pixels: a raster kept from before the layer existed would hand
             // back a page whose text and image disagree.
@@ -1002,8 +1173,34 @@ impl UndoRecord {
             UndoRecord::MoveObject { page_index, object, by } => {
                 doc.move_object_mut(page_index, object, by)
             }
+            UndoRecord::SetPlacedImageRect { page_index, index, rect } => {
+                doc.set_image_signature_rect(page_index, index, rect)
+            }
+            UndoRecord::TurnPlacedImage { page_index, index, degrees } => {
+                doc.rotate_image_signature(page_index, index, degrees)
+            }
+            UndoRecord::MoveObjects { page_index, objects, by } => match doc.move_objects_mut(page_index, &objects, by) {
+                Err(PdfError::Unsupported(_)) => {
+                    for object in objects {
+                        doc.move_object_mut(page_index, object, by)?;
+                    }
+                    Ok(())
+                }
+                moved => moved,
+            },
             UndoRecord::ScaleObject { page_index, object, anchor, sx, sy } => {
                 doc.scale_object_mut(page_index, object, anchor, sx, sy)
+            }
+            UndoRecord::ScaleObjects { page_index, objects, anchor, sx, sy } => {
+                match doc.scale_objects_mut(page_index, &objects, anchor, sx, sy) {
+                    Err(PdfError::Unsupported(_)) => {
+                        for object in objects {
+                            doc.scale_object_mut(page_index, object, anchor, sx, sy)?;
+                        }
+                        Ok(())
+                    }
+                    scaled => scaled,
+                }
             }
             UndoRecord::RotateObject { page_index, object, pivot, degrees } => {
                 doc.rotate_object_mut(page_index, object, pivot, degrees)

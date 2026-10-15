@@ -6298,15 +6298,22 @@ impl PagifyApp {
                 // moves used up the whole undo depth. A `Batch` is also all or
                 // nothing, so a member that cannot move leaves the rest where
                 // they were instead of a half-moved selection.
+                //
+                // **And one edit of the page, not one per member.** A `Batch`
+                // of `MoveObject`s wrote and reloaded the whole document once
+                // per member: 96 things moved together froze the app for
+                // seconds, and on a low-spec machine it was closed as not
+                // responding (0.1.78). `MoveObjects` plans them all against
+                // one read of the page — one per page the group is on.
                 let by = pdf_core::document::Point { x: dx, y: dy };
+                let mut by_page: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
+                for member in &members {
+                    by_page.entry(member.page).or_default().push(member.object);
+                }
                 let moved = self.run_group_command(
-                    members
-                        .iter()
-                        .map(|m| pdf_core::command::Command::MoveObject {
-                            page_index: m.page,
-                            object: m.object,
-                            by,
-                        })
+                    by_page
+                        .into_iter()
+                        .map(|(page_index, objects)| pdf_core::command::Command::MoveObjects { page_index, objects, by })
                         .collect(),
                 );
                 let moved_rects = moved.is_ok();
@@ -6343,12 +6350,18 @@ impl PagifyApp {
                 let anchor = pdf_core::document::Point { x: ax, y: ay };
                 let members = std::mem::take(&mut self.tab_mut().selection.group);
                 let total = members.len();
+                // One edit of each page, as for a group move: a `ScaleObject`
+                // per member rewrote the whole document per member.
+                let mut by_page: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
+                for member in &members {
+                    by_page.entry(member.page).or_default().push(member.object);
+                }
                 let resized = self.run_group_command(
-                    members
-                        .iter()
-                        .map(|m| pdf_core::command::Command::ScaleObject {
-                            page_index: m.page,
-                            object: m.object,
+                    by_page
+                        .into_iter()
+                        .map(|(page_index, objects)| pdf_core::command::Command::ScaleObjects {
+                            page_index,
+                            objects,
                             anchor,
                             sx,
                             sy,
@@ -6387,9 +6400,12 @@ impl PagifyApp {
     /// Run one edit per group member as a single, all-or-nothing history entry.
     fn run_group_command(&mut self, commands: Vec<pdf_core::command::Command>) -> Result<(), String> {
         let Some(doc) = &self.tab_mut().doc else { return Err("nothing open.".into()) };
-        doc.session
-            .execute(pdf_core::command::Command::Batch { commands })
-            .map_err(|e| e.to_string())?;
+        let (what, started) = (commands.first().map(|c| c.description()).unwrap_or_default(), std::time::Instant::now());
+        let done = doc.session.execute(pdf_core::command::Command::Batch { commands });
+        // Timed, so a slow group edit shows in the log rather than only as a
+        // frozen window (0.1.79: "moving is still very slow").
+        self.recording_state.session_log.record("perf", &format!("{what} took {} ms", started.elapsed().as_millis()));
+        done.map_err(|e| e.to_string())?;
         if let Some(doc) = &mut self.tab_mut().doc {
             doc.rendered_is_stale();
         }
@@ -6641,7 +6657,7 @@ impl PagifyApp {
                 return;
             }
             let Some(doc) = &self.tab_mut().doc else { return };
-            match doc.session.rotate_image_signature(sel.page, sel.index, wanted) {
+            match doc.session.rotate_image_signature(sel.page, sel.index, wanted, sel.rotation) {
                 Ok(()) => {
                     if let Some(doc) = &mut self.tab_mut().doc {
                         doc.rendered_is_stale();
@@ -6685,7 +6701,7 @@ impl PagifyApp {
             }
         };
         let Some(doc) = &self.tab_mut().doc else { return };
-        match doc.session.set_image_signature_rect(sel.page, sel.index, wanted) {
+        match doc.session.set_image_signature_rect(sel.page, sel.index, wanted, sel.rect) {
             Ok(()) => {
                 if let Some(doc) = &mut self.tab_mut().doc {
                     doc.rendered_is_stale();
@@ -6716,7 +6732,7 @@ impl PagifyApp {
                 return;
             }
             let Some(doc) = &self.tab_mut().doc else { return };
-            match doc.session.rotate_image_signature(sel.page, sel.index, wanted) {
+            match doc.session.rotate_image_signature(sel.page, sel.index, wanted, sel.rotation) {
                 Ok(()) => {
                     if let Some(doc) = &mut self.tab_mut().doc {
                         doc.rendered_is_stale();
@@ -6760,7 +6776,7 @@ impl PagifyApp {
             }
         };
         let Some(doc) = &self.tab_mut().doc else { return };
-        match doc.session.set_image_signature_rect(sel.page, sel.index, wanted) {
+        match doc.session.set_image_signature_rect(sel.page, sel.index, wanted, sel.rect) {
             Ok(()) => {
                 if let Some(doc) = &mut self.tab_mut().doc {
                     doc.rendered_is_stale();
