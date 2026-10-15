@@ -16,6 +16,7 @@ mod canvas;
 mod caches;
 mod dispatch;
 mod mac_open;
+mod nudge;
 mod focus;
 mod home;
 mod hub;
@@ -712,6 +713,10 @@ struct SelectionState {
     placed_image_grab: Option<Grab>,
     /// See [`Self::signature_hover_handle`].
     placed_image_hover_handle: Option<Handle>,
+    /// When the arrow keys last moved the selection, on egui's clock — set while
+    /// their moves are still building up in whichever `*_grab` they filled in.
+    /// See `nudge.rs`.
+    nudge_at: Option<f64>,
 }
 
 /// The page view `DocTab` carries beyond the current page and zoom:
@@ -991,7 +996,7 @@ impl DocTab {
             secure_state: SecureState { asking_to_secure: None, secure_in_place_confirmed: false, asking_to_redact: None, awaiting_password: None, held_passcode: None, password_typed: zeroize::Zeroizing::new(String::new()), password_field_focused: false, password_problem: None, password_plus: false, },
             tool_state: ToolState { object_tool: None, hand_shown_before_any_tool_is_picked: false },
             undo_state: UndoState { prefer_layer_undo: false, last_layer_edits: 0, last_doc_generation: 0 },
-            selection: SelectionState { selected: None, group: Vec::new(), grab: None, marquee: None, object_hover_handle: None, rotate_snap: false, group_grab: None, text_selection: None, text_drag: None, drag_from: None, markup_grab: None, last_snap: None, right_clicked_at: None, right_click_text_actions: None, opacity_draft: None, selected_image: None, picked_layer: None, signature_selected: None, signature_grab: None, signature_hover_handle: None, placed_image_selected: None, placed_image_grab: None, placed_image_hover_handle: None, },
+            selection: SelectionState { selected: None, group: Vec::new(), grab: None, marquee: None, object_hover_handle: None, rotate_snap: false, group_grab: None, text_selection: None, text_drag: None, drag_from: None, markup_grab: None, last_snap: None, right_clicked_at: None, right_click_text_actions: None, opacity_draft: None, selected_image: None, picked_layer: None, signature_selected: None, signature_grab: None, signature_hover_handle: None, placed_image_selected: None, placed_image_grab: None, nudge_at: None, placed_image_hover_handle: None, },
             ribbon: Tab::Home,
             closing: None,
             reading: None,
@@ -3081,6 +3086,14 @@ impl PagifyApp {
         let focus = Focus::capture(&ctx);
         self.give_the_open_box_the_copy_not_its_placeholder(ctx, &focus);
 
+        // Arrow-key moves land before anything else acts on the selection; an
+        // Escape drops them instead, as it drops a drag.
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.drop_nudge();
+        } else {
+            self.settle_nudge(ctx, Self::frame_acts_on_the_selection(ctx));
+        }
+
         // **Space is a space.** It used to be a second Enter here — swallowed
         // from the box and the line run as it stood — on the strength of a
         // `Mode::TextContent` that nothing ever set. Reported from use as
@@ -3244,10 +3257,12 @@ impl PagifyApp {
 
         // Document keys. Deny by default — see focus.rs.
         if focus.allows_document_keys() && self.tab_mut().doc.is_some() {
-            if keys.right {
+            // With something selected the arrows move it; otherwise they turn the page.
+            let arrows_move_a_selection = self.nudge_selection(ctx);
+            if keys.right && !arrows_move_a_selection {
                 self.act(Verb::Page(PageTarget::Next));
             }
-            if keys.left {
+            if keys.left && !arrows_move_a_selection {
                 self.act(Verb::Page(PageTarget::Previous));
             }
             if keys.zoom_in {
@@ -6055,8 +6070,6 @@ impl PagifyApp {
     /// How near, in screen pixels, a side or the middle of a thing being moved has
     /// to be to a reference line to be pulled onto it.
     const GUIDE_SNAP_PX: f32 = 6.0;
-    /// How near a reference line is shown at all.
-    const GUIDE_NEAR_PX: f32 = 40.0;
 
     /// The rectangles the thing being moved can line up with: everything else
     /// the page draws that is a thing of its own — not the page-sized
@@ -6102,7 +6115,6 @@ impl PagifyApp {
             &targets,
             size,
             if snap { Self::GUIDE_SNAP_PX / scale } else { 0.0 },
-            Self::GUIDE_NEAR_PX / scale,
         )
     }
 
@@ -6113,11 +6125,15 @@ impl PagifyApp {
     /// Applied to the drag itself, every frame, from the pointer — so the ghost
     /// drawn while it moves and the place it is dropped are the same place, and
     /// letting go away from a line is not "sticky".
-    fn snap_the_move(&mut self, page: usize, scale: f32, snap: bool) {
+    ///
+    /// `ortho` (Shift held): the move is held to one axis, and so is the pull —
+    /// a line on the other axis must not drag it off the straight.
+    fn snap_the_move(&mut self, page: usize, scale: f32, snap: bool, ortho: bool) {
         if let (Some(grab), Some(sel)) = (self.tab().selection.grab.clone(), self.tab().selection.selected.clone()) {
             if grab.handle.is_none() && sel.page == page {
                 let moving = Self::shifted(sel.rect, grab.by);
                 let (nudge, _) = self.align_for(page, moving, &[sel.object], scale, snap);
+                let nudge = if ortho { Self::along_the_held_axis(grab.by, nudge) } else { nudge };
                 if let Some(g) = self.tab_mut().selection.grab.as_mut() {
                     g.by = (g.by.0 + nudge.0, g.by.1 + nudge.1);
                 }
@@ -6130,12 +6146,24 @@ impl PagifyApp {
                         self.tab().selection.group.iter().filter(|m| m.page == page).map(|m| m.object).collect();
                     let moving = Self::shifted(bounds, grab.by);
                     let (nudge, _) = self.align_for(page, moving, &members, scale, snap);
+                    let nudge = if ortho { Self::along_the_held_axis(grab.by, nudge) } else { nudge };
                     if let Some(g) = self.tab_mut().selection.group_grab.as_mut() {
                         g.by = (g.by.0 + nudge.0, g.by.1 + nudge.1);
                     }
                 }
             }
         }
+    }
+
+    /// **Shift held while moving: straight across or straight up and down.** A
+    /// move held to the one axis it has gone furthest along; a tie is across.
+    fn one_axis(by: (f32, f32)) -> (f32, f32) {
+        if by.0.abs() >= by.1.abs() { (by.0, 0.0) } else { (0.0, by.1) }
+    }
+
+    /// `nudge` kept to the axis a move already held by [`Self::one_axis`] runs along.
+    fn along_the_held_axis(held: (f32, f32), nudge: (f32, f32)) -> (f32, f32) {
+        if held.0.abs() >= held.1.abs() { (nudge.0, 0.0) } else { (0.0, nudge.1) }
     }
 
     fn shifted(r: pdf_core::document::Rect, by: (f32, f32)) -> pdf_core::document::Rect {
@@ -16436,6 +16464,8 @@ mod g1_command_box_tests;
 /// thing is actually being moved.
 #[cfg(test)]
 mod guide_tests;
+#[cfg(test)]
+mod nudge_tests;
 
 /// **Asked for with a screenshot: a rotate handle on a selected object, like the
 /// move and resize handles, and the angle shown while it is turned.**

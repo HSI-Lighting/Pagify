@@ -28,7 +28,7 @@ fn dragging_close_to_another_things_edge_lands_exactly_on_it() {
     let dx = other.left + 3.0 - sel.rect.left;
     app.tab_mut().selection.grab = Some(Grab { handle: None, from: AppPoint { x: 0.0, y: 0.0 }, by: (dx, 0.0) });
 
-    app.snap_the_move(0, 1.0, true);
+    app.snap_the_move(0, 1.0, true, false);
 
     let by = app.tab().selection.grab.as_ref().unwrap().by;
     let targets: Vec<f32> = {
@@ -51,7 +51,7 @@ fn holding_alt_shows_the_lines_but_pulls_nothing() {
     app.tab_mut().selection.selected = Some(sel.clone());
     let dx = other.left + 3.0 - sel.rect.left;
     app.tab_mut().selection.grab = Some(Grab { handle: None, from: AppPoint { x: 0.0, y: 0.0 }, by: (dx, 0.0) });
-    app.snap_the_move(0, 1.0, false);
+    app.snap_the_move(0, 1.0, false, false);
     assert_eq!(app.tab().selection.grab.as_ref().unwrap().by, (dx, 0.0));
 }
 
@@ -62,7 +62,7 @@ fn a_resize_is_not_pulled_onto_anything() {
     app.tab_mut().selection.selected = Some(sel.clone());
     let dx = other.left + 3.0 - sel.rect.left;
     app.tab_mut().selection.grab = Some(Grab { handle: Some(Handle::Right), from: AppPoint { x: 0.0, y: 0.0 }, by: (dx, 0.0) });
-    app.snap_the_move(0, 1.0, true);
+    app.snap_the_move(0, 1.0, true, false);
     assert_eq!(app.tab().selection.grab.as_ref().unwrap().by, (dx, 0.0));
 }
 
@@ -117,4 +117,21 @@ fn the_lines_are_drawn_only_while_something_is_being_moved() {
 
 fn ui_fixture(name: &str) -> String {
     super::ui_tests::fixture(name)
+}
+
+#[test]
+fn a_move_draws_only_its_own_sides_and_middle_however_much_is_near() {
+    let mut h = harness("covered.pdf");
+    let (sel, _) = {
+        let app = h.state_mut();
+        two_objects(app)
+    };
+    h.state_mut().submit("editobject");
+    h.state_mut().tab_mut().selection.selected = Some(sel);
+    // Dragged a little, so it is among other things' edges.
+    h.state_mut().tab_mut().selection.grab = Some(Grab { handle: None, from: AppPoint { x: 0.0, y: 0.0 }, by: (6.0, 4.0) });
+    h.run_steps(2);
+    let (grey, green) = lines_drawn(&h);
+    assert!(grey + green >= 1, "no lines at all while something is being moved");
+    assert!(grey + green <= 6, "{grey} grey and {green} green: more than its two sides and middle on each axis");
 }

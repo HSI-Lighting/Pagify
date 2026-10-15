@@ -30,8 +30,9 @@ pub(crate) enum BoxStyle {
 
 impl crate::PagifyApp {
     /// The reference lines, **only while something is being moved** — not while it
-    /// is resized, and not when it is merely selected. Grey for a line near it,
-    /// green for one a side or the middle is exactly on.
+    /// is resized, and not when it is merely selected. Its own two outermost
+    /// sides and its middle, on each axis: grey, and green where one is exactly
+    /// on an edge or a middle of something else (see `pagify_shell::guides`).
     pub(crate) fn draw_move_guides(&mut self, ui: &mut egui::Ui, page: usize, view: PageView) {
         let (moving, exclude): (pdf_core::document::Rect, Vec<usize>) = {
             let single = match (self.tab().selection.grab.clone(), self.tab().selection.selected.clone()) {
@@ -74,6 +75,13 @@ impl crate::PagifyApp {
                 painter.line_segment([left, right], stroke);
             }
         }
+    }
+
+    /// How far a drag has come with the pointer at `at`. **Shift holds a move —
+    /// not a resize or a turn — to one axis**, the one it has gone furthest along.
+    pub(crate) fn dragged_by(grab: &Grab, at: AppPoint, shift: bool) -> (f32, f32) {
+        let by = ((at.x - grab.from.x) as f32, (at.y - grab.from.y) as f32);
+        if shift && grab.handle.is_none() { Self::one_axis(by) } else { by }
     }
 
     /// Forget what the object tool has picked. A placed picture or signature
@@ -187,8 +195,9 @@ impl crate::PagifyApp {
         }
 
         if response.dragged() {
+            let shift = ui.input(|i| i.modifiers.shift);
             if let Some(grab) = self.tab_mut().selection.grab.as_mut() {
-                grab.by = ((at.x - grab.from.x) as f32, (at.y - grab.from.y) as f32);
+                grab.by = Self::dragged_by(grab, at, shift);
                 ui.output_mut(|o| {
                     o.cursor_icon = match grab.handle {
                         Some(h) => h.cursor(),
@@ -197,7 +206,7 @@ impl crate::PagifyApp {
                 });
             }
             if let Some(grab) = self.tab_mut().selection.group_grab.as_mut() {
-                grab.by = ((at.x - grab.from.x) as f32, (at.y - grab.from.y) as f32);
+                grab.by = Self::dragged_by(grab, at, shift);
                 ui.output_mut(|o| {
                     o.cursor_icon = match grab.handle {
                         Some(h) => h.cursor(),
@@ -210,9 +219,9 @@ impl crate::PagifyApp {
             }
             // Pulled onto a reference line, unless Alt is held.
             let snap = !ui.input(|i| i.modifiers.alt);
-            self.snap_the_move(page, view.scale, snap);
+            self.snap_the_move(page, view.scale, snap, shift);
             // A turn snaps to whole steps of 15 degrees while Shift is held.
-            self.tab_mut().selection.rotate_snap = ui.input(|i| i.modifiers.shift);
+            self.tab_mut().selection.rotate_snap = shift;
         }
 
         if response.drag_stopped() {
@@ -310,8 +319,9 @@ impl crate::PagifyApp {
         }
 
         if response.dragged() {
+            let shift = ui.input(|i| i.modifiers.shift);
             if let Some(grab) = self.tab_mut().selection.signature_grab.as_mut() {
-                grab.by = ((at.x - grab.from.x) as f32, (at.y - grab.from.y) as f32);
+                grab.by = Self::dragged_by(grab, at, shift);
                 ui.output_mut(|o| {
                     o.cursor_icon = match grab.handle {
                         Some(h) => h.cursor(),
@@ -396,8 +406,9 @@ impl crate::PagifyApp {
         }
 
         if response.dragged() {
+            let shift = ui.input(|i| i.modifiers.shift);
             if let Some(grab) = self.tab_mut().selection.placed_image_grab.as_mut() {
-                grab.by = ((at.x - grab.from.x) as f32, (at.y - grab.from.y) as f32);
+                grab.by = Self::dragged_by(grab, at, shift);
                 ui.output_mut(|o| {
                     o.cursor_icon = match grab.handle {
                         Some(h) => h.cursor(),
@@ -1986,6 +1997,7 @@ impl crate::PagifyApp {
         }
 
         if response.dragged() {
+            let shift = ui.input(|i| i.modifiers.shift);
             if let Some(from) = self.tab_mut().selection.text_drag {
                 self.tab_mut().selection.text_selection = self
                     .characters(page)
@@ -2000,7 +2012,7 @@ impl crate::PagifyApp {
                 }
             }
             if let Some(grab) = self.tab_mut().selection.markup_grab.as_mut() {
-                grab.by = ((at.x - grab.from.x) as f32, (at.y - grab.from.y) as f32);
+                grab.by = Self::dragged_by(grab, at, shift);
                 let handle = grab.handle;
                 ui.output_mut(|o| {
                     o.cursor_icon = handle.map(|h| h.cursor()).unwrap_or(egui::CursorIcon::Grabbing)
