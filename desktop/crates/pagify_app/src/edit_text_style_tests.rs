@@ -665,3 +665,50 @@ fn underlining_a_word_of_vivo_changes_that_word_only() {
     assert!(drawn.right - drawn.left > 15.0, "wide enough for seven letters at 8 pt: {drawn:?}");
     assert!(drawn.top > click.origin.y && drawn.top < click.origin.y + 4.0, "under the baseline: {drawn:?} {:?}", click.origin);
 }
+
+// ---- Task 11, the refusal path: the words are not the price of a look ------------------
+
+/// What the app has said, all of it, oldest first.
+fn said_so_far(h: &Harness<'static, PagifyApp>) -> String {
+    h.state().cmd.history().iter().map(|e| e.text.as_str()).collect::<Vec<_>>().join(" | ")
+}
+
+/// Two pieces, the second spaced out (so the box opens with two looks and nobody has styled
+/// it), with a face the engine has no way to write with put on the second word — the one
+/// thing the page's own looks cannot say, and the engine refuses.
+fn refused_looks(name: &str) -> Harness<'static, PagifyApp> {
+    let mut h = editor(name, &two_pieces("2 Tc"));
+    assert!(editing(&h).uses_looks() && !editing(&h).styled, "setup: several looks, nobody styled");
+    let unavailable = CharChange { face: Some("Zzz Not Available".into()), ..CharChange::default() };
+    h.state_mut().tab_mut().edit.editing_run.as_mut().expect("editing").rich.set_char(6..11, &unavailable);
+    h
+}
+
+/// **A refusal of the looks must not cost the words.** Nobody styled this box; it only
+/// opened with two looks to its line. Fixing a typo used to work (the line was written in
+/// one look) and must still work when the engine will not write the looks.
+#[test]
+fn a_typo_is_fixed_when_the_engine_will_not_write_the_looks() {
+    let mut h = refused_looks("refusal-typo");
+    h.state_mut().tab_mut().edit.editing_run.as_mut().expect("editing").buffer = "Jello there".into();
+    h.run_steps(2);
+    apply(&mut h);
+    let said: String = page_runs(&h).iter().map(|r| r.text.as_str()).collect();
+    assert_eq!(said, "Jello there", "the words are fixed; said: {}", said_so_far(&h));
+    assert!(said_so_far(&h).contains("each line is in one look"), "and the looks lost are said: {}", said_so_far(&h));
+}
+
+/// **But a look somebody asked for is not quietly dropped.** The same refusal on a box the
+/// person styled: nothing is flattened and nothing changes.
+#[test]
+fn a_look_asked_for_and_refused_changes_nothing() {
+    let mut h = refused_looks("refusal-asked");
+    let (stream, runs) = (page_stream_bytes(&h), page_runs(&h));
+    h.state_mut().tab_mut().edit.editing_run.as_mut().expect("editing").styled = true;
+    h.state_mut().tab_mut().edit.editing_run.as_mut().expect("editing").buffer = "Jello there".into();
+    h.run_steps(2);
+    apply(&mut h);
+    assert!(said_so_far(&h).contains("nothing was changed"), "refused and said so: {}", said_so_far(&h));
+    assert_eq!(page_stream_bytes(&h), stream, "the page is as it was, exactly");
+    assert_eq!(page_runs(&h).len(), runs.len());
+}

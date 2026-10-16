@@ -13283,18 +13283,23 @@ impl PagifyApp {
     /// [`check_lines_up`]. The refusal comes before anything is built, so the
     /// page is as it was.
     fn paragraph_edit_commands(&mut self, edit: &EditingRun, typed: &str) -> Result<ParagraphCommands, String> {
-        self.paragraph_edit_commands_with(edit, typed, STRETCH_JUSTIFIED_LINES)
+        self.paragraph_edit_commands_with(edit, typed, STRETCH_JUSTIFIED_LINES, false)
     }
 
     /// [`Self::paragraph_edit_commands`], with whether a retyped line of a
     /// justified paragraph is asked to keep the width it had **said by the caller**:
     /// the apply asks first, and when the engine cannot stretch some line (it
     /// refuses the whole batch and does not say which) asks again without.
+    ///
+    /// `flatten` writes the box as it was written before characters had looks — a retyped
+    /// line in one look — whatever the box holds. Only for an edit nobody styled, when the
+    /// engine refused the looks it opened with: the words are still wanted.
     fn paragraph_edit_commands_with(
         &mut self,
         edit: &EditingRun,
         typed: &str,
         stretch: bool,
+        flatten: bool,
     ) -> Result<ParagraphCommands, String> {
         let original_lines: Vec<&str> = edit.original.split('\n').collect();
         check_lines_up(original_lines.len(), &edit.lines, &edit.twins, &edit.frozen)?;
@@ -13306,7 +13311,7 @@ impl PagifyApp {
         // one look, says what every character looks like (`rich`), and that is what is
         // written: a size, a font or a colour for the whole box is already in it. Any
         // other box sends exactly the commands it always sent.
-        let looked = edit.uses_looks() && edit.picked.text() == edit.original;
+        let looked = !flatten && edit.uses_looks() && edit.picked.text() == edit.original;
         let mut rich = edit.rich.clone();
         rich.edit(typed);
         if looked {

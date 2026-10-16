@@ -1111,15 +1111,18 @@ impl crate::PagifyApp {
         // **A page whose objects move.** A piece taken off moves everything after it; so
         // does a line drawn under a word (a path object of its own, after its text), which
         // any retype that carries spans may add or take away.
-        let renumbers = commands.iter().any(|command| match command {
-            pdf_core::command::Command::ReplaceTextLines { edits, .. } => {
-                removed_pieces(edits) > 0
-                    || edits.iter().any(|edit| {
-                        matches!(edit, pdf_core::document::TextLineEdit::Retype { spans, .. } if !spans.is_empty())
-                    })
-            }
-            _ => false,
-        });
+        let renumbers_in = |commands: &[pdf_core::command::Command]| {
+            commands.iter().any(|command| match command {
+                pdf_core::command::Command::ReplaceTextLines { edits, .. } => {
+                    removed_pieces(edits) > 0
+                        || edits.iter().any(|edit| {
+                            matches!(edit, pdf_core::document::TextLineEdit::Retype { spans, .. } if !spans.is_empty())
+                        })
+                }
+                _ => false,
+            })
+        };
+        let mut renumbers = renumbers_in(&commands);
         let asked_for_width = asks_for_width(&commands);
         // One command is executed as itself; a colour and then the replace as
         // one batch, which undoes in reverse as one step.
@@ -1139,12 +1142,34 @@ impl crate::PagifyApp {
         // much (a one-letter line, a gap that would have to close or open too far,
         // codes it cannot count): the only thing to try is the same edit without
         // asking for the width, and to say that the lines came out ragged.
+        //
+        // **And a refusal of the looks themselves must not cost the words.** A box nobody
+        // styled (`!edit.styled`) that opened with several looks to a line used to be
+        // written flat — one look to a line — and always worked; its looks go through the
+        // engine's spans now, which can refuse. The person who only fixed a typo is given
+        // the edit as it used to be written, and told the looks were not kept. Tried in
+        // turn: the width dropped, then the looks flattened (with the width, then without).
         let mut ragged = false;
-        if failed.is_some() && asked_for_width {
-            if let Ok(again) = self.paragraph_edit_commands_with(edit, typed, false) {
-                if let (Some(retry), Some(doc)) = (one_command(again.commands), &self.tab_mut().doc) {
-                    failed = doc.session.execute(retry).err().map(|e| explain(&e));
-                    ragged = failed.is_none();
+        let mut flattened = false;
+        if failed.is_some() {
+            let mut tries: Vec<(bool, bool)> = Vec::new(); // (stretch, flatten)
+            if asked_for_width {
+                tries.push((false, false));
+            }
+            if !edit.styled && edit.uses_looks() {
+                tries.push((crate::STRETCH_JUSTIFIED_LINES, true));
+                tries.push((false, true));
+            }
+            for (stretch, flatten) in tries {
+                let Ok(again) = self.paragraph_edit_commands_with(edit, typed, stretch, flatten) else { continue };
+                let (asks, moves) = (asks_for_width(&again.commands), renumbers_in(&again.commands));
+                let (Some(retry), Some(doc)) = (one_command(again.commands), &self.tab_mut().doc) else { continue };
+                failed = doc.session.execute(retry).err().map(|e| explain(&e));
+                if failed.is_none() {
+                    ragged = asked_for_width && !asks;
+                    flattened = flatten;
+                    renumbers = moves;
+                    break;
                 }
             }
         }
@@ -1228,6 +1253,12 @@ impl crate::PagifyApp {
                 if let Some(face) = new_lines_face {
                     said = format!(
                         "{said} The new line is written in {face} — the document's own font here                          has only the letters it already uses, so it will not match its neighbours."
+                    );
+                }
+                if flattened {
+                    said = format!(
+                        "{said} The looks of the words in the lines you retyped (underline, spacing, size \
+                         and the like) could not be kept, so each line is in one look."
                     );
                 }
                 self.say_info(if ragged {
