@@ -376,7 +376,7 @@ fn block_input_real_pdf_a_line_with_a_thin_glyph_or_a_twin_is_retyped_and_undone
             session
                 .execute(Command::ReplaceTextLines {
                     page_index: page,
-                    edits: vec![TextLineEdit::Retype { first, text: typed.clone(), style: TextStyle::default(), remove: remove.clone(), justify_to: None }],
+                    edits: vec![TextLineEdit::Retype { first, text: typed.clone(), style: TextStyle::default(), remove: remove.clone(), justify_to: None, spans: Vec::new() }],
                 })
                 .map_err(|e| format!("refused: {e}"))?;
             let after = session.page_text_snapshot(page).expect("snapshot").runs;

@@ -224,6 +224,7 @@ fn attempt(tag: &str, page: usize, first: usize, remove: &[usize], text: &str, d
                 style: TextStyle::default(),
                 remove: remove.to_vec(),
                 justify_to: None,
+                spans: Vec::new(),
             }],
         })
     };

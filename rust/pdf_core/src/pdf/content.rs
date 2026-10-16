@@ -952,6 +952,72 @@ pub fn replacing_pieces(
     out
 }
 
+/// What a show-text operator draws, as its codes with the spacing number after
+/// each — the form a stretch of it can be taken from and shown again in.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Coded {
+    /// A spacing number before the first code.
+    pub leading: Option<f32>,
+    /// Each code's bytes, and the spacing numbers that followed it, summed.
+    pub codes: Vec<(Vec<u8>, Option<f32>)>,
+}
+
+/// `operation`'s codes, `width` bytes to a code, each with the spacing after it.
+pub fn coded(operation: &Operation, width: usize) -> Coded {
+    let mut out = Coded::default();
+    for piece in pieces(operation) {
+        match piece {
+            Piece::Codes(bytes) => out.codes.extend(bytes.chunks(width.max(1)).map(|chunk| (chunk.to_vec(), None))),
+            Piece::Kern(number) => match out.codes.last_mut() {
+                Some((_, after)) => *after = Some(after.unwrap_or(0.0) + number),
+                None => out.leading = Some(out.leading.unwrap_or(0.0) + number),
+            },
+        }
+    }
+    out
+}
+
+impl Coded {
+    /// The codes in `range` as they were drawn: each with the spacing number
+    /// that followed it, so the pen moves exactly as it did. Not the number
+    /// before the first code of the operator, which is [`Self::leading`].
+    pub fn pieces(&self, range: std::ops::Range<usize>) -> Vec<Piece> {
+        let end = range.end.min(self.codes.len());
+        let start = range.start.min(end);
+        let mut out: Vec<Piece> = Vec::new();
+        for (bytes, after) in &self.codes[start..end] {
+            match out.last_mut() {
+                Some(Piece::Codes(run)) => run.extend_from_slice(bytes),
+                _ => out.push(Piece::Codes(bytes.clone())),
+            }
+            if let Some(number) = after {
+                out.push(Piece::Kern(*number));
+            }
+        }
+        out
+    }
+}
+
+/// `pieces` shown: one `[…] TJ`, codes as hex strings and spacing numbers
+/// between them.
+pub fn show_pieces(pieces: &[Piece]) -> Vec<u8> {
+    let mut out = vec![b'['];
+    for piece in pieces {
+        match piece {
+            Piece::Codes(bytes) => {
+                out.push(b'<');
+                for byte in bytes {
+                    out.extend_from_slice(format!("{byte:02X}").as_bytes());
+                }
+                out.push(b'>');
+            }
+            Piece::Kern(number) => out.extend_from_slice(format!(" {number} ").as_bytes()),
+        }
+    }
+    out.extend_from_slice(b"] TJ");
+    out
+}
+
 /// Cut some operations out, copying every other byte through unchanged.
 ///
 /// **The point of the whole module.** What is left is not re-emitted: the bytes

@@ -1502,6 +1502,9 @@ fn a_heading_does_not_merge_into_the_body_beneath_it() {
                     restore: String::new(),
                     frame: Vec::new(),
                     frame_width: 0.0,
+                    scale_x: 1.0,
+                    more: Vec::new(),
+                    rules: Vec::new(),
                 },
             })
             .expect("written");
@@ -3198,6 +3201,9 @@ fn editing_drawn_words_says_they_will_be_replaced() {
                 restore: String::new(),
                 frame: Vec::new(),
                 frame_width: 0.0,
+                scale_x: 1.0,
+                more: Vec::new(),
+                rules: Vec::new(),
             },
         })
         .expect("wrote a transparent run");

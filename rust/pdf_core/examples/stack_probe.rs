@@ -59,6 +59,9 @@ fn write_layer(doc: &mut dyn pdf_core::document::DocumentMut, id: i32) {
             restore: String::new(),
             frame: Vec::new(),
             frame_width: 0.0,
+            scale_x: 1.0,
+            more: Vec::new(),
+            rules: Vec::new(),
         };
         doc.add_annotation(0, &annotation).expect("write");
     }

@@ -67,6 +67,10 @@ pub struct ParagraphPlan<'a> {
     /// Frozen lines whose typed text is not what they said — a line typed away
     /// counts, as the empty text it became. Those words were written nowhere.
     pub frozen_changed: usize,
+    /// Which typed line each original line now holds (an index into `typed`), or
+    /// none for a line with nothing left to hold it: what a caller that knows more
+    /// about the lines than their words (their looks) pairs them by.
+    pub typed_index: Vec<Option<usize>>,
 }
 
 /// Decide what an apply does to each line of a paragraph.
@@ -105,6 +109,20 @@ pub fn plan_paragraph_edit<'a>(
     typed: &[&'a str],
     restyle: bool,
 ) -> ParagraphPlan<'a> {
+    plan_paragraph_edit_with(original, frozen, typed, &|_, _| restyle)
+}
+
+/// [`plan_paragraph_edit`] where what asks for a line to be written though its words
+/// are the same is decided line by line: `restyle(original line, typed line)` says
+/// whether that pair must be written — the typed line looks different from the
+/// original, say, in one character. The whole-paragraph `restyle` of the plain
+/// version is `&|_, _| restyle`.
+pub fn plan_paragraph_edit_with<'a>(
+    original: &[&str],
+    frozen: &[bool],
+    typed: &[&'a str],
+    restyle: &dyn Fn(usize, usize) -> bool,
+) -> ParagraphPlan<'a> {
     let n = original.len();
     let mut typed = typed;
     while typed.len() > n && typed.last().is_some_and(|line| line.trim().is_empty()) {
@@ -127,7 +145,7 @@ pub fn plan_paragraph_edit<'a>(
     // Which typed line (if any) original line `i` now holds — not `typed[i]`:
     // unchanged lines on either side of the touched region keep their own
     // index on their own side.
-    let typed_for = |i: usize| -> Option<&'a str> {
+    let typed_at = |i: usize| -> Option<usize> {
         let j = if i < prefix {
             i
         } else if i >= orig_mid_end {
@@ -137,8 +155,9 @@ pub fn plan_paragraph_edit<'a>(
         } else {
             return None;
         };
-        typed.get(j).copied()
+        (j < typed.len()).then_some(j)
     };
+    let typed_for = |i: usize| -> Option<&'a str> { typed_at(i).map(|j| typed[j]) };
 
     let mut frozen_changed = 0;
     let fates: Vec<LineFate<'a>> = (0..n)
@@ -153,7 +172,11 @@ pub fn plan_paragraph_edit<'a>(
             match line.filter(|text| !text.trim().is_empty()) {
                 None if original[i].trim().is_empty() => LineFate::Kept,
                 None => LineFate::Removed,
-                Some(text) if !restyle && text.trim() == original[i].trim() => LineFate::Kept,
+                Some(text)
+                    if text.trim() == original[i].trim() && !typed_at(i).is_some_and(|j| restyle(i, j)) =>
+                {
+                    LineFate::Kept
+                }
                 Some(text) => LineFate::Written(text),
             }
         })
@@ -171,6 +194,7 @@ pub fn plan_paragraph_edit<'a>(
         surplus,
         surplus_below: orig_mid_end.saturating_sub(1),
         frozen_changed,
+        typed_index: (0..n).map(typed_at).collect(),
     }
 }
 
@@ -269,6 +293,34 @@ pub fn line_edits(
     style: &TextStyle,
     justified: bool,
 ) -> Vec<TextLineEdit> {
+    line_edits_with(fates, lines, twins, style, justified, &|_| LineSpans::Whole(Vec::new()))
+}
+
+/// How the looks of a written line reach the page — see [`line_edits_with`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum LineSpans {
+    /// The line is retyped as a whole: its first piece takes the words with these
+    /// spans (the characters that are not in the line's own look), and its other
+    /// pieces are removed. Empty is the line in its own look.
+    Whole(Vec<pdf_core::document::SpanStyle>),
+    /// The words are the page's own and only their look changed: each piece whose look
+    /// changed is written again in place — `(its object, its exact words, its spans)` —
+    /// and no piece is removed, so the spacing the producer set stays where it is.
+    InPlace(Vec<(usize, String, Vec<pdf_core::document::SpanStyle>)>),
+}
+
+/// [`line_edits`] where each written line may carry the looks of its characters:
+/// `spans_for(line)` is asked, for every [`LineFate::Written`] line (by its index among
+/// the original lines), how they reach the page — see [`LineSpans`]. An in-place line
+/// is one `Retype` per piece named, with nothing removed and no width to keep.
+pub fn line_edits_with(
+    fates: &[LineFate<'_>],
+    lines: &[(Vec<usize>, Rect)],
+    twins: &[Vec<usize>],
+    style: &TextStyle,
+    justified: bool,
+    spans_for: &dyn Fn(usize) -> LineSpans,
+) -> Vec<TextLineEdit> {
     let style = TextStyle { face: style.face.clone(), size: style.size, ..Default::default() };
     let spans = justify_targets(fates, lines, justified);
     fates
@@ -276,20 +328,34 @@ pub fn line_edits(
         .zip(lines)
         .zip(spans)
         .enumerate()
-        .filter_map(|(i, ((fate, (objects, _)), justify_to))| {
+        .flat_map(|(i, ((fate, (objects, _)), justify_to))| {
             let twins = twins.get(i).map_or(&[][..], Vec::as_slice);
             match (fate, objects.split_first()) {
-                (LineFate::Written(text), Some((first, rest))) => Some(TextLineEdit::Retype {
-                    first: *first,
-                    text: (*text).to_string(),
-                    style: style.clone(),
-                    remove: rest.iter().chain(twins).copied().collect(),
-                    justify_to,
-                }),
+                (LineFate::Written(text), Some((first, rest))) => match spans_for(i) {
+                    LineSpans::Whole(spans) => vec![TextLineEdit::Retype {
+                        first: *first,
+                        text: (*text).to_string(),
+                        style: style.clone(),
+                        remove: rest.iter().chain(twins).copied().collect(),
+                        justify_to,
+                        spans,
+                    }],
+                    LineSpans::InPlace(pieces) => pieces
+                        .into_iter()
+                        .map(|(object, text, spans)| TextLineEdit::Retype {
+                            first: object,
+                            text,
+                            style: TextStyle::default(),
+                            remove: Vec::new(),
+                            justify_to: None,
+                            spans,
+                        })
+                        .collect(),
+                },
                 (LineFate::Removed, Some(_)) => {
-                    Some(TextLineEdit::Remove { objects: objects.iter().chain(twins).copied().collect() })
+                    vec![TextLineEdit::Remove { objects: objects.iter().chain(twins).copied().collect() }]
                 }
-                _ => None,
+                _ => Vec::new(),
             }
         })
         .collect()
@@ -582,6 +648,100 @@ mod tests {
         assert_eq!(plan("one\ntwo ", &[false; 2], " one\ntwo", false).fates, [Kept, Kept]);
     }
 
+    // -- looks ---------------------------------------------------------------
+
+    fn span(chars: std::ops::Range<usize>) -> pdf_core::document::SpanStyle {
+        pdf_core::document::SpanStyle {
+            chars,
+            font: None,
+            size: None,
+            color: None,
+            char_spacing: None,
+            width_pct: None,
+            rise: None,
+            underline: true,
+            strike: false,
+        }
+    }
+
+    /// **A line whose words are the same is written when its looks are not.** The
+    /// caller says which pair of lines that is; the plain version's one flag for the
+    /// whole paragraph is the same thing for every pair.
+    #[test]
+    fn a_line_with_the_same_words_is_written_when_its_looks_changed() {
+        let original = ["one", "two", "three"];
+        let only_the_second = plan_paragraph_edit_with(&original, &[false; 3], &original, &|i, j| (i, j) == (1, 1));
+        assert_eq!(only_the_second.fates, [Kept, Written("two"), Kept]);
+        let none = plan_paragraph_edit_with(&original, &[false; 3], &original, &|_, _| false);
+        assert_eq!(none.fates, [Kept, Kept, Kept]);
+        let all = plan_paragraph_edit(&original, &[false; 3], &original, true);
+        assert_eq!(all.fates, [Written("one"), Written("two"), Written("three")]);
+        // Asked of the lines that are the same, and only of those.
+        let asked = std::cell::RefCell::new(Vec::new());
+        plan_paragraph_edit_with(&original, &[false; 3], &["one", "TWO", "three"], &|i, j| {
+            asked.borrow_mut().push((i, j));
+            false
+        });
+        assert_eq!(*asked.borrow(), [(0, 0), (2, 2)]);
+    }
+
+    #[test]
+    fn the_plan_says_which_typed_line_each_original_line_holds() {
+        // A line typed in between: the lines after it are one further down.
+        let grown = plan("a\nb\nc", &[false; 3], "a\nnew\nb\nc", false);
+        assert_eq!(grown.typed_index, [Some(0), Some(2), Some(3)]);
+        // A last line typed away holds nothing.
+        let gone = plan("a\nb", &[false; 2], "a", false);
+        assert_eq!(gone.typed_index, [Some(0), None]);
+    }
+
+    /// A look-only line is one `Retype` per piece, each in place: nothing removed, no
+    /// width to keep (the spacing the producer set stays), the piece's own words.
+    #[test]
+    fn an_in_place_line_is_one_retype_per_piece_and_removes_nothing() {
+        let l = lines(&[&[1], &[4, 5, 6]]);
+        let edits = super::line_edits_with(
+            &[Kept, Written("a b c")],
+            &l,
+            &[],
+            &TextStyle::default(),
+            true,
+            &|i| {
+                assert_eq!(i, 1, "asked of a line that is written, by its place among the original lines");
+                LineSpans::InPlace(vec![(5, "b ".into(), vec![span(0..1)]), (6, "c".into(), vec![span(0..1)])])
+            },
+        );
+        let wanted = |first: usize, text: &str| TextLineEdit::Retype {
+            first,
+            text: text.into(),
+            style: TextStyle::default(),
+            remove: Vec::new(),
+            justify_to: None,
+            spans: vec![span(0..1)],
+        };
+        assert_eq!(edits, [wanted(5, "b "), wanted(6, "c")]);
+    }
+
+    /// A retyped line carries its spans on the retype of its first piece, which still
+    /// removes the others and keeps the width.
+    #[test]
+    fn a_whole_line_carries_its_spans_on_the_first_piece() {
+        let l = lines(&[&[1, 2], &[3]]);
+        let edits = super::line_edits_with(
+            &[Written("x y"), Kept],
+            &l,
+            &[vec![9], vec![]],
+            &TextStyle::default(),
+            true,
+            &|_| LineSpans::Whole(vec![span(2..3)]),
+        );
+        let [TextLineEdit::Retype { first, text, remove, justify_to, spans, .. }] = edits.as_slice() else {
+            panic!("one retype: {edits:?}")
+        };
+        assert_eq!((*first, text.as_str(), remove.as_slice(), spans.as_slice()), (1, "x y", &[2, 9][..], &[span(2..3)][..]));
+        assert_eq!(*justify_to, Some(1.0), "the width it had, as before");
+    }
+
     #[test]
     fn a_removed_line_is_removed_and_so_is_one_blanked_with_spaces() {
         let gone = plan("a\nb\nc\nd", &[false; 4], "a\nb", false);
@@ -685,6 +845,7 @@ mod tests {
             style: TextStyle::default(),
             remove: remove.to_vec(),
             justify_to: None,
+            spans: Vec::new(),
         }
     }
 

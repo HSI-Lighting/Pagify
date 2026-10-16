@@ -319,7 +319,7 @@ fn in_a_frame_with_run_face<R>(face: Vec<u8>, mut layout: impl FnMut(&mut egui::
             result = Some(layout(ui));
         }
     });
-    install_fonts(&h.ctx, Some(face));
+    install_fonts(&h.ctx, Some(face), &[]);
     installed.set(true);
     h.run_steps(3);
     drop(h);

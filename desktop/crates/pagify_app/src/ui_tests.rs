@@ -1599,7 +1599,7 @@ fn a_text_box_smaller_than_the_default_font_shrinks_the_font_to_fit() {
         .begin_text_box(0, AppPoint { x: 50.0, y: 500.0 }, AppPoint { x: 250.0, y: 508.0 })
         .expect("a box above the noise floor should open");
     assert_eq!(
-        h.state().tab().edit.new_text_box.as_ref().map(|b| b.size),
+        h.state().tab().edit.new_text_box.as_ref().map(|b| b.size()),
         Some(8.0),
         "an 8pt-tall box should have shrunk the font to 8pt, not refused or kept the 14pt default"
     );
@@ -1608,7 +1608,7 @@ fn a_text_box_smaller_than_the_default_font_shrinks_the_font_to_fit() {
         .begin_text_box(0, AppPoint { x: 50.0, y: 500.0 }, AppPoint { x: 55.0, y: 540.0 })
         .expect("a narrow box above the noise floor should open");
     assert_eq!(
-        h.state().tab().edit.new_text_box.as_ref().map(|b| b.size),
+        h.state().tab().edit.new_text_box.as_ref().map(|b| b.size()),
         Some(5.0),
         "a 5pt-wide box should have shrunk the font to 5pt too, not just gone by height"
     );
@@ -1617,7 +1617,7 @@ fn a_text_box_smaller_than_the_default_font_shrinks_the_font_to_fit() {
         .begin_text_box(0, AppPoint { x: 50.0, y: 500.0 }, AppPoint { x: 250.0, y: 540.0 })
         .expect("a normal box should still open");
     assert_eq!(
-        h.state().tab().edit.new_text_box.as_ref().map(|b| b.size),
+        h.state().tab().edit.new_text_box.as_ref().map(|b| b.size()),
         Some(14.0),
         "a box already bigger than the default should keep the usual default size"
     );
@@ -1774,13 +1774,19 @@ fn right_aligned_text_lands_near_the_boxs_right_edge() {
     h.get_by_label_contains("Add to Page").click();
     h.run_steps(2);
 
-    let runs = h.state().tab().doc.as_ref().expect("open").session.text_runs(0).expect("runs");
-    let mine = runs.iter().find(|r| r.text.contains("Hi")).expect("the written run");
+    // A box is written in a named face, a glyph to an object, so the word is found
+    // by its letters, inside the box: its `H`.
+    let chars = h.state().tab().doc.as_ref().expect("open").session.characters(0).expect("characters");
+    let first = (0..chars.len().saturating_sub(1))
+        .filter(|&i| chars.text_of(i..i + 2) == "Hi")
+        .filter_map(|i| chars.line_rects(i..i + 1).into_iter().next())
+        .find(|r| r.top >= 495.0 && r.bottom <= 545.0)
+        .expect("the written word");
     let midpoint = (left + right) as f32 / 2.0;
     assert!(
-        mine.origin.x > midpoint,
-        "a right-aligned short word should sit past the middle of the box: origin.x={}, box=[{left},{right}]",
-        mine.origin.x
+        first.left > midpoint,
+        "a right-aligned short word should sit past the middle of the box: left={}, box=[{left},{right}]",
+        first.left
     );
 }
 

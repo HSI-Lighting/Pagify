@@ -114,6 +114,18 @@ impl Session {
         registry::with_session(self.handle, |s| s.document.run_styles(page))
     }
 
+    /// What the page draws some runs with beyond font, size and colour —
+    /// character spacing, width, rise, and any line under or through them — in
+    /// the units a `SpanStyle` is written in. See `Document::run_text_looks`.
+    pub fn run_text_looks(
+        &self,
+        page: usize,
+        objects: &[usize],
+    ) -> Result<std::collections::HashMap<usize, pdf_core::document::RunTextLook>> {
+        let wanted: std::collections::HashSet<usize> = objects.iter().copied().collect();
+        registry::with_session(self.handle, |s| s.document.run_text_looks(page, &wanted))
+    }
+
     /// Whether a run's font is embedded in the document rather than
     /// substituted by whatever reader opened it.
     pub fn run_font_is_embedded(&self, page: usize, object: usize) -> Result<bool> {

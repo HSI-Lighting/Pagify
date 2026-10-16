@@ -606,6 +606,22 @@ pub trait Document: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// **What the page draws these pieces with, beyond font, size and colour** —
+    /// character spacing, horizontal scaling, rise, and whether a line of this
+    /// app's lies under or through each — in the units a [`SpanStyle`] writes
+    /// them (see [`RunTextLook`]), so that what the Edit Text box shows is what
+    /// writing it back would leave. An object that is not a text run, or whose
+    /// drawing operator cannot be followed, is absent from the answer: the
+    /// caller reads that as a piece with no look of its own. Read from one page
+    /// open and one parse of its stream.
+    fn run_text_looks(
+        &self,
+        _page_index: usize,
+        _wanted: &std::collections::HashSet<usize>,
+    ) -> Result<std::collections::HashMap<usize, RunTextLook>> {
+        Ok(std::collections::HashMap::new())
+    }
+
     /// **Temporary diagnostic.** The timing breakdown
     /// [`crate::document::pdfium_doc::PdfiumDocument::set_runs_in_stream`]
     /// left behind on its last call, taken rather than cloned — a caller
@@ -2111,9 +2127,15 @@ impl Annotation {
                 })
             }
             Annotation::Note { rect, .. } => Some(*rect),
-            Annotation::Text { glyphs, .. } => {
-                around(glyphs.iter().map(|g| (g.x, g.y)))
-            }
+            // Every part and both ends of every line, so a mark's runs and rules are
+            // all held to "nothing new goes over a lock".
+            Annotation::Text { glyphs, more, rules, .. } => around(
+                glyphs
+                    .iter()
+                    .chain(more.iter().flat_map(|part| &part.glyphs))
+                    .map(|g| (g.x, g.y))
+                    .chain(rules.iter().flat_map(|rule| [(rule.from.x, rule.from.y), (rule.to.x, rule.to.y)])),
+            ),
             Annotation::Image { rect, .. } => Some(*rect),
             Annotation::Fill { outline, width, .. } => {
                 around(outline.iter().map(|p| (p.x, p.y))).map(|r| Rect {
@@ -2228,6 +2250,18 @@ pub enum Annotation {
         /// How thick that ring is drawn, in points.
         #[serde(default)]
         frame_width: f32,
+        /// How wide the first part's glyphs are drawn, as a share of their own width.
+        #[serde(default = "unit_scale")]
+        scale_x: f32,
+        /// The rest of the mark when it is set in more than one look — a styled
+        /// box's runs after its first. **One mark, not one per run**: an added text
+        /// mark is undone by its id, and `remove_text` refuses an id already gone,
+        /// so runs sharing an id would fail a batch undo after its first member.
+        #[serde(default)]
+        more: Vec<TextPart>,
+        /// Lines under or through the words.
+        #[serde(default)]
+        rules: Vec<TextRule>,
     },
     /// A picture placed on the page — an uploaded signature image, not a
     /// drawn one. **Ink, exactly like [`Annotation::Ink`]**: it shows a
@@ -2323,6 +2357,42 @@ pub struct Glyph {
     pub x: f32,
     pub y: f32,
     pub radians: f32,
+}
+
+/// One more part of an [`Annotation::Text`] set in a look of its own: a styled
+/// box's second run onwards. Written after the mark's first part and tagged with
+/// the same id, so the mark stays one thing to undo and to erase.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextPart {
+    /// A standard-14 name, as for the mark's own `font`.
+    pub font: String,
+    /// A font registered by the app, as for the mark's own `font_asset`.
+    #[serde(default)]
+    pub font_asset: Option<String>,
+    pub size: f32,
+    pub color: Color,
+    pub glyphs: Vec<Glyph>,
+    /// How wide the glyphs are drawn, as a share of their own width.
+    #[serde(default = "unit_scale")]
+    pub scale_x: f32,
+}
+
+/// A line under or through an [`Annotation::Text`]'s words — page content, as the
+/// words are, tagged with the mark's id. In the app's space, like every mark.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextRule {
+    pub from: Point,
+    pub to: Point,
+    /// How thick, in points.
+    pub width: f32,
+    pub color: Color,
+}
+
+/// What a mark written before widths could be set has: its glyphs at their own width.
+fn unit_scale() -> f32 {
+    1.0
 }
 
 /// An annotation together with **PDFium's own index** for it on the page.
@@ -2629,6 +2699,72 @@ pub struct TextStyle {
     pub face: Option<String>,
 }
 
+/// The font a span of a retyped line is written in, when it is not the piece's
+/// own.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SpanFont {
+    /// A registered face by the name [`crate::pdf::embed::face_name`] gives it,
+    /// embedded into the document when it is not on the page already.
+    Face(String),
+    /// The font that page object (a text object of the same page) is drawn in.
+    LikeObject(usize),
+}
+
+/// The look of a stretch of a retyped line's characters where it differs from
+/// the piece's own — see [`TextLineEdit::Retype`]'s `spans`.
+///
+/// Every `None` means the piece's own value. `size` is the size the characters
+/// are drawn at, in page points, a superscript's reduction already applied;
+/// `char_spacing` is in points after every character; `width_pct` the
+/// horizontal scaling; `rise` in points up from the baseline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpanStyle {
+    /// Which characters of the edit's `text`, counted in characters.
+    pub chars: std::ops::Range<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font: Option<SpanFont>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<Color>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub char_spacing: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width_pct: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rise: Option<f32>,
+    #[serde(default)]
+    pub underline: bool,
+    #[serde(default)]
+    pub strike: bool,
+}
+
+/// What a piece of the page's text is drawn with beyond its font, size and colour,
+/// read back from the page in the units a [`SpanStyle`] is written in — see
+/// [`Document::run_text_looks`].
+///
+/// `char_spacing` and `rise` are points on the page (the matrices that magnify the
+/// text counted in), `width_pct` the horizontal scaling as a percentage;
+/// `underline` and `strike` are whether a line this app drew lies under or
+/// through the piece.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RunTextLook {
+    pub char_spacing: f32,
+    pub width_pct: f32,
+    pub rise: f32,
+    pub underline: bool,
+    pub strike: bool,
+}
+
+impl Default for RunTextLook {
+    /// A piece with no look of its own: no spacing, full width, on the baseline.
+    fn default() -> Self {
+        RunTextLook { char_spacing: 0.0, width_pct: 100.0, rise: 0.0, underline: false, strike: false }
+    }
+}
+
 /// What editing a line of text does to the objects that draw it — see
 /// [`DocumentMut::replace_text_lines`].
 ///
@@ -2664,6 +2800,10 @@ pub enum TextLineEdit {
         /// width is made and what is refused.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         justify_to: Option<f32>,
+        /// Stretches of `text` drawn in a look of their own — see [`SpanStyle`].
+        /// None is the line as it always was, in the piece's own look.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        spans: Vec<SpanStyle>,
     },
     /// Take these objects off the page: a line deleted outright.
     Remove { objects: Vec<usize> },

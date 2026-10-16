@@ -97,7 +97,18 @@ pub fn page_after_problem(
     removed: &[usize],
 ) -> Option<String> {
     let expected: Vec<&TextRun> = before.iter().filter(|r| !removed.contains(&r.object)).collect();
-    if after.len() != expected.len() {
+    // **A retyped line whose pieces were in different looks is written in a stretch for
+    // each look**, so the page may hold more runs than it had left: the extra ones
+    // follow the retyped run and, with it, say the new words.
+    let Some(mut surplus) = after.len().checked_sub(expected.len()) else {
+        return Some(format!(
+            "the page should have lost exactly the {} removed run(s) — had {}, has {}",
+            removed.len(),
+            before.len(),
+            after.len()
+        ));
+    };
+    if surplus > 0 && retyped.is_empty() {
         return Some(format!(
             "the page should have lost exactly the {} removed run(s) — had {}, has {}",
             removed.len(),
@@ -105,9 +116,18 @@ pub fn page_after_problem(
             after.len()
         ));
     }
-    for (was, now) in expected.iter().zip(after) {
+    let mut next = 0;
+    for was in &expected {
+        let now = &after[next];
+        next += 1;
         match retyped.iter().find(|(object, _)| *object == was.object) {
             Some((_, words)) => {
+                let mut text = now.text.clone();
+                while surplus > 0 && next < after.len() {
+                    text.push_str(&after[next].text);
+                    next += 1;
+                    surplus -= 1;
+                }
                 // **A hyphen written comes back from PDFium as the control code
                 // U+0002** (see `wrap_hyphen_tests`), not as "-": the same hyphen,
                 // read two ways. Line-end hyphens are in the buffer now — the thin
@@ -115,8 +135,8 @@ pub fn page_after_problem(
                 // retyped line that ends in one reads back differently from how it
                 // was typed, for no reason that is damage.
                 let hyphens_alike = |s: &str| squeeze(s).replace('\u{2}', "-");
-                if hyphens_alike(&now.text) != hyphens_alike(words) {
-                    return Some(format!("object {} does not hold the new words: {:?} (wanted {:?})", was.object, now.text, words));
+                if hyphens_alike(&text) != hyphens_alike(words) {
+                    return Some(format!("object {} does not hold the new words: {:?} (wanted {:?})", was.object, text, words));
                 }
                 if now.color != was.color {
                     return Some(format!("the retyped run changed colour: {was:?} now {now:?}"));
@@ -134,7 +154,7 @@ pub fn page_after_problem(
             None => {}
         }
     }
-    None
+    (surplus > 0).then(|| format!("{surplus} run(s) too many that no retyped line accounts for"))
 }
 
 /// [`page_after_problem`], failing the test with what it found.

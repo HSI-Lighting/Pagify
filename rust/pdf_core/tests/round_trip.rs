@@ -923,6 +923,9 @@ fn written_text_comes_back_as_text() {
                     restore: String::new(),
                     frame: Vec::new(),
                     frame_width: 0.0,
+                    scale_x: 1.0,
+                    more: Vec::new(),
+                    rules: Vec::new(),
                 },
             },
             doc.as_document_mut().expect("mutable"),
@@ -1010,6 +1013,9 @@ fn saved_text_can_be_found_again_and_erased() {
                 Vec::new()
             },
             frame_width: 1.5,
+            scale_x: 1.0,
+            more: Vec::new(),
+            rules: Vec::new(),
         };
         let blob = serde_json::to_string(&build(String::new())).expect("encode the mark");
 

@@ -160,6 +160,57 @@ pub fn ink_start(name: &str, text: &str) -> Option<f32> {
     Some(bounds.x_min as f32 / per_em)
 }
 
+/// Where a face draws its lines, as fractions of the point size measured up from
+/// the baseline: an underline's position is below it (negative), a strike-out's
+/// above. Ascent and descent are both positive.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LineMetrics {
+    pub ascent: f32,
+    pub descent: f32,
+    pub underline_position: f32,
+    pub underline_thickness: f32,
+    pub strikeout_position: f32,
+    pub strikeout_thickness: f32,
+}
+
+impl LineMetrics {
+    /// What a face that says nothing gets: an underline a tenth of an em below
+    /// the baseline, a strike-out three tenths above, each a twentieth thick.
+    pub const FALLBACK: LineMetrics = LineMetrics {
+        ascent: 0.8,
+        descent: 0.2,
+        underline_position: -0.1,
+        underline_thickness: 0.05,
+        strikeout_position: 0.3,
+        strikeout_thickness: 0.05,
+    };
+}
+
+/// A registered font's [`LineMetrics`], from its `hhea`, `post` and `OS/2`
+/// tables; [`LineMetrics::FALLBACK`]'s value for what a table does not give.
+pub fn line_metrics(name: &str) -> Result<LineMetrics> {
+    let data = font_data(name)?;
+    line_metrics_of(&data).ok_or_else(|| PdfError::InvalidArgument(format!("{name} is not a font we can read")))
+}
+
+/// [`line_metrics`] of a font program given as bytes — a face read out of a
+/// document, say. `None` when it cannot be read.
+pub fn line_metrics_of(program: &[u8]) -> Option<LineMetrics> {
+    let face = Face::from_slice(program, 0)?;
+    let em = face.units_per_em().max(1) as f32;
+    let fallback = LineMetrics::FALLBACK;
+    let under = face.underline_metrics().filter(|m| m.thickness > 0);
+    let strike = face.strikeout_metrics().filter(|m| m.thickness > 0);
+    Some(LineMetrics {
+        ascent: face.ascender() as f32 / em,
+        descent: -(face.descender() as f32) / em,
+        underline_position: under.map_or(fallback.underline_position, |m| m.position as f32 / em),
+        underline_thickness: under.map_or(fallback.underline_thickness, |m| m.thickness as f32 / em),
+        strikeout_position: strike.map_or(fallback.strikeout_position, |m| m.position as f32 / em),
+        strikeout_thickness: strike.map_or(fallback.strikeout_thickness, |m| m.thickness as f32 / em),
+    })
+}
+
 /// Shape `text` in the named font.
 pub fn shape(name: &str, text: &str) -> Result<ShapedText> {
     let data = font_data(name)?;
@@ -382,6 +433,22 @@ pub fn identity_cid_to_gid(name: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn montserrat_has_an_underline_below_and_a_strikeout_above() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../desktop/third_party/fonts/Montserrat-Regular.ttf");
+        let Ok(bytes) = std::fs::read(&path) else {
+            eprintln!("skipped: {} is not here", path.display());
+            return;
+        };
+        register("line-metrics-montserrat", bytes).expect("register");
+        let m = line_metrics("line-metrics-montserrat").expect("metrics");
+        assert!(m.underline_position < 0.0, "{m:?}");
+        assert!(m.strikeout_position > 0.0, "{m:?}");
+        assert!(m.underline_thickness > 0.0 && m.underline_thickness < 0.2, "{m:?}");
+        assert!(m.strikeout_thickness > 0.0 && m.strikeout_thickness < 0.2, "{m:?}");
+        assert!(m.ascent > 0.5 && m.descent > 0.0, "{m:?}");
+    }
 
     /// A font built in the test, so the suite does not depend on the app's
     /// assets being where somebody left them.

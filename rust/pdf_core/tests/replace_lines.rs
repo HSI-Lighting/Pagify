@@ -21,7 +21,7 @@
 //! temporary directory and removed afterwards. The original is only ever read.
 
 mod harness;
-use harness::{serial, skip_without_pdfium};
+use harness::{helvetica_page_with, page_stream, serial, skip_without_pdfium};
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
@@ -90,44 +90,7 @@ fn stream_of(doc: &mut PdfiumDocument) -> Vec<u8> {
 
 /// The same for page `n` (counting from 0).
 fn stream_of_page(doc: &mut PdfiumDocument, n: usize) -> Vec<u8> {
-    use pdf_core::pdf::Object;
-    let mut bytes = Vec::new();
-    DocumentMut::save_full_copy(doc, &mut bytes).expect("save");
-    let file = pdf_core::pdf::File::parse(&bytes).expect("parse");
-    let root = file.resolve(file.trailer().get(b"Root").expect("root")).expect("catalogue");
-    let pages = file.resolve(root.as_dict().and_then(|d| d.get(b"Pages")).expect("pages")).expect("tree");
-    fn pages_of(file: &pdf_core::pdf::File<'_>, node: &Object, out: &mut Vec<Object>) {
-        let Some(dict) = node.as_dict() else { return };
-        if dict.get(b"Type").and_then(Object::as_name) == Some(&b"Page"[..]) {
-            out.push(node.clone());
-            return;
-        }
-        if let Some(Ok(Object::Array(kids))) = dict.get(b"Kids").map(|k| file.resolve(k)) {
-            for kid in kids {
-                if let Ok(kid) = file.resolve(&kid) {
-                    pages_of(file, &kid, out);
-                }
-            }
-        }
-    }
-    let mut all_pages = Vec::new();
-    pages_of(&file, &pages, &mut all_pages);
-    let page = all_pages.get(n).cloned().unwrap_or_else(|| panic!("no page {}", n + 1));
-    let contents = page.as_dict().and_then(|d| d.get(b"Contents")).expect("contents");
-    let mut stream = Vec::new();
-    match file.resolve(contents).expect("contents") {
-        Object::Stream(d, r) => stream.extend_from_slice(&content::decode(&d, &bytes[r]).expect("decode")),
-        Object::Array(parts) => {
-            for part in parts {
-                if let Ok(Object::Stream(d, r)) = file.resolve(&part) {
-                    stream.extend_from_slice(&content::decode(&d, &bytes[r]).expect("decode"));
-                    stream.push(b'\n');
-                }
-            }
-        }
-        _ => panic!("odd contents"),
-    }
-    stream
+    page_stream(doc, n)
 }
 
 /// Each show-text operator of a stream as the bytes it occupies, operands included.
@@ -290,6 +253,7 @@ fn paragraph_edits(doc: &PdfiumDocument, all: &[TextRun], lines: &[Vec<usize>]) 
             style: TextStyle::default(),
             remove: line[1..].to_vec(),
             justify_to: None,
+            spans: Vec::new(),
         });
     }
     (edits, texts)
@@ -581,35 +545,7 @@ fn page_with(content: &[u8]) -> Vec<u8> {
 /// The same, with `resources` added to the page's resource dictionary and
 /// `extra` as objects 6, 7, ...
 fn page_with_extra(content: &[u8], resources: &str, extra: &[Vec<u8>]) -> Vec<u8> {
-    let mut objects: Vec<Vec<u8>> = vec![
-        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
-        format!(
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R \
-             /Resources << /Font << /F1 5 0 R >> {resources} >> >>"
-        )
-        .into_bytes(),
-        [format!("<< /Length {} >>\nstream\n", content.len()).as_bytes(), content, b"\nendstream"].concat(),
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
-    ];
-    objects.extend(extra.iter().cloned());
-    let mut out = b"%PDF-1.4\n".to_vec();
-    let mut offsets = Vec::new();
-    for (i, body) in objects.iter().enumerate() {
-        offsets.push(out.len());
-        out.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
-        out.extend_from_slice(body);
-        out.extend_from_slice(b"\nendobj\n");
-    }
-    let xref_at = out.len();
-    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes());
-    for offset in &offsets {
-        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
-    }
-    out.extend_from_slice(
-        format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF", objects.len() + 1).as_bytes(),
-    );
-    out
+    helvetica_page_with(content, resources, extra)
 }
 
 fn open(content: &[u8]) -> PdfiumDocument {
@@ -625,7 +561,7 @@ fn remove(objects: &[usize]) -> TextLineEdit {
 }
 
 fn retype(first: usize, text: &str, remove: &[usize]) -> TextLineEdit {
-    TextLineEdit::Retype { first, text: text.to_string(), style: TextStyle::default(), remove: remove.to_vec(), justify_to: None }
+    TextLineEdit::Retype { first, text: text.to_string(), style: TextStyle::default(), remove: remove.to_vec(), justify_to: None, spans: Vec::new() }
 }
 
 /// **The quote operators move to the next line, and what they leave behind is
@@ -808,6 +744,7 @@ fn a_retype_that_asks_for_a_colour_or_a_position_is_refused() {
         style: TextStyle { color: Some(Color { r: 1, g: 2, b: 3, a: 255 }), ..Default::default() },
         remove: vec![],
         justify_to: None,
+        spans: Vec::new(),
     };
     let moved = TextLineEdit::Retype {
         first: 0,
@@ -815,6 +752,7 @@ fn a_retype_that_asks_for_a_colour_or_a_position_is_refused() {
         style: TextStyle { at: Some((10.0, 10.0)), ..Default::default() },
         remove: vec![],
         justify_to: None,
+        spans: Vec::new(),
     };
     for (name, edit) in [("a colour", coloured), ("a position", moved)] {
         let error = doc.replace_text_lines(0, &[edit]).err().unwrap_or_else(|| panic!("{name}: accepted"));
@@ -844,6 +782,7 @@ fn a_retyped_line_takes_its_size() {
             style: TextStyle { size: Some(18.0), ..Default::default() },
             remove: vec![1],
             justify_to: None,
+            spans: Vec::new(),
         }],
     )
     .unwrap_or_else(|e| panic!("refused: {e}"));
@@ -891,19 +830,18 @@ fn arial() -> Option<Vec<u8>> {
         .find_map(|path| std::fs::read(path).ok())
 }
 
-/// **Lines that each need a new font are replaced one at a time, and still all or
-/// nothing.** Typing `é` into one line and `ñ` into another makes each write a
-/// font into the file, which a single pass does not do twice; the lines then go
-/// one at a time and the removals in one pass after them, on a copy of the page
-/// that is put back if any of it fails.
+/// **Lines that each need a new font are written in one pass, and still all or
+/// nothing.** Typing `é` into one line and `ñ` into another makes each need a font
+/// written into the file; one batch embeds the face once for both (it used to
+/// refuse the second, and the lines went one at a time, a copy of the font each).
 ///
-/// - one line needing a font goes through the single pass;
-/// - two do not, and still arrive: their words, every piece removed, every other
-///   object unchanged, undone byte for byte;
-/// - a third that no font can spell fails *after* the first two were written, and
-///   the page is put back exactly as it was.
+/// - one line needing a font arrives;
+/// - two arrive together: their words, every piece removed, every other object
+///   unchanged, undone byte for byte;
+/// - a third that no font can spell is refused before anything is written, and
+///   the page is as it was.
 #[test]
-fn lines_that_each_need_a_new_font_are_replaced_one_at_a_time_and_atomically() {
+fn lines_that_each_need_a_new_font_are_written_in_one_pass_and_a_refusal_leaves_the_page() {
     let Some(copy) = Copy::of_the_datasheet("fonts") else { return };
     let Some(font) = arial() else {
         eprintln!("skipped: no Arial on this machine to type letters the page cannot spell");
@@ -922,14 +860,14 @@ fn lines_that_each_need_a_new_font_are_replaced_one_at_a_time_and_atomically() {
     let (a, b, c) = (&lines[1], &lines[2], &lines[3]);
     let stream_before = stream_of(&mut doc);
 
-    // One line: the single pass.
+    // One line.
     doc.replace_text_lines(0, &[retype(a[0], "plié by the COB", &a[1..])]).unwrap_or_else(|e| panic!("one line was refused: {e}"));
     let now = runs(&doc);
     assert_eq!(now.iter().find(|r| r.object == a[0]).map(|r| clean(&r.text)).as_deref(), Some("plié by the COB"));
     assert_eq!(now.len(), before.len() - a[1..].len());
-    println!("one line needing a font: written in one pass");
+    println!("one line needing a font: written");
 
-    // Two lines: the one-at-a-time way.
+    // Two lines, in one pass.
     let mut doc = setup();
     let edits = vec![retype(a[0], "plié by the COB", &a[1..]), retype(b[0], "which ñare market", &b[1..])];
     let mut history = CommandHistory::new(4);
@@ -937,7 +875,7 @@ fn lines_that_each_need_a_new_font_are_replaced_one_at_a_time_and_atomically() {
     history
         .execute(Command::ReplaceTextLines { page_index: 0, edits: edits.clone() }, &mut doc)
         .unwrap_or_else(|e| panic!("two lines needing fonts were refused: {e}"));
-    println!("two lines needing a font each: written one at a time in {:.0} ms", started.elapsed().as_secs_f64() * 1000.0);
+    println!("two lines needing a font each: written in one pass in {:.0} ms", started.elapsed().as_secs_f64() * 1000.0);
     let removed: Vec<usize> = a[1..].iter().chain(b[1..].iter()).copied().collect();
     let after = runs(&doc);
     assert_eq!(after.len(), before.len() - removed.len());
@@ -966,6 +904,59 @@ fn lines_that_each_need_a_new_font_are_replaced_one_at_a_time_and_atomically() {
         .unwrap_or_else(|| panic!("a line no font can spell was accepted"));
     println!("a third line no font can spell: refused: {error}");
     assert!(stream_of(&mut doc) == stream_before, "the first two lines were left written");
+    assert!(runs(&doc) == before, "the page was not put back as it was");
+    assert!(history.undo(&mut doc).expect("undo").is_none(), "a refused command left something to undo");
+}
+
+/// The same guarantees on a page written by hand, so they are checked on every
+/// machine: two lines that Helvetica's ASCII cannot spell are written in one pass
+/// with one copy of the font, undone in one step, and a third that no font can
+/// spell leaves the page as it was.
+#[test]
+fn lines_needing_a_new_font_share_one_copy_of_it_and_a_refusal_leaves_the_page() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+    let path = format!("{}/../../desktop/third_party/fonts/Montserrat-Regular.ttf", env!("CARGO_MANIFEST_DIR"));
+    let font = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    let setup = || {
+        let mut doc = open(b"BT /F1 12 Tf 72 700 Td (Alpha beta) Tj 0 -14 Td (Gamma delta) Tj 0 -14 Td (Epsilon zeta) Tj ET");
+        doc.set_typing_fonts(vec![font.clone()]);
+        doc
+    };
+    let mut doc = setup();
+    let before = runs(&doc);
+    let stream_before = stream_of(&mut doc);
+
+    let mut history = CommandHistory::new(4);
+    history
+        .execute(
+            Command::ReplaceTextLines { page_index: 0, edits: vec![retype(0, "Alpha b\u{e9}t\u{e0}", &[]), retype(1, "Gamma d\u{e9}lt\u{e0}", &[])] },
+            &mut doc,
+        )
+        .unwrap_or_else(|e| panic!("two lines needing a font were refused: {e}"));
+    assert_eq!(words(&doc), ["Alpha b\u{e9}t\u{e0}", "Gamma d\u{e9}lt\u{e0}", "Epsilon zeta"]);
+    let mut saved = Vec::new();
+    DocumentMut::save_full_copy(&mut doc, &mut saved).expect("save");
+    let programs = saved.windows(9).filter(|w| *w == b"FontFile2").count();
+    assert_eq!(programs, 1, "the font was written into the file {programs} times");
+    history.undo(&mut doc).expect("undo").expect("a step to undo");
+    assert!(stream_of(&mut doc) == stream_before, "after undo the content stream is not byte for byte what it was");
+
+    // A third line that no font can spell: all or nothing.
+    let mut doc = setup();
+    let mut history = CommandHistory::new(4);
+    let error = history
+        .execute(
+            Command::ReplaceTextLines {
+                page_index: 0,
+                edits: vec![retype(0, "Alpha b\u{e9}t\u{e0}", &[]), retype(2, "Epsilon \u{2603} zeta", &[])],
+            },
+            &mut doc,
+        )
+        .err()
+        .unwrap_or_else(|| panic!("a line no font can spell was accepted"));
+    println!("refused: {error}");
+    assert!(stream_of(&mut doc) == stream_before, "the first line was left written");
     assert!(runs(&doc) == before, "the page was not put back as it was");
     assert!(history.undo(&mut doc).expect("undo").is_none(), "a refused command left something to undo");
 }

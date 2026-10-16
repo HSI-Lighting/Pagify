@@ -1049,6 +1049,69 @@ impl Document for PdfiumDocument {
         Ok(found)
     }
 
+    fn run_text_looks(
+        &self,
+        page_index: usize,
+        wanted: &std::collections::HashSet<usize>,
+    ) -> Result<HashMap<usize, crate::document::RunTextLook>> {
+        use crate::pdf::content;
+
+        if wanted.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let height = self.page_size(page_index)?.height_pt;
+        let base = self.edit_base()?;
+        let file = crate::pdf::File::parse(&base.bytes)?;
+        let page = self.page_object(&file, page_index)?;
+        let (stream, _) = self.page_content(&file, &page)?;
+        let fonts = self.page_fonts(&file, &page);
+        let operations = content::parse(&stream)?;
+        let placed = content::placed(&operations);
+        let states = content::states(&operations);
+        let rules = drawn_rules(&operations, &states);
+        let space = if rules.is_empty() {
+            None
+        } else {
+            let page_number = i32::try_from(page_index)
+                .map_err(|_| PdfError::InvalidArgument(format!("page index {page_index} is out of range")))?;
+            Some(RawPage::open(self.document.handle(), page_number)?.space()?)
+        };
+        let text_objects = self.text_objects_in_order(page_index).unwrap_or_default();
+        let codes_in = |p: &content::Placed| codes_drawn(&file, fonts.as_ref(), &operations, p);
+        let mut run_list: Option<Vec<crate::document::TextRun>> = None;
+
+        let mut looks = HashMap::new();
+        for run in self.text_runs_some(page_index, wanted)? {
+            let order = text_objects.binary_search(&run.object).ok().map(|which| (which, text_objects.len()));
+            // A piece whose operator cannot be found has no look to read; it is
+            // refused if it is ever written.
+            let Ok(found) = self.operator_of(page_index, &run, height, &placed, order, &codes_in, &mut run_list) else {
+                continue;
+            };
+            let Some(state) = states.get(found.origin.operation) else { continue };
+            // Text space to points on the page — the same number the write divides by.
+            let scale = if found.scale.abs() > 1e-6 { found.scale } else { 1.0 };
+            let mut look = crate::document::RunTextLook {
+                // A character's spacing is stretched by the horizontal scaling along with it.
+                char_spacing: state.char_spacing * state.horizontal_scale * scale,
+                width_pct: state.horizontal_scale * 100.0,
+                rise: state.rise * scale,
+                ..Default::default()
+            };
+            if let Some(space) = &space {
+                for rule in rules.iter().filter(|rule| rule_belongs_to(rule, &run, space)) {
+                    match rule.kind {
+                        1 => look.underline = true,
+                        2 => look.strike = true,
+                        _ => {}
+                    }
+                }
+            }
+            looks.insert(run.object, look);
+        }
+        Ok(looks)
+    }
+
     fn run_font_data(&self, page_index: usize, object: usize) -> Result<Option<Vec<u8>>> {
         let (raw, handle) = match self.text_object_at(page_index, object)? {
             Some(found) => found,
@@ -4539,17 +4602,13 @@ impl DocumentMut for PdfiumDocument {
             return fallback(self);
         }
 
-        let requests: Vec<(usize, &str, Option<&str>, Option<f32>, Option<crate::document::Color>)> = edits
+        let requests: Vec<RunRequest<'_>> = edits
             .iter()
             .map(|(object, text, style)| {
-                (*object, text.as_str(), style.face.as_deref(), style.size, style.color)
+                (*object, text.as_str(), style.face.as_deref(), style.size, style.color, &[][..])
             })
             .collect();
-        match self.set_runs_in_stream(page_index, &requests, &[], &HashMap::new()) {
-            Ok(results) => Ok(results),
-            Err(PdfError::Unsupported(msg)) if msg == TOO_MANY_EMBEDS_IN_ONE_BATCH => fallback(self),
-            Err(e) => Err(e),
-        }
+        self.set_runs_in_stream(page_index, &requests, &[], &HashMap::new())
     }
 
     /// See [`DocumentMut::replace_text_lines`].
@@ -4566,14 +4625,14 @@ impl DocumentMut for PdfiumDocument {
     ) -> Result<()> {
         use crate::document::TextLineEdit;
 
-        let mut requests: Vec<(usize, &str, Option<&str>, Option<f32>, Option<crate::document::Color>)> =
-            Vec::new();
+        let mut requests: Vec<RunRequest<'_>> = Vec::new();
         let mut removals: Vec<usize> = Vec::new();
         // The width each stretched line is to span, by its first piece.
         let mut stretch: HashMap<usize, f32> = HashMap::new();
         for edit in edits {
             match edit {
-                TextLineEdit::Retype { first, text, style, remove, justify_to } => {
+                TextLineEdit::Retype { first, text, style, remove, justify_to, spans } => {
+                    check_spans(text, spans)?;
                     if let Some(width) = justify_to {
                         if !(width.is_finite() && *width > 0.0) {
                             return Err(PdfError::InvalidArgument(format!(
@@ -4592,7 +4651,7 @@ impl DocumentMut for PdfiumDocument {
                             "retyping a line and changing its colour or position in the same step",
                         ));
                     }
-                    requests.push((*first, text.as_str(), style.face.as_deref(), style.size, None));
+                    requests.push((*first, text.as_str(), style.face.as_deref(), style.size, None, spans.as_slice()));
                     removals.extend(remove.iter().copied());
                 }
                 TextLineEdit::Remove { objects } => removals.extend(objects.iter().copied()),
@@ -4613,15 +4672,7 @@ impl DocumentMut for PdfiumDocument {
         }
         self.validate_page_index(page_index)?;
 
-        match self.set_runs_in_stream(page_index, &requests, &removals, &stretch) {
-            Ok(_) => Ok(()),
-            // Two lines that each need a font written into the file: the batch
-            // writes one, so these go one line at a time.
-            Err(PdfError::Unsupported(msg)) if msg == TOO_MANY_EMBEDS_IN_ONE_BATCH => {
-                self.replace_text_lines_one_at_a_time(page_index, &requests, &removals, &stretch)
-            }
-            Err(e) => Err(e),
-        }
+        self.set_runs_in_stream(page_index, &requests, &removals, &stretch).map(|_| ())
     }
 
 
@@ -5771,6 +5822,9 @@ impl DocumentMut for PdfiumDocument {
                     restore: String::new(),
                     frame: Vec::new(),
                     frame_width: 0.0,
+                    scale_x: 1.0,
+                    more: Vec::new(),
+                    rules: Vec::new(),
                 },
             )?;
         }
@@ -6323,7 +6377,6 @@ impl DocumentMut for PdfiumDocument {
         let (stream, streams) = self.page_content(&file, &page)?;
         let operations = content::parse(&stream)?;
         let placed = content::placed(&operations);
-        let height = self.page_size(page_index)?.height_pt;
         let fonts = self.page_fonts(&file, &page);
         let codes_in = |p: &content::Placed| -> usize {
             let width = p
@@ -6342,14 +6395,46 @@ impl DocumentMut for PdfiumDocument {
                 .sum()
         };
 
+        // **The page is read once, not once per letter.** A mark is one text object
+        // per glyph, and every page open costs as much as the page is busy: on
+        // 50,000 shapes a 27-letter word took 2.7 s to undo. Its words come from one
+        // read of the page's text objects and their runs.
+        let text_objects = self.text_objects_in_order(page_index)?;
+        let order: HashMap<usize, usize> = text_objects.iter().enumerate().map(|(which, object)| (*object, which)).collect();
+        let words: std::collections::HashSet<usize> = marked.iter().copied().filter(|o| order.contains_key(o)).collect();
+        // A text object PDFium makes no run of — a space written on its own, with
+        // no area — is passed over, as it always was.
+        let runs: HashMap<usize, crate::document::TextRun> = self
+            .text_runs_some(page_index, &words)?
+            .into_iter()
+            .filter(|run| has_area(run.rect.left, run.rect.top, run.rect.right, run.rect.bottom))
+            .map(|run| (run.object, run))
+            .collect();
+        // **The ring or the lines drawn with the words** are cut by the span finder
+        // `remove_objects` uses — this only ever looked for text, so undoing a ringed
+        // caption left the ring. Its census of the page is read only for them.
+        let spans = if words.len() < marked.len() {
+            Some(self.span_tables(page_index, &file, &page, &operations, &placed)?)
+        } else {
+            None
+        };
+        let height = self.page_size(page_index)?.height_pt;
         let mut edits: Vec<(std::ops::Range<usize>, Vec<u8>)> = Vec::new();
         for object in &marked {
-            let Some(run) = self.text_run_at(page_index, *object)? else { continue };
-            let order = self.text_order(page_index, *object);
-            let (first, last, _) =
-                run_operators(&run, height, &placed, &operations, &codes_in, order)?;
-            let from = operations[first].span.start;
-            let to = operations[last].span.end;
+            let cut = match order.get(object) {
+                Some(&which) => {
+                    let Some(run) = runs.get(object) else { continue };
+                    let (first, last, _) =
+                        run_operators(run, height, &placed, &operations, &codes_in, Some((which, text_objects.len())))?;
+                    first..last + 1
+                }
+                None => {
+                    let Some(spans) = &spans else { continue };
+                    self.operator_span(page_index, *object, spans, &codes_in)?
+                }
+            };
+            let from = operations[cut.start].span.start;
+            let to = operations[cut.end - 1].span.end;
             edits.push((from..to, Vec::new()));
         }
         if edits.is_empty() {
@@ -6429,6 +6514,9 @@ impl DocumentMut for PdfiumDocument {
                 restore: String::new(),
                 frame: Vec::new(),
                 frame_width: 0.0,
+                scale_x: 1.0,
+                more: Vec::new(),
+                rules: Vec::new(),
             };
 
             self.add_annotation(page_index, &annotation)?;
@@ -6801,21 +6889,6 @@ impl Drop for RawPage {
         }
     }
 }
-
-/// One of our rects as PDFium wants it: bottom-left origin, `top` above `bottom`.
-///
-/// The ordering matters as much as the conversion. Our `Rect` has `top < bottom`
-/// because y grows downwards; afterwards `top > bottom`. Handing PDFium an
-/// inverted rect produces an annotation with no area, which draws as nothing at
-/// all rather than as anything visibly wrong.
-///
-/// An internal signal only — [`PdfiumDocument::set_runs_in_stream`] returns
-/// it, and [`PdfiumDocument::set_text_runs_styled`] catches it and falls
-/// back to one call per line; it is never meant to reach a caller outside
-/// this file. See `set_runs_in_stream`'s own doc for why it refuses here at
-/// all.
-const TOO_MANY_EMBEDS_IN_ONE_BATCH: &str =
-    "more than one new font embedded in the same batch is not implemented yet";
 
 /// The most a stem can plausibly be, in thousandths of an em. The heaviest face
 /// the weights are calibrated on (Montserrat ExtraBold) reads 198; a serif face
@@ -7754,8 +7827,6 @@ fn font_to_unicode(
                             resource: key.clone(),
                             face: Self::font_display_name(file, fonts, key)
                                 .unwrap_or_else(|| format!("/{}", String::from_utf8_lossy(key))),
-                            added: Vec::new(),
-                            page: None,
                         },
                         encoded,
                     ));
@@ -7809,21 +7880,90 @@ fn font_to_unicode(
         (weight, name.contains("italic") || name.contains("oblique"))
     }
 
+    /// What the codes of the page's font `name` mean, and how to write a character
+    /// in it. `drawn` is the words of a run drawn in it now: a subset keeps the
+    /// outlines it drew, and a code with none draws an empty box — see
+    /// [`spelling_codes`]. `inked` keeps what a font can really draw, asked once
+    /// per font for a whole batch.
+    fn font_facts(
+        file: &crate::pdf::File<'_>,
+        bytes: &[u8],
+        fonts: &crate::pdf::Dict,
+        name: &[u8],
+        drawn: &str,
+        inked: &mut HashMap<Vec<u8>, Option<std::collections::BTreeSet<u32>>>,
+    ) -> Result<FontFacts> {
+        let width = code_width(file, fonts, name)
+            .ok_or(PdfError::Unsupported("that font's codes cannot be counted"))?;
+        let mut ink = None;
+        let unicode = match Self::font_to_unicode(file, bytes, fonts, name) {
+            Some(map) => map,
+            None if width == 1 => {
+                ink = inked
+                    .entry(name.to_vec())
+                    .or_insert_with(|| crate::pdf::subset::drawable_ascii(file, fonts, name))
+                    .clone();
+                assumed_ascii()
+            }
+            None => return Err(PdfError::Unsupported("that font carries no character map this can read")),
+        };
+        let reverse = spelling_codes(&unicode, ink.as_ref(), drawn);
+        Ok(FontFacts { name: name.to_vec(), width, unicode, reverse })
+    }
+
+    /// **Which font writes `words`, and in what codes** — three to try, in the order
+    /// that keeps the page looking like itself: `own`, so the words draw exactly as
+    /// their neighbours do; failing that, another font already on the page, no new
+    /// bytes in the file; failing that, a font the caller offered, written into the
+    /// document. Only the last changes what the file contains, and both of the last
+    /// two change how the words look — which the caller is told about.
+    ///
+    /// **A requested face skips the order.** Someone who asked for a typeface did
+    /// not ask for "whatever already spells this".
+    #[allow(clippy::too_many_arguments)]
+    fn choose_font(
+        &self,
+        file: &crate::pdf::File<'_>,
+        bytes: &[u8],
+        page: &crate::pdf::Object,
+        fonts: &crate::pdf::Dict,
+        own: &FontFacts,
+        words: &str,
+        requested: Option<&str>,
+        batch: &mut EmbedBatch,
+    ) -> Result<(Vec<u8>, Option<Swapped>)> {
+        if let Some(face) = requested {
+            let (swap, encoded) = self.embed_typing_font(file, page, words, &own.reverse, Some(face), batch)?;
+            return Ok((encoded, Some(swap)));
+        }
+        if let Some(encoded) = encode_with(&own.reverse, words, own.width) {
+            return Ok((encoded, None));
+        }
+        match self.borrow_font_on_page(file, bytes, fonts, &own.name, words) {
+            Some((swap, encoded)) => Ok((encoded, Some(swap))),
+            None => {
+                let (swap, encoded) = self.embed_typing_font(file, page, words, &own.reverse, None, batch)?;
+                Ok((encoded, Some(swap)))
+            }
+        }
+    }
+
     /// Write one of the caller's fonts into the document and type with it.
     ///
     /// The last resort, and the only one that changes what the file contains.
     /// See [`crate::pdf::embed`] for what is written; here is where the page is
     /// told the font exists.
+    #[allow(clippy::too_many_arguments)]
     fn embed_typing_font(
         &self,
         file: &crate::pdf::File<'_>,
-        page_index: usize,
         page: &crate::pdf::Object,
         wanted: &str,
         reverse: &std::collections::BTreeMap<String, u32>,
         requested: Option<&str>,
+        batch: &mut EmbedBatch,
     ) -> Result<(Swapped, Vec<u8>)> {
-        use crate::pdf::{embed, Object};
+        use crate::pdf::embed;
 
         let font_bytes = match requested {
             // A specific font was asked for by name — found or not, spelling
@@ -7877,60 +8017,50 @@ fn font_to_unicode(
             }
         };
 
-        let first = file.next_object_number()?;
-        let embedded = embed::truetype(font_bytes, first)?;
         let encoded = embed::win_ansi(wanted).ok_or_else(|| {
             PdfError::InvalidArgument(
                 "those characters cannot be written with a Latin encoding".into(),
             )
         })?;
 
-        // A name nothing on the page is using. Numbered rather than fixed
-        // because a page can end up with more than one of ours.
+        // **A face is written into the file once per batch**, however many runs
+        // use it: the second run selects the resource the first one made.
+        let key = embed::face_name(font_bytes).unwrap_or_else(|| "PagifyTyping".into());
+        if let Some(face) = batch.faces.iter().find(|face| face.key == key) {
+            return Ok((Swapped { resource: face.resource.clone(), face: face.display.clone() }, encoded));
+        }
+
+        let first = match batch.next_object {
+            Some(next) => next,
+            None => file.next_object_number()?,
+        };
+        let embedded = embed::truetype(font_bytes, first)?;
+        // Three objects are used: the font, its descriptor and its program.
+        batch.next_object = Some(first.checked_add(3).ok_or(PdfError::Unsupported(
+            "this file already uses the highest object number a PDF can hold",
+        ))?);
+
+        // A name nothing on the page, and nothing this batch has embedded, is
+        // using. Numbered rather than fixed because a page can end up with more
+        // than one of ours.
         let existing = self.page_fonts(file, page).unwrap_or(crate::pdf::Dict(Vec::new()));
         let mut resource = b"PagifyType".to_vec();
         for suffix in 1..=64u32 {
             let candidate = format!("PagifyType{suffix}").into_bytes();
-            if existing.get(&candidate).is_none() {
+            if existing.get(&candidate).is_none() && !batch.faces.iter().any(|face| face.resource == candidate) {
                 resource = candidate;
                 break;
             }
         }
 
-        // The page gets its own `/Resources`, copied from whatever it inherits
-        // and with the font added. Written onto the page rather than into the
-        // dictionary it inherits from, because that one is shared: adding to it
-        // would name this font on every page in the document.
-        let mut resources = self
-            .inherited(file, page, b"Resources")?
-            .and_then(|r| r.as_dict().cloned())
-            .unwrap_or(crate::pdf::Dict(Vec::new()));
-        let mut font_dict = resources
-            .get(b"Font")
-            .and_then(|f| file.resolve(f).ok())
-            .and_then(|f| f.as_dict().cloned())
-            .unwrap_or(crate::pdf::Dict(Vec::new()));
-        font_dict.set(&resource, Object::Reference(embedded.font, 0));
-        resources.set(b"Font", Object::Dict(font_dict));
-
-        let mut page_dict = page
-            .as_dict()
-            .cloned()
-            .ok_or(PdfError::Unsupported("that page cannot be read"))?;
-        page_dict.set(b"Resources", Object::Dict(resources));
-        let number = self.page_object_number(file, page_index)?;
-        let mut page_bytes = Vec::new();
-        crate::pdf::write_object(&mut page_bytes, &Object::Dict(page_dict));
-
-        Ok((
-            Swapped {
-                resource,
-                face: embedded.name.clone(),
-                added: embedded.objects,
-                page: Some((number, page_bytes)),
-            },
-            encoded,
-        ))
+        batch.added.extend(embedded.objects);
+        batch.faces.push(EmbeddedFace {
+            key,
+            resource: resource.clone(),
+            font: embedded.font,
+            display: embedded.name.clone(),
+        });
+        Ok((Swapped { resource, face: embedded.name }, encoded))
     }
 
     /// What the outlined-type pass sees on a page, and where it loses it.
@@ -9522,9 +9652,10 @@ fn font_to_unicode(
         // already spells this" — keeping the current font because it happens
         // to cover these characters, or borrowing an unrelated one already on
         // the page, would both silently ignore the choice just made.
+        let mut batch = EmbedBatch::default();
         let (encoded, swap) = if let Some(face) = requested_face {
             let (swap, encoded) =
-                self.embed_typing_font(&file, page_index, &page, &wanted, &reverse, Some(face))?;
+                self.embed_typing_font(&file, &page, &wanted, &reverse, Some(face), &mut batch)?;
             (encoded, Some(swap))
         } else {
             match encode_with(&reverse, &wanted, width) {
@@ -9533,7 +9664,7 @@ fn font_to_unicode(
                     Some((swap, encoded)) => (encoded, Some(swap)),
                     None => {
                         let (swap, encoded) =
-                            self.embed_typing_font(&file, page_index, &page, &wanted, &reverse, None)?;
+                            self.embed_typing_font(&file, &page, &wanted, &reverse, None, &mut batch)?;
                         (encoded, Some(swap))
                     }
                 },
@@ -9613,15 +9744,11 @@ fn font_to_unicode(
         }
 
         // The page, where it had to be told about a font it did not have.
-        let mut extra: Vec<(u32, Vec<u8>)> = Vec::new();
-        if let Some(swap) = &swap {
-            extra.extend(swap.added.iter().cloned());
-            if let Some(page) = &swap.page {
-                replacements.push(page.clone());
-            }
+        if let Some(patch) = batch.page_patch(self, &file, page_index, &page)? {
+            replacements.push(patch);
         }
 
-        let rewritten = Self::write_edit(&base, &file, &replacements, &extra)?;
+        let rewritten = Self::write_edit(&base, &file, &replacements, &batch.added)?;
         // Recorded rather than returned, so the caller can say what happened
         // without every signature in the chain growing a field for it.
         let face = swap.map(|s| s.face);
@@ -9664,19 +9791,15 @@ fn font_to_unicode(
     /// own to be found by. Refused whole, with nothing written, when two of the
     /// runs resolve to one operator or one of them cannot be resolved at all.
     ///
-    /// **Refuses, deliberately, the moment a second edit in the group would
-    /// also need a brand new font embedded.** `embed_typing_font` picks a
-    /// resource name and a page-resources patch by looking at what the page
-    /// (and this crate's own insertions project onto it) already has — fine
-    /// once, but two calls made here against the same unmodified starting
-    /// point would each pick the *same* free name and each produce its own
-    /// complete resources patch, the second silently discarding the first's
-    /// addition. Rather than get a shared allocation table right for a case
-    /// this rare (two different lines of one paragraph each spelling
-    /// characters nothing already on the page covers), this refuses with
-    /// [`TOO_MANY_EMBEDS_IN_ONE_BATCH`] and leaves [`Self::set_text_runs_styled`]
-    /// to fall back to one call per line — correct, just not faster, the
-    /// same as before this existed.
+    /// **Any number of fonts may be embedded in one batch**, a face once however
+    /// many lines use it: the object numbers, the resource names and the page's
+    /// resources are handed out by one [`EmbedBatch`] for the whole group. (A
+    /// batch used to refuse the second embed, and the callers fell back to one
+    /// line at a time — the page then held a copy of the font per line.)
+    ///
+    /// **A line can carry `spans`** — looks for stretches of its characters, each
+    /// drawn in its own text state, and a font of its own — see
+    /// [`crate::document::SpanStyle`] and the line's block in the loop below.
     ///
     /// **A `requested_color` entry is a colour-only change, not a retype.**
     /// `apply_paragraph_edit`'s own `hidden_or_written` recolours a shrinking
@@ -9707,7 +9830,7 @@ fn font_to_unicode(
     fn set_runs_in_stream(
         &mut self,
         page_index: usize,
-        edits: &[(usize, &str, Option<&str>, Option<f32>, Option<crate::document::Color>)],
+        edits: &[RunRequest<'_>],
         removals: &[usize],
         stretch: &HashMap<usize, f32>,
     ) -> Result<Vec<(String, crate::document::TextStyle)>> {
@@ -9739,18 +9862,25 @@ fn font_to_unicode(
         let operations = content::parse(&stream)?;
         let placed = content::placed(&operations);
         // The state each operator draws in (horizontal scaling is read from it),
-        // walked only when a line is to be stretched.
-        let states = if stretch.is_empty() { Vec::new() } else { content::states(&operations) };
+        // walked only when a line is to be stretched, a piece restyled in place, or the
+        // page has rules of ours to place.
+        let rules_on_page = operations.iter().any(opens_rule);
+        let states = if stretch.is_empty() && edits.iter().all(|e| e.5.is_empty()) && !rules_on_page {
+            Vec::new()
+        } else {
+            content::states(&operations)
+        };
         timing.push(("parse_file_and_stream", t.elapsed()));
 
         let mut spans: Vec<(std::ops::Range<usize>, Vec<u8>)> = Vec::new();
-        let mut extra: Vec<(u32, Vec<u8>)> = Vec::new();
-        let mut page_patch: Option<(u32, Vec<u8>)> = None;
-        let mut embeds = 0usize;
+        // The fonts this batch writes into the file — see [`EmbedBatch`].
+        let mut batch = EmbedBatch::default();
         let mut face_written: Option<String> = None;
         let mut results = Vec::with_capacity(edits.len());
         // The lines to be spread to a width, and what it takes to write each again.
         let mut stretches: Vec<Stretch> = Vec::new();
+        // The same for the lines written in stretches of their own.
+        let mut styled: Vec<StyledLine> = Vec::new();
         let t_loop = std::time::Instant::now();
 
         // **Every requested run, resolved against one page open.** Asking
@@ -9767,8 +9897,14 @@ fn font_to_unicode(
         // not be refused for it. Only an object that is not text at all is
         // "not a text run", and that is refused before anything is written.
         let t_resolve = std::time::Instant::now();
+        // Besides the runs edited and taken off, the ones a stretch's font is to be
+        // like: consulted, never changed.
+        let liked = edits.iter().flat_map(|e| e.5.iter()).filter_map(|look| match &look.font {
+            Some(crate::document::SpanFont::LikeObject(object)) => Some(*object),
+            _ => None,
+        });
         let wanted: std::collections::HashSet<usize> =
-            edits.iter().map(|e| e.0).chain(removals.iter().copied()).collect();
+            edits.iter().map(|e| e.0).chain(removals.iter().copied()).chain(liked).collect();
         let resolved: HashMap<usize, crate::document::TextRun> = self
             .text_runs_some(page_index, &wanted)?
             .into_iter()
@@ -9790,7 +9926,7 @@ fn font_to_unicode(
         // What each font used so far can really draw — see `subset`.
         let mut inked: HashMap<Vec<u8>, Option<std::collections::BTreeSet<u32>>> = HashMap::new();
 
-        for &(object, text, requested_face, new_size, requested_color) in edits {
+        for &(object, text, requested_face, new_size, requested_color, looks) in edits {
             let run = resolved
                 .get(&object)
                 .cloned()
@@ -9829,57 +9965,259 @@ fn font_to_unicode(
 
             let name = found.font.clone().ok_or(PdfError::Unsupported("that text selects no font"))?;
             let fonts_ref = fonts.as_ref().ok_or(PdfError::Unsupported("that page declares no fonts"))?;
-            let width = code_width(&file, fonts_ref, &name)
-                .ok_or(PdfError::Unsupported("that font's codes cannot be counted"))?;
             // See `set_run_in_stream`: ASCII is what the codes mean, `ink` is
             // what the subset can actually draw. Asked once per font for the
             // whole batch — it reads the font program, and a paragraph is many
             // lines in the same few fonts.
-            let mut ink = None;
-            let unicode = match Self::font_to_unicode(&file, bytes, fonts_ref, &name) {
-                Some(map) => map,
-                None if width == 1 => {
-                    ink = inked
-                        .entry(name.clone())
-                        .or_insert_with(|| crate::pdf::subset::drawable_ascii(&file, fonts_ref, &name))
-                        .clone();
-                    assumed_ascii()
-                }
-                None => {
-                    return Err(PdfError::Unsupported("that font carries no character map this can read"))
-                }
-            };
-            let reverse = spelling_codes(&unicode, ink.as_ref(), &run.text);
-            let wanted = encodable(text, &reverse);
-
-            let (encoded, swap) = if let Some(face) = requested_face {
-                let (swap, encoded) =
-                    self.embed_typing_font(&file, page_index, &page, &wanted, &reverse, Some(face))?;
-                (encoded, Some(swap))
-            } else {
-                match encode_with(&reverse, &wanted, width) {
-                    Some(bytes) => (bytes, None),
-                    None => match self.borrow_font_on_page(&file, bytes, fonts_ref, &name, &wanted) {
-                        Some((swap, encoded)) => (encoded, Some(swap)),
-                        None => {
-                            let (swap, encoded) =
-                                self.embed_typing_font(&file, page_index, &page, &wanted, &reverse, None)?;
-                            (encoded, Some(swap))
-                        }
-                    },
-                }
-            };
-
+            let own = Self::font_facts(&file, bytes, fonts_ref, &name, &run.text, &mut inked)?;
+            let width = own.width;
             let operation = &operations[found.origin.operation];
             let codes = codes_of(operation, width);
             let spellings: Vec<Option<String>> =
-                codes.iter().map(|code| unicode.get(code).cloned()).collect();
+                codes.iter().map(|code| own.unicode.get(code).cloned()).collect();
             let owner = align_codes(&spellings, &run.text)
                 .or_else(|| (codes.len() == run.text.chars().count()).then(|| (0..codes.len()).collect()))
                 .ok_or(PdfError::Unsupported("that run's codes cannot be lined up with its text"))?;
             let span = owned_codes(&owner)
                 .ok_or(PdfError::Unsupported("that run's characters belong to none of its codes"))?;
             let (first, last) = (span.start, span.end - 1);
+
+            // **A line in stretches.** Looks asked for on stretches of the line's
+            // characters: it is written one stretch at a time, each in the text
+            // state its look sets (`Tf`, `rg`, `Tc`, `Tz`, `Ts`), and the piece's
+            // own put back after the last — text state carries on into whatever
+            // follows, so nothing drawn after the line changes.
+            //
+            // **Words that are the piece's own keep their own codes and spacing
+            // numbers**, wherever their font is not asked to change: nothing that
+            // does not have to move moves. The rest are encoded stretch by stretch,
+            // each in the font its look names — the piece's own, another already on
+            // the page, or one written into the file, in that order (`choose_font`).
+            if !looks.is_empty() {
+                // **A line to be kept to a width** is written afresh — its spacing is
+                // worked out again, below, once its plain width is known — and refused
+                // now, before anything is written, where that cannot be done: text
+                // drawn at an angle or vertically (its box is not its width).
+                let target = stretch.get(&object).copied();
+                if target.is_some() {
+                    if (found.axis.0 - 1.0).abs() > 1e-3 || found.axis.1.abs() > 1e-3 {
+                        return Err(PdfError::InvalidArgument(
+                            "this line is drawn at an angle, so it cannot be stretched to a width".into(),
+                        ));
+                    }
+                    if font_is_vertical(&file, fonts_ref, &name) {
+                        return Err(PdfError::InvalidArgument(
+                            "this line is written vertically, so it cannot be stretched to a width".into(),
+                        ));
+                    }
+                }
+                // A line under or through text drawn at an angle would have to be
+                // drawn at that angle: refused, rather than drawn level under it.
+                if looks.iter().any(|l| l.underline || l.strike)
+                    && ((found.axis.0 - 1.0).abs() > 1e-3 || found.axis.1.abs() > 1e-3)
+                {
+                    return Err(PdfError::InvalidArgument(
+                        "this line is drawn at an angle, so it cannot be underlined or struck through".into(),
+                    ));
+                }
+                let at = found.origin.operation;
+                let state = states.get(at).ok_or(PdfError::Unsupported("that text's state cannot be read"))?;
+                let vertical_scale = if found.size.abs() > 1e-6 { run.size / found.size } else { 1.0 };
+                let scale = if found.scale.abs() > 1e-6 { found.scale } else { 1.0 };
+                // Points on the page back to the units `Tf` takes.
+                let to_tf = |points: f32| if vertical_scale.abs() > 1e-6 { points / vertical_scale } else { points };
+                let base_size = new_size.filter(|s| *s > 0.0).map(to_tf).unwrap_or(found.size);
+                let own_text = OwnText {
+                    drawn: StretchState {
+                        font: name.clone(),
+                        size: found.size,
+                        colour: None,
+                        char_spacing: None,
+                        scaling: None,
+                        rise: None,
+                    },
+                    char_spacing: state.char_spacing,
+                    scaling: state.horizontal_scale * 100.0,
+                    rise: state.rise,
+                    colour_back: [fill_before(&stream, &operations, at).as_slice(), b"\n"].concat(),
+                };
+                // What a stretch is drawn with, in the font `font`: the look's size
+                // and colour; its spacing and rise from points on the page to text
+                // space, which the matrices magnify; its scaling as it is.
+                let drawn_with = |font: &[u8], look: Option<&crate::document::SpanStyle>| -> StretchState {
+                    let scaling = look.and_then(|l| l.width_pct).map_or(state.horizontal_scale, |w| w / 100.0);
+                    let scaling = if scaling.abs() > 1e-6 { scaling } else { 1.0 };
+                    StretchState {
+                        font: font.to_vec(),
+                        size: look.and_then(|l| l.size).map_or(base_size, to_tf),
+                        colour: look.and_then(|l| l.color),
+                        char_spacing: look.and_then(|l| l.char_spacing).map(|s| s / (scale * scaling)),
+                        scaling: look.and_then(|l| l.width_pct),
+                        rise: look.and_then(|l| l.rise).map(|r| r / scale),
+                    }
+                };
+
+                // The fonts a stretch is to be like: those of the pieces named.
+                let mut like_facts: HashMap<usize, FontFacts> = HashMap::new();
+                for look in looks {
+                    let Some(crate::document::SpanFont::LikeObject(liked)) = &look.font else { continue };
+                    if like_facts.contains_key(liked) {
+                        continue;
+                    }
+                    let liked_run =
+                        resolved.get(liked).ok_or_else(|| PdfError::InvalidArgument("that is not a text run".into()))?;
+                    let liked_order = text_objects.binary_search(liked).ok().map(|which| (which, text_objects.len()));
+                    let liked_at =
+                        self.operator_of(page_index, liked_run, height, &placed, liked_order, &codes_in, &mut run_list)?;
+                    let liked_font =
+                        liked_at.font.clone().ok_or(PdfError::Unsupported("that text selects no font"))?;
+                    like_facts.insert(
+                        *liked,
+                        Self::font_facts(&file, bytes, fonts_ref, &liked_font, &liked_run.text, &mut inked)?,
+                    );
+                }
+
+                // The line's characters as the page spells them, each with the code
+                // that draws it; and whether the words asked for are those.
+                let own_chars = spaced_chars(&run.text, &owner, &spellings);
+                let own_words: String = own_chars.iter().map(|(c, _)| *c).collect();
+                // (A line kept to a width is always written afresh.)
+                let unchanged = text.trim_end() == own_words.trim_end() && target.is_none();
+                let words: Vec<char> = if unchanged {
+                    own_chars.iter().map(|(c, _)| *c).collect()
+                } else {
+                    encodable(text, &own.reverse).chars().collect()
+                };
+                let coded = content::coded(operation, width);
+                let count = coded.codes.len();
+                let tracking = content::tracking(operation, first..last + 1, width, &space_codes(&spellings));
+                // Where a boundary between characters falls among the codes: after
+                // the code of the character before it.
+                let cut = |boundary: usize| -> usize {
+                    if boundary == 0 {
+                        0
+                    } else {
+                        own_chars.get(boundary - 1).map_or(count, |(_, code)| code + 1).min(count)
+                    }
+                };
+
+                let stretches_of = cut_into_stretches(looks, words.len());
+                let mut parts: Vec<LinePart> = Vec::new();
+                if !unchanged && first > 0 {
+                    parts.push(LinePart::of(coded.pieces(0..first), drawn_with(&name, None), None, None));
+                }
+                let mut done = 0usize;
+                for (n, (range, look)) in stretches_of.iter().enumerate() {
+                    let font_asked = look.and_then(|l| l.font.as_ref());
+                    let like = match font_asked {
+                        Some(crate::document::SpanFont::LikeObject(liked)) => Some(*liked),
+                        _ => None,
+                    };
+                    let face: Option<&str> = match font_asked {
+                        Some(crate::document::SpanFont::Face(face)) => Some(face.as_str()),
+                        Some(crate::document::SpanFont::LikeObject(_)) => None,
+                        None => requested_face,
+                    };
+                    // Where the page's own codes stand for this stretch, when its words
+                    // are the page's.
+                    let (start, end) =
+                        if unchanged { (cut(range.start).max(done), cut(range.end).max(done)) } else { (0, 0) };
+                    if unchanged {
+                        // The page's own codes, as they were drawn.
+                        if like.is_none() && face.is_none() {
+                            let end = if range.end >= words.len() { count } else { end };
+                            if start < end {
+                                parts.push(LinePart::of(coded.pieces(start..end), drawn_with(&name, *look), None, *look));
+                            }
+                            done = end.max(done);
+                            continue;
+                        }
+                        done = end;
+                    }
+                    let seg: String = words[range.clone()].iter().collect();
+                    let facts = like.and_then(|liked| like_facts.get(&liked)).unwrap_or(&own);
+                    let (encoded, swap) =
+                        self.choose_font(&file, bytes, &page, fonts_ref, facts, &seg, face, &mut batch)?;
+                    let font = swap.as_ref().map_or_else(|| facts.name.clone(), |s| s.resource.clone());
+                    // Only words in the piece's own font carry its spacing numbers.
+                    let own_font = swap.is_none() && like.is_none();
+                    if let Some(swap) = swap {
+                        face_written = Some(swap.face);
+                    }
+                    let drawn = drawn_with(&font, *look);
+                    let points_per_unit =
+                        drawn.size * scale * drawn.scaling.map_or(state.horizontal_scale, |w| w / 100.0) / 1000.0;
+                    if target.is_some() && !(points_per_unit.is_finite() && points_per_unit > 1e-9) {
+                        return Err(PdfError::InvalidArgument(
+                            "this line is drawn at a size that cannot be spaced, so it cannot be stretched to a width"
+                                .into(),
+                        ));
+                    }
+                    // The spacing the old words' last glyph carried goes on after the
+                    // new ones: the stretch's own last code, or — for a retyped line —
+                    // the piece's last.
+                    let trailing = if unchanged {
+                        end.checked_sub(1).filter(|_| end > start).and_then(|c| coded.codes.get(c)).and_then(|c| c.1)
+                    } else if n + 1 == stretches_of.len() {
+                        coded.codes.get(last).and_then(|c| c.1)
+                    } else {
+                        None
+                    };
+                    let fresh = FreshWords {
+                        per_char: encoded.len().checked_div(seg.chars().count()).unwrap_or(0),
+                        chars: seg.chars().collect(),
+                        encoded,
+                        tracking: if own_font { tracking } else { None },
+                        more_follows: n + 1 < stretches_of.len(),
+                        trailing,
+                        points_per_unit,
+                    };
+                    parts.push(LinePart::of(fresh.pieces(&|_| 0.0), drawn, Some(fresh), *look));
+                }
+                if unchanged {
+                    // Codes after the last character's: drawn as they were.
+                    if done < count {
+                        parts.push(LinePart::of(coded.pieces(done..count), drawn_with(&name, None), None, None));
+                    }
+                } else if last + 1 < count {
+                    // What the piece drew after the old words follows the new.
+                    parts.push(LinePart::of(coded.pieces(last + 1..count), drawn_with(&name, None), None, None));
+                }
+                if parts.is_empty() {
+                    return Err(PdfError::InvalidArgument("there are no words to write".into()));
+                }
+
+                let mut replacement = write_parts(&parts, coded.leading, &own_text);
+                // A `'` or `"` also moved to the next line before it drew, which the
+                // `TJ`s written in its place do not do: so that is said first.
+                let moved = quote_effect(operation)?;
+                if !moved.is_empty() {
+                    replacement = [moved.as_slice(), b"\n", replacement.as_slice()].concat();
+                }
+                spans.push((operation.span.clone(), replacement));
+                // Every styled line is kept: each is an operator for every stretch, which
+                // numbers what comes after it higher in the copy that is measured.
+                styled.push(StyledLine {
+                    span: spans.len() - 1,
+                    object,
+                    target,
+                    operation: at,
+                    level: (found.axis.0 - 1.0).abs() <= 1e-3 && found.axis.1.abs() <= 1e-3,
+                    parts,
+                    leading: coded.leading,
+                    own: own_text,
+                    moved,
+                });
+                results.push((
+                    previous,
+                    crate::document::TextStyle { size: Some(run.size), ..Default::default() },
+                ));
+                continue;
+            }
+
+            let wanted = encodable(text, &own.reverse);
+            let (encoded, swap) =
+                self.choose_font(&file, bytes, &page, fonts_ref, &own, &wanted, requested_face, &mut batch)?;
 
             let drawing = swap.as_ref().map(|s| s.resource.clone()).unwrap_or_else(|| name.clone());
             let vertical_scale = if found.size.abs() > 1e-6 { run.size / found.size } else { 1.0 };
@@ -9957,14 +10295,6 @@ fn font_to_unicode(
             }
 
             if let Some(swap) = swap {
-                if !swap.added.is_empty() || swap.page.is_some() {
-                    embeds += 1;
-                    if embeds > 1 {
-                        return Err(PdfError::Unsupported(TOO_MANY_EMBEDS_IN_ONE_BATCH));
-                    }
-                    extra.extend(swap.added.iter().cloned());
-                    page_patch = swap.page.clone();
-                }
                 face_written = Some(swap.face);
             }
             results.push((
@@ -10025,9 +10355,40 @@ fn font_to_unicode(
                 }
             }
         }
+        // ---- the rules the old pieces had
+        //
+        // **A piece rewritten or taken off takes its rules with it**, cut in the same
+        // pass: left, a rule would hang under words that are no longer there, or under
+        // a word that is no longer underlined. A rewritten piece that is to be ruled
+        // gets fresh ones below, measured on the line as it will be. Only ours are cut
+        // — marked `/PagifyRule` — and a piece drawn in a colour alone is not rewritten.
+        let mut cut_rules: Vec<std::ops::Range<usize>> = Vec::new();
+        if rules_on_page {
+            let rules = drawn_rules(&operations, &states);
+            if !rules.is_empty() {
+                let page_number = i32::try_from(page_index)
+                    .map_err(|_| PdfError::InvalidArgument(format!("page index {page_index} is out of range")))?;
+                let space = RawPage::open(self.document.handle(), page_number)?.space()?;
+                let rewritten = edits.iter().filter(|e| e.4.is_none()).map(|e| e.0).chain(removals.iter().copied());
+                let owned: std::collections::BTreeSet<usize> = rewritten
+                    .filter_map(|object| resolved.get(&object))
+                    .flat_map(|run| rules.iter().enumerate().filter(|(_, rule)| rule_belongs_to(rule, run, &space)).map(|(i, _)| i))
+                    .collect();
+                for index in owned {
+                    let block = rules[index].operations.clone();
+                    spans.push((operations[block.start].span.start..operations[block.end - 1].span.end, Vec::new()));
+                    cut_rules.push(block);
+                }
+            }
+        }
         timing.push(("  of which taking pieces off", t_removals.elapsed()));
         timing.push(("per_edit_loop_total", t_loop.elapsed()));
         timing.push(("  of which reading the runs and their order", resolve_total));
+
+        // The fonts the batch wrote into the file, and the page told of them — once,
+        // from everything the batch embedded.
+        let extra = std::mem::take(&mut batch.added);
+        let page_patch = batch.page_patch(self, &file, page_index, &page)?;
 
         // The document as these spans make it: the content stream spliced, packed
         // and written out, with the font objects the batch added. Written twice
@@ -10063,40 +10424,212 @@ fn font_to_unicode(
         // of its own, and the retyped runs' boxes read from it; that copy is
         // dropped, and `self` is given only the version with the gaps opened.
         // Nothing here has touched `self`: a refusal leaves the page as it was.
-        if !stretches.is_empty() {
+        let spreading = !stretches.is_empty() || styled.iter().any(|s| s.target.is_some());
+        let ruling = styled.iter().any(StyledLine::has_rules);
+        if spreading || ruling {
             let t_stretch = std::time::Instant::now();
             let (plain, _, _) = write(&spans)?;
-            let copy = Self::open_bytes(plain, None)?;
+            let mut copy = Self::open_bytes(plain, None)?;
             // The page's objects are numbered as the copy now has them: a piece
-            // taken off lowers the number of every object after it, and an edit
-            // replaces one operator with one.
-            let renumbered = |object: usize| object - removals.iter().filter(|r| **r < object).count();
-            let wanted_now: std::collections::HashSet<usize> = stretches.iter().map(|s| renumbered(s.object)).collect();
-            let measured: HashMap<usize, crate::document::TextRun> = copy
-                .text_runs_some(page_index, &wanted_now)?
-                .into_iter()
-                .map(|run| (run.object, run))
-                .collect();
-            for stretching in &stretches {
-                let run = measured.get(&renumbered(stretching.object)).ok_or_else(|| {
-                    PdfError::InvalidArgument("this line could not be measured, so it cannot be stretched to a width".into())
-                })?;
-                // The retyped run is where the original was: its origin is the
-                // operator's own, and the retype does not move it. If it is not,
-                // the numbers did not line up and what was measured is something else.
-                let was = &resolved[&stretching.object];
-                if (run.origin.x - was.origin.x).abs() > 0.05 || (run.origin.y - was.origin.y).abs() > 0.05 {
-                    return Err(PdfError::InvalidArgument(
-                        "this line could not be measured, so it cannot be stretched to a width".into(),
-                    ));
+            // taken off lowers the number of every object after it, so does a rule
+            // cut (a path object of its own, before the object's operator), and a
+            // line written in stretches is an operator for each of them, which
+            // raises it. (Any other edit replaces one operator with one.)
+            let renumbered = |object: usize, operation: usize| {
+                (object + styled.iter().filter(|s| s.object < object).map(|s| s.parts.len() - 1).sum::<usize>())
+                    .saturating_sub(
+                        removals.iter().filter(|r| **r < object).count()
+                            + cut_rules.iter().filter(|r| r.start < operation).count(),
+                    )
+            };
+            if spreading {
+                let wanted_now: std::collections::HashSet<usize> = stretches
+                    .iter()
+                    .map(|s| renumbered(s.object, s.operation))
+                    .chain(styled.iter().filter(|s| s.target.is_some()).flat_map(|s| {
+                        let first = renumbered(s.object, s.operation);
+                        first..first + s.parts.len()
+                    }))
+                    .collect();
+                let measured: HashMap<usize, crate::document::TextRun> = copy
+                    .text_runs_some(page_index, &wanted_now)?
+                    .into_iter()
+                    .map(|run| (run.object, run))
+                    .collect();
+                for stretching in &stretches {
+                    let run = measured.get(&renumbered(stretching.object, stretching.operation)).ok_or_else(|| {
+                        PdfError::InvalidArgument("this line could not be measured, so it cannot be stretched to a width".into())
+                    })?;
+                    // The retyped run is where the original was: its origin is the
+                    // operator's own, and the retype does not move it. If it is not,
+                    // the numbers did not line up and what was measured is something else.
+                    let was = &resolved[&stretching.object];
+                    if (run.origin.x - was.origin.x).abs() > 0.05 || (run.origin.y - was.origin.y).abs() > 0.05 {
+                        return Err(PdfError::InvalidArgument(
+                            "this line could not be measured, so it cannot be stretched to a width".into(),
+                        ));
+                    }
+                    let plain_width = run.rect.right - run.rect.left;
+                    if !(plain_width.is_finite() && plain_width > 0.0) {
+                        return Err(PdfError::InvalidArgument(
+                            "this line has no width to measure, so it cannot be stretched to a width".into(),
+                        ));
+                    }
+                    spans[stretching.span].1 = stretching.spread(&operations[stretching.operation], plain_width)?;
                 }
-                let plain_width = run.rect.right - run.rect.left;
-                if !(plain_width.is_finite() && plain_width > 0.0) {
-                    return Err(PdfError::InvalidArgument(
-                        "this line has no width to measure, so it cannot be stretched to a width".into(),
-                    ));
+                // A line written in stretches is measured from the left of its first
+                // stretch to the right of its last, as a line of one look is by its one.
+                for stretching in styled.iter().filter(|s| s.target.is_some()) {
+                    let could_not = || {
+                        PdfError::InvalidArgument(
+                            "this line could not be measured, so it cannot be stretched to a width".into(),
+                        )
+                    };
+                    let first = renumbered(stretching.object, stretching.operation);
+                    let (head, tail) = (
+                        measured.get(&first).ok_or_else(could_not)?,
+                        measured.get(&(first + stretching.parts.len() - 1)).ok_or_else(could_not)?,
+                    );
+                    // The first stretch is where the original was, and the last is on the
+                    // same line: if not, the numbers did not line up and what was measured
+                    // is something else.
+                    let was = &resolved[&stretching.object];
+                    let overlaps = tail.rect.top < head.rect.bottom && tail.rect.bottom > head.rect.top;
+                    if (head.origin.x - was.origin.x).abs() > 0.05 || (head.origin.y - was.origin.y).abs() > 0.05 || !overlaps {
+                        return Err(could_not());
+                    }
+                    let plain_width = tail.rect.right - head.rect.left;
+                    if !(plain_width.is_finite() && plain_width > 0.0) {
+                        return Err(PdfError::InvalidArgument(
+                            "this line has no width to measure, so it cannot be stretched to a width".into(),
+                        ));
+                    }
+                    spans[stretching.span].1 = stretching.spread(plain_width)?;
                 }
-                spans[stretching.span].1 = stretching.spread(&operations[stretching.operation], plain_width)?;
+            }
+
+            // ---- the lines under and through words
+            //
+            // **Measured on the line as it will be written** — after any spreading,
+            // which moves the stretches along — and drawn as page content of their
+            // own, tagged so that they can be told from a drawing of the page's: a
+            // filled rectangle after the text object that holds the line, in the
+            // page's own units whatever transform the text is under. Where the
+            // stretch ends is where the next begins, so stretches side by side make
+            // one line; the last runs to the end of its words.
+            if ruling {
+                if spreading {
+                    let (spread, _, _) = write(&spans)?;
+                    copy = Self::open_bytes(spread, None)?;
+                }
+                let could_not = || {
+                    PdfError::InvalidArgument(
+                        "this line could not be measured, so it cannot be underlined or struck through".into(),
+                    )
+                };
+                let page_number = i32::try_from(page_index)
+                    .map_err(|_| PdfError::InvalidArgument(format!("page index {page_index} is out of range")))?;
+                let raw = RawPage::open(self.document.handle(), page_number)?;
+                let space = raw.space()?;
+                let ruled: Vec<&StyledLine> = styled.iter().filter(|s| s.has_rules()).collect();
+                let wanted_now: std::collections::HashSet<usize> = ruled
+                    .iter()
+                    .flat_map(|s| {
+                        let first = renumbered(s.object, s.operation);
+                        first..first + s.parts.len()
+                    })
+                    .collect();
+                let measured: HashMap<usize, crate::document::TextRun> = copy
+                    .text_runs_some(page_index, &wanted_now)?
+                    .into_iter()
+                    .map(|run| (run.object, run))
+                    .collect();
+                // What each text object's `ET` is followed by.
+                let mut after_et: std::collections::BTreeMap<usize, Vec<u8>> = std::collections::BTreeMap::new();
+                for line in ruled {
+                    let first = renumbered(line.object, line.operation);
+                    let head = measured.get(&first).ok_or_else(could_not)?;
+                    // The first stretch is where the original was: if not, the numbers
+                    // did not line up and what was measured is something else.
+                    let was = &resolved[&line.object];
+                    if !line.level
+                        || (head.origin.x - was.origin.x).abs() > 0.05
+                        || (head.origin.y - was.origin.y).abs() > 0.05
+                    {
+                        return Err(could_not());
+                    }
+                    let et = (line.operation + 1..operations.len())
+                        .find(|i| operations[*i].operator.as_slice() == b"ET")
+                        .ok_or(PdfError::Unsupported("that text is not in a text object a line can be drawn after"))?;
+                    let m = states.get(et).ok_or(PdfError::Unsupported("that text's state cannot be read"))?.ctm;
+                    let det = m[0] * m[3] - m[1] * m[2];
+                    if !det.is_finite() || det.abs() < 1e-9 {
+                        return Err(PdfError::Unsupported("the transform that text is under cannot be undone"));
+                    }
+                    // The page's transform undone, so what follows is in page units.
+                    let undo = [
+                        m[3] / det,
+                        -m[1] / det,
+                        -m[2] / det,
+                        m[0] / det,
+                        (m[2] * m[5] - m[3] * m[4]) / det,
+                        (m[1] * m[4] - m[0] * m[5]) / det,
+                    ];
+                    for (j, part) in line.parts.iter().enumerate() {
+                        for (kind, wanted) in [(1u8, part.underline), (2u8, part.strike)] {
+                            if !wanted {
+                                continue;
+                            }
+                            let run = measured.get(&(first + j)).ok_or_else(could_not)?;
+                            // On the line the first stretch is on: a rise moves a stretch
+                            // a fraction of its size, another line a whole one.
+                            if (run.origin.y - head.origin.y).abs() > 0.6 * run.size.max(head.size) {
+                                return Err(could_not());
+                            }
+                            let x0 = run.origin.x;
+                            let x1 = match line.parts.get(j + 1).and_then(|_| measured.get(&(first + j + 1))) {
+                                Some(next) => next.origin.x,
+                                None => run.rect.right,
+                            };
+                            // The face's own line where it says one; a tenth of an em below
+                            // the baseline, a twentieth thick (three tenths above for a
+                            // strike) where it says nothing.
+                            let metrics = copy
+                                .run_font_data(page_index, first + j)
+                                .ok()
+                                .flatten()
+                                .and_then(|program| crate::text::line_metrics_of(&program))
+                                .unwrap_or(crate::text::LineMetrics::FALLBACK);
+                            let (position, thickness) = if kind == 1 {
+                                (metrics.underline_position, metrics.underline_thickness)
+                            } else {
+                                (metrics.strikeout_position, metrics.strikeout_thickness)
+                            };
+                            // Centred on the position, on the line's own baseline: a raised
+                            // stretch does not raise it. Page points count downwards.
+                            let centre = was.origin.y - position * run.size;
+                            let half = thickness * run.size / 2.0;
+                            let (ax, ay) = space.to_pdf(x0, centre - half);
+                            let (bx, by) = space.to_pdf(x1, centre + half);
+                            let (x, y, w, h) = (ax.min(bx), ay.min(by), (bx - ax).abs(), (by - ay).abs());
+                            if !(w > 0.01 && h > 1e-4) {
+                                continue;
+                            }
+                            let part = |v: u8| f32::from(v) / 255.0;
+                            let colour = run.color;
+                            let bytes = format!(
+                                "/PagifyRule <</Kind {kind}>> BDC\nq\n{} {} {} {} {} {} cm\n{:.3} {:.3} {:.3} rg\n{x} {y} {w} {h} re\nf\nQ\nEMC\n",
+                                undo[0], undo[1], undo[2], undo[3], undo[4], undo[5],
+                                part(colour.r), part(colour.g), part(colour.b),
+                            );
+                            after_et.entry(et).or_default().extend_from_slice(bytes.as_bytes());
+                        }
+                    }
+                }
+                for (et, bytes) in after_et {
+                    let end = operations[et].span.end;
+                    spans.push((end..end, bytes));
+                }
             }
             timing.push(("  of which measuring the lines to stretch", t_stretch.elapsed()));
         }
@@ -10112,54 +10645,6 @@ fn font_to_unicode(
         self.substituted = face_written;
         self.last_batch_timing = timing;
         Ok(results)
-    }
-
-    /// [`DocumentMut::replace_text_lines`] for a batch in which more than one line
-    /// needs a new font embedded: each first piece is written on its own, as
-    /// [`DocumentMut::set_text_run_styled`] writes it, and then every piece to
-    /// remove comes off in one pass.
-    ///
-    /// **Atomic all the same**, by a copy of the page taken first and put back on
-    /// any failure — which is what the one-line-at-a-time fallback of
-    /// `set_text_runs_styled` does not have, and could not have here, where the
-    /// removal would be left undone. No object is renumbered by the writes (each
-    /// replaces one show-text operator with one), so the objects to remove are
-    /// still the ones that were asked for when their turn comes.
-    fn replace_text_lines_one_at_a_time(
-        &mut self,
-        page_index: usize,
-        requests: &[(usize, &str, Option<&str>, Option<f32>, Option<crate::document::Color>)],
-        removals: &[usize],
-        stretch: &HashMap<usize, f32>,
-    ) -> Result<()> {
-        let page = self.snapshot_page(page_index)?;
-        let outcome = (|| -> Result<()> {
-            for &(first, text, face, size, _) in requests {
-                // A line that is to be stretched is written the way the batch
-                // writes it, as a batch of one: that is where the stretching is.
-                if let Some(width) = stretch.get(&first) {
-                    self.set_runs_in_stream(
-                        page_index,
-                        &[(first, text, face, size, None)],
-                        &[],
-                        &HashMap::from([(first, *width)]),
-                    )?;
-                    continue;
-                }
-                let style = crate::document::TextStyle { face: face.map(str::to_string), size, ..Default::default() };
-                self.set_text_run_styled(page_index, first, text, &style)?;
-            }
-            if !removals.is_empty() {
-                self.set_runs_in_stream(page_index, &[], removals, &HashMap::new())?;
-            }
-            Ok(())
-        })();
-        if let Err(first) = &outcome {
-            if let Err(restore) = self.delete_page(page_index).and_then(|_| self.insert_page(page_index, page)) {
-                return Err(PdfError::Pdfium(format!("{first}; and the page could not be put back: {restore}")));
-            }
-        }
-        outcome
     }
 
     /// For each of these show-text operations, whether the object that drew it
@@ -11293,28 +11778,487 @@ fn codes_of(operation: &crate::pdf::content::Operation, width: usize) -> Vec<u32
 /// own. What follows the last character's code is the operator's trailing padding,
 /// which is not the run's words.
 fn spaced_text(text: &str, owner: &[usize], spellings: &[Option<String>]) -> String {
+    spaced_chars(text, owner, spellings).into_iter().map(|(character, _)| character).collect()
+}
+
+/// [`spaced_text`]'s characters, each with the code that draws it: a put-back
+/// space is its own code's, and a character no code spells (`usize::MAX` in
+/// `owner`) goes with the code before it.
+fn spaced_chars(text: &str, owner: &[usize], spellings: &[Option<String>]) -> Vec<(char, usize)> {
     let space = |code: usize| {
         spellings
             .get(code)
             .and_then(|s| s.as_deref())
             .filter(|s| !s.is_empty() && s.chars().all(char::is_whitespace))
     };
-    let mut out = String::with_capacity(text.len());
-    // The first code not yet accounted for.
-    let mut next = 0usize;
+    let mut out = Vec::with_capacity(text.len());
+    // The first code not yet accounted for, and the last one seen.
+    let (mut next, mut last) = (0usize, 0usize);
     for (character, &code) in text.chars().zip(owner) {
         if code != usize::MAX && code >= next {
             for skipped in next..code {
                 if let Some(space) = space(skipped) {
-                    out.push_str(space);
+                    out.extend(space.chars().map(|c| (c, skipped)));
                 }
             }
             next = code + 1;
         }
-        out.push(character);
+        if code != usize::MAX {
+            last = code;
+        }
+        out.push((character, last));
     }
     out
 }
+
+/// What a stretch of a line is drawn with: the font and size `Tf` selects and,
+/// where a look asks for one, a colour, character spacing (`Tc`), horizontal
+/// scaling (`Tz`) and rise (`Ts`) — `None` being the piece's own.
+#[derive(Debug, Clone, PartialEq)]
+struct StretchState {
+    font: Vec<u8>,
+    size: f32,
+    colour: Option<crate::document::Color>,
+    char_spacing: Option<f32>,
+    scaling: Option<f32>,
+    rise: Option<f32>,
+}
+
+/// A piece's own text state: what each stretch's look is put back to.
+struct OwnText {
+    /// The font and size the piece is drawn in, and nothing else asked for.
+    drawn: StretchState,
+    char_spacing: f32,
+    /// `Tz`, in percent.
+    scaling: f32,
+    rise: f32,
+    /// The operators that put the stream's own fill colour back, each line ending
+    /// in a newline — see [`fill_before`].
+    colour_back: Vec<u8>,
+}
+
+/// One stretch of a line: what it shows, and what it is drawn with.
+#[derive(Clone)]
+struct LinePart {
+    shows: Vec<crate::pdf::content::Piece>,
+    drawn: StretchState,
+    /// The words, where they were written afresh rather than taken from the piece
+    /// as it drew them — what a line kept to a width is spread from.
+    fresh: Option<FreshWords>,
+    /// Whether a line is drawn under the stretch, and one through it.
+    underline: bool,
+    strike: bool,
+}
+
+impl LinePart {
+    /// A stretch as `look` asks it to be: its rules are the look's.
+    fn of(
+        shows: Vec<crate::pdf::content::Piece>,
+        drawn: StretchState,
+        fresh: Option<FreshWords>,
+        look: Option<&crate::document::SpanStyle>,
+    ) -> LinePart {
+        LinePart {
+            shows,
+            drawn,
+            fresh,
+            underline: look.is_some_and(|l| l.underline),
+            strike: look.is_some_and(|l| l.strike),
+        }
+    }
+}
+
+/// Words written afresh: the characters, their codes, and what the old line's
+/// spacing and the stretch's size make of the numbers between them.
+#[derive(Clone)]
+struct FreshWords {
+    chars: Vec<char>,
+    /// The words' codes, `per_char` bytes to a character.
+    encoded: Vec<u8>,
+    per_char: usize,
+    /// The old line's spacing, when the words are in the piece's own font.
+    tracking: Option<crate::pdf::content::Tracking>,
+    /// Whether more of the line follows, so the spacing goes after the last glyph.
+    more_follows: bool,
+    /// The spacing the old words' last glyph carried, which goes on after the new.
+    trailing: Option<f32>,
+    /// How many points one `TJ` number of 1 moves the pen along this stretch: the
+    /// size, the magnification of the matrices and the horizontal scaling, over a
+    /// thousand.
+    points_per_unit: f32,
+}
+
+impl FreshWords {
+    /// Whether each character has its own code — what a gap can be put after.
+    fn lined_up(&self) -> bool {
+        !self.chars.is_empty() && self.per_char > 0 && self.per_char * self.chars.len() == self.encoded.len()
+    }
+
+    /// The words shown: the old spacing after each glyph (and after the last, when
+    /// more of the line follows), and `gap(j)` more after character `j`.
+    fn pieces(&self, gap: &dyn Fn(usize) -> f32) -> Vec<crate::pdf::content::Piece> {
+        use crate::pdf::content::Piece;
+        let mut out: Vec<Piece> = Vec::new();
+        if self.lined_up() {
+            let mut run: Vec<u8> = Vec::new();
+            for (j, bytes) in self.encoded.chunks(self.per_char).enumerate() {
+                run.extend_from_slice(bytes);
+                let mut number = match self.tracking {
+                    Some(t) if j + 1 < self.chars.len() || self.more_follows => {
+                        if self.chars[j].is_whitespace() { t.space } else { t.glyph }
+                    }
+                    _ => 0.0,
+                };
+                number += gap(j);
+                if number != 0.0 {
+                    out.push(Piece::Codes(std::mem::take(&mut run)));
+                    out.push(Piece::Kern(number));
+                }
+            }
+            if !run.is_empty() {
+                out.push(Piece::Codes(run));
+            }
+        } else {
+            out.push(Piece::Codes(self.encoded.clone()));
+        }
+        if let Some(number) = self.trailing {
+            out.push(Piece::Kern(number));
+        }
+        out
+    }
+}
+
+/// A line this app drew under or through some words: a `/PagifyRule` marked-content
+/// block holding one filled rectangle.
+struct DrawnRule {
+    /// The operations from its `BDC` to its `EMC`, both included.
+    operations: std::ops::Range<usize>,
+    /// 1 for a line under words, 2 for a line through them; 0 where the mark does
+    /// not say (it names its parameters by reference).
+    kind: u8,
+    /// Where it lies in the page's own space: left, bottom, right, top.
+    rect: [f32; 4],
+}
+
+/// Whether `operation` opens a rule this app drew.
+fn opens_rule(operation: &crate::pdf::content::Operation) -> bool {
+    operation.operator.as_slice() == b"BDC"
+        && matches!(operation.operands.first(), Some(crate::pdf::Object::Name(name)) if name.as_slice() == b"PagifyRule")
+}
+
+/// Every rule of the page, found by its mark in the stream — the very bytes an edit
+/// cuts from, so the operators to cut are known without matching anything up.
+///
+/// A block that holds anything but the one rectangle and the transforms and colour to
+/// put it down is not one of ours as written, and is left alone. `states` is the walk of
+/// `operations` ([`crate::pdf::content::states`]); the rectangle is carried through the
+/// transform in force where it is drawn, so the rule is placed whatever it undid.
+fn drawn_rules(operations: &[crate::pdf::content::Operation], states: &[crate::pdf::content::State]) -> Vec<DrawnRule> {
+    let mut found = Vec::new();
+    for (open, operation) in operations.iter().enumerate() {
+        if !opens_rule(operation) {
+            continue;
+        }
+        // Its own `EMC`, with any marked content inside counted off.
+        let mut depth = 0usize;
+        let close = operations[open + 1..].iter().position(|op| match op.operator.as_slice() {
+            b"BDC" | b"BMC" => {
+                depth += 1;
+                false
+            }
+            b"EMC" if depth == 0 => true,
+            b"EMC" => {
+                depth -= 1;
+                false
+            }
+            _ => false,
+        });
+        let Some(close) = close.map(|at| open + 1 + at) else { continue };
+        let inside = &operations[open + 1..close];
+        if !inside.iter().all(|op| matches!(op.operator.as_slice(), b"q" | b"Q" | b"cm" | b"rg" | b"re" | b"f")) {
+            continue;
+        }
+        let mut rectangles = inside.iter().enumerate().filter(|(_, op)| op.operator.as_slice() == b"re");
+        let (Some((at, rectangle)), None) = (rectangles.next(), rectangles.next()) else { continue };
+        let numbers: Vec<f32> = rectangle.operands.iter().filter_map(|o| o.as_f64()).map(|n| n as f32).collect();
+        let ([x, y, w, h], Some(state)) = (numbers.as_slice().try_into().unwrap_or([f32::NAN; 4]), states.get(open + 1 + at)) else {
+            continue;
+        };
+        let m = state.ctm;
+        let corners = [(x, y), (x + w, y), (x, y + h), (x + w, y + h)]
+            .map(|(px, py)| (m[0] * px + m[2] * py + m[4], m[1] * px + m[3] * py + m[5]));
+        let (left, right) = corners.iter().fold((f32::MAX, f32::MIN), |(lo, hi), c| (lo.min(c.0), hi.max(c.0)));
+        let (bottom, top) = corners.iter().fold((f32::MAX, f32::MIN), |(lo, hi), c| (lo.min(c.1), hi.max(c.1)));
+        if ![left, right, bottom, top].iter().all(|n| n.is_finite()) {
+            continue;
+        }
+        let kind = match operation.operands.get(1) {
+            Some(crate::pdf::Object::Dict(parameters)) => {
+                parameters.get(b"Kind").and_then(|k| k.as_f64()).map_or(0, |k| k as u8)
+            }
+            _ => 0,
+        };
+        found.push(DrawnRule { operations: open..close + 1, kind, rect: [left, bottom, right, top] });
+    }
+    found
+}
+
+/// Whether `rule` is one of `run`'s own: its middle lies from half an em above the
+/// baseline to four tenths below it, and it covers at least half of the run's width.
+///
+/// **By the run, not by its line.** Stretches side by side each have a rule of their own
+/// that ends where the next begins; the one rewritten takes its own away and no other.
+fn rule_belongs_to(rule: &DrawnRule, run: &crate::document::TextRun, space: &PageSpace) -> bool {
+    let (left, top) = space.to_top_left(rule.rect[0], rule.rect[3]);
+    let (right, bottom) = space.to_top_left(rule.rect[2], rule.rect[1]);
+    let middle = (top + bottom) / 2.0;
+    let covered = right.min(run.rect.right) - left.max(run.rect.left);
+    middle >= run.origin.y - 0.5 * run.size
+        && middle <= run.origin.y + 0.4 * run.size
+        && covered > 0.0
+        && covered >= (run.rect.right - run.rect.left) / 2.0
+}
+
+/// A line written in stretches of its own — the show operator it replaces, and what
+/// it takes to write it again once it is measured: spread to a width ([`Stretch`]
+/// does the same for a line of one look) and given its rules.
+struct StyledLine {
+    /// Where its replacement sits in the batch's spans.
+    span: usize,
+    /// The run (its object number before the edit), and the width in points from its
+    /// left origin that the line is to span, where it is to span one.
+    object: usize,
+    target: Option<f32>,
+    /// The show operator it replaces (an index into the stream's operations).
+    operation: usize,
+    /// Whether it runs along the page's x axis: what a horizontal rule can lie under.
+    level: bool,
+    parts: Vec<LinePart>,
+    /// A spacing number before the first code.
+    leading: Option<f32>,
+    own: OwnText,
+    /// What goes before it to say a quote operator's move to the next line.
+    moved: Vec<u8>,
+}
+
+impl StyledLine {
+    /// Whether any stretch asks for a line under or through it.
+    fn has_rules(&self) -> bool {
+        self.parts.iter().any(|p| p.underline || p.strike)
+    }
+
+    /// The operator's replacement for a line whose plain version is `plain_width`
+    /// points wide, written so that it comes out [`Self::target`] wide: the
+    /// difference shared among the gaps between its words, each stretch's number
+    /// in that stretch's own units.
+    ///
+    /// Refused — with `InvalidArgument`, and nothing written — in the cases
+    /// [`Stretch::spread`] refuses.
+    fn spread(&self, plain_width: f32) -> Result<Vec<u8>> {
+        let Some(target) = self.target else { return Ok(self.assemble(&self.parts)) };
+        let mut chars: Vec<char> = Vec::new();
+        let mut starts: Vec<usize> = Vec::with_capacity(self.parts.len());
+        for part in &self.parts {
+            starts.push(chars.len());
+            if let Some(fresh) = &part.fresh {
+                chars.extend_from_slice(&fresh.chars);
+            }
+        }
+        let first = chars.iter().position(|c| *c != ' ');
+        let last = chars.iter().rposition(|c| *c != ' ');
+        let gaps: Vec<usize> = match (first, last) {
+            (Some(first), Some(last)) => {
+                let spaces: Vec<usize> = (first + 1..last).filter(|j| chars[*j] == ' ').collect();
+                if spaces.is_empty() { (first..last).collect() } else { spaces }
+            }
+            _ => Vec::new(),
+        };
+        let between_words = gaps.first().is_some_and(|j| chars[*j] == ' ');
+        // The smallest em among the stretches that hold a gap: the closest any of
+        // them comes to its limit.
+        let em = self
+            .parts
+            .iter()
+            .zip(&starts)
+            .filter_map(|(part, start)| {
+                let fresh = part.fresh.as_ref()?;
+                gaps.iter().any(|g| (*start..*start + fresh.chars.len()).contains(g)).then_some(fresh.points_per_unit * 1000.0)
+            })
+            .fold(f32::INFINITY, f32::min);
+
+        let delta = target - plain_width;
+        // Where the plain line already spans the width, to a hundredth of a point, it
+        // is written as it is.
+        let each = if delta.abs() < 0.005 {
+            0.0
+        } else {
+            if gaps.is_empty() {
+                return Err(PdfError::InvalidArgument(
+                    "a line of one character has no gap to open, so it cannot be stretched to a width".into(),
+                ));
+            }
+            let each = delta / gaps.len() as f32;
+            if between_words && each < -0.35 * em {
+                return Err(PdfError::InvalidArgument(format!(
+                    "this line is {:.1} pt wider than the {:.1} pt it is to fit, and closing its {} gaps by that much \
+                     would put its words on top of each other",
+                    -delta, target, gaps.len()
+                )));
+            }
+            if !between_words && (each < -0.1 * em || each > 0.35 * em) {
+                return Err(PdfError::InvalidArgument(format!(
+                    "this line is a single word, {:.1} pt wide, and cannot be spread to {:.1} pt without pulling its \
+                     letters apart or onto each other",
+                    plain_width, target
+                )));
+            }
+            if self.parts.iter().filter_map(|p| p.fresh.as_ref()).any(|f| !f.lined_up()) {
+                return Err(PdfError::InvalidArgument(
+                    "this line's codes cannot be told from its characters, so it cannot be stretched to a width".into(),
+                ));
+            }
+            each
+        };
+
+        let rebuilt: Vec<LinePart> = self
+            .parts
+            .iter()
+            .zip(&starts)
+            .map(|(part, start)| match &part.fresh {
+                Some(fresh) => {
+                    let gap = |j: usize| {
+                        if each != 0.0 && gaps.binary_search(&(start + j)).is_ok() {
+                            -each / fresh.points_per_unit
+                        } else {
+                            0.0
+                        }
+                    };
+                    LinePart { shows: fresh.pieces(&gap), ..part.clone() }
+                }
+                None => part.clone(),
+            })
+            .collect();
+        Ok(self.assemble(&rebuilt))
+    }
+
+    /// `parts` written as the line's replacement, quote operator's move first.
+    fn assemble(&self, parts: &[LinePart]) -> Vec<u8> {
+        let written = write_parts(parts, self.leading, &self.own);
+        if self.moved.is_empty() { written } else { [self.moved.as_slice(), b"\n", written.as_slice()].concat() }
+    }
+}
+
+/// The operators that take the text state from `from` to `to`, each on a line of
+/// its own — only what differs.
+fn text_state_between(from: &StretchState, to: &StretchState, own: &OwnText) -> Vec<u8> {
+    let mut out = Vec::new();
+    if from.font != to.font || from.size != to.size {
+        out.extend_from_slice(format!("/{} {} Tf\n", String::from_utf8_lossy(&to.font), to.size).as_bytes());
+    }
+    if from.colour != to.colour {
+        match to.colour {
+            Some(colour) => {
+                let part = |v: u8| f32::from(v) / 255.0;
+                out.extend_from_slice(
+                    format!("{:.3} {:.3} {:.3} rg\n", part(colour.r), part(colour.g), part(colour.b)).as_bytes(),
+                );
+            }
+            None => out.extend_from_slice(&own.colour_back),
+        }
+    }
+    if from.char_spacing != to.char_spacing {
+        out.extend_from_slice(format!("{} Tc\n", to.char_spacing.unwrap_or(own.char_spacing)).as_bytes());
+    }
+    if from.scaling != to.scaling {
+        out.extend_from_slice(format!("{} Tz\n", to.scaling.unwrap_or(own.scaling)).as_bytes());
+    }
+    if from.rise != to.rise {
+        out.extend_from_slice(format!("{} Ts\n", to.rise.unwrap_or(own.rise)).as_bytes());
+    }
+    out
+}
+
+/// A line written stretch by stretch: each part's text state set, then its words
+/// shown, and the piece's own state put back after the last — text state carries
+/// on into whatever follows, so everything after the line is drawn as before.
+fn write_parts(parts: &[LinePart], leading: Option<f32>, own: &OwnText) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut now = own.drawn.clone();
+    for (i, part) in parts.iter().enumerate() {
+        if !out.is_empty() {
+            out.push(b'\n');
+        }
+        out.extend(text_state_between(&now, &part.drawn, own));
+        // A spacing number before the operator's first code goes before the first.
+        match (i, leading) {
+            (0, Some(number)) => {
+                let mut shows = part.shows.clone();
+                shows.insert(0, crate::pdf::content::Piece::Kern(number));
+                out.extend(crate::pdf::content::show_pieces(&shows));
+            }
+            _ => out.extend(crate::pdf::content::show_pieces(&part.shows)),
+        }
+        now = part.drawn.clone();
+    }
+    let back = text_state_between(&now, &own.drawn, own);
+    if !back.is_empty() {
+        out.push(b'\n');
+        out.extend_from_slice(back.strip_suffix(b"\n").unwrap_or(&back));
+    }
+    out
+}
+
+/// `looks` cut the characters `0..n` into stretches, in order: each look's own,
+/// and between them whatever nothing asks anything of. A look reaching past `n`
+/// is cut to it, and a stretch with nothing in it is left out.
+fn cut_into_stretches(
+    looks: &[crate::document::SpanStyle],
+    n: usize,
+) -> Vec<(std::ops::Range<usize>, Option<&crate::document::SpanStyle>)> {
+    let mut sorted: Vec<&crate::document::SpanStyle> = looks.iter().collect();
+    sorted.sort_by_key(|look| look.chars.start);
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    for look in sorted {
+        let (start, end) = (look.chars.start.min(n).max(at), look.chars.end.min(n));
+        if start > at {
+            out.push((at..start, None));
+        }
+        if end > start {
+            out.push((start..end, Some(look)));
+            at = end;
+        }
+    }
+    if at < n {
+        out.push((at..n, None));
+    }
+    out
+}
+
+/// What the codes of a font mean and how to write a character in it.
+struct FontFacts {
+    /// The resource name, without the slash.
+    name: Vec<u8>,
+    /// Bytes to a code.
+    width: usize,
+    /// What each code spells.
+    unicode: crate::pdf::cmap::ToUnicode,
+    /// The map read backwards — which code spells each character the font can
+    /// draw (see [`spelling_codes`]).
+    reverse: std::collections::BTreeMap<String, u32>,
+}
+
+/// One run of a batch as [`PdfiumDocument::set_runs_in_stream`] is asked for
+/// it: the object, its words, a face and a size asked for, a colour-only change,
+/// and the looks of stretches of the words — none for a line as it always was.
+type RunRequest<'a> = (
+    usize,
+    &'a str,
+    Option<&'a str>,
+    Option<f32>,
+    Option<crate::document::Color>,
+    &'a [crate::document::SpanStyle],
+);
 
 /// Which code produced each character of a run.
 ///
@@ -11595,10 +12539,73 @@ struct Swapped {
     resource: Vec<u8>,
     /// What to call the face when telling somebody the look changed.
     face: String,
-    /// Objects to add to the file. Empty when the font was already there.
+}
+
+/// The fonts one batch of edits writes into the file.
+///
+/// **One allocator for the whole batch.** Each embedded font takes three object
+/// numbers and a resource name, both chosen against the file as it was — so two
+/// fonts embedded from the same unmodified file would pick the same ones, and the
+/// page's resources, rewritten once per font, would keep only the last. The batch
+/// hands out numbers and names in turn, embeds a face once however many runs use
+/// it, and builds the page's resources once from everything it embedded.
+#[derive(Default)]
+struct EmbedBatch {
+    /// The first object number not yet taken; found from the file on first use.
+    next_object: Option<u32>,
+    faces: Vec<EmbeddedFace>,
+    /// The objects of every font embedded, to add to the file.
     added: Vec<(u32, Vec<u8>)>,
-    /// The page object rewritten to name the new font, where that was needed.
-    page: Option<(u32, Vec<u8>)>,
+}
+
+struct EmbeddedFace {
+    /// What the face is called to find it again — [`crate::pdf::embed::face_name`].
+    key: String,
+    /// The resource name selecting it, without the slash.
+    resource: Vec<u8>,
+    /// The font dictionary's object number.
+    font: u32,
+    /// What to call it to somebody.
+    display: String,
+}
+
+impl EmbedBatch {
+    /// The page's object, rewritten to name every font embedded so far; `None`
+    /// when none was. The page gets resources of its own, copied from what it
+    /// inherits — the dictionary it inherits from is shared, and adding to it
+    /// would name these fonts on every page of the document.
+    fn page_patch(
+        &self,
+        doc: &PdfiumDocument,
+        file: &crate::pdf::File<'_>,
+        page_index: usize,
+        page: &crate::pdf::Object,
+    ) -> Result<Option<(u32, Vec<u8>)>> {
+        use crate::pdf::Object;
+        if self.faces.is_empty() {
+            return Ok(None);
+        }
+        let mut resources = doc
+            .inherited(file, page, b"Resources")?
+            .and_then(|r| r.as_dict().cloned())
+            .unwrap_or(crate::pdf::Dict(Vec::new()));
+        let mut font_dict = resources
+            .get(b"Font")
+            .and_then(|f| file.resolve(f).ok())
+            .and_then(|f| f.as_dict().cloned())
+            .unwrap_or(crate::pdf::Dict(Vec::new()));
+        for face in &self.faces {
+            font_dict.set(&face.resource, Object::Reference(face.font, 0));
+        }
+        resources.set(b"Font", Object::Dict(font_dict));
+        let mut page_dict =
+            page.as_dict().cloned().ok_or(PdfError::Unsupported("that page cannot be read"))?;
+        page_dict.set(b"Resources", Object::Dict(resources));
+        let number = doc.page_object_number(file, page_index)?;
+        let mut page_bytes = Vec::new();
+        crate::pdf::write_object(&mut page_bytes, &Object::Dict(page_dict));
+        Ok(Some((number, page_bytes)))
+    }
 }
 
 /// What a single-byte font with no `/ToUnicode` is taken to spell: printable
@@ -12681,6 +13688,32 @@ fn drawn_in_colour(
     out.push(b'\n');
     out.extend(fill_before(stream, operations, at));
     out
+}
+
+/// A retype's spans checked against its words before anything is written: each
+/// one holds at least one character of `text`, none runs past its end, and no
+/// two overlap. A batch with a bad span is refused whole.
+fn check_spans(text: &str, spans: &[crate::document::SpanStyle]) -> Result<()> {
+    let count = text.chars().count();
+    let mut sorted: Vec<&std::ops::Range<usize>> = spans.iter().map(|s| &s.chars).collect();
+    sorted.sort_by_key(|r| r.start);
+    for (i, span) in sorted.iter().enumerate() {
+        if span.start >= span.end || span.end > count {
+            return Err(PdfError::InvalidArgument(format!(
+                "a span of characters {}..{} does not fit a line of {count} characters",
+                span.start, span.end
+            )));
+        }
+        if let Some(next) = sorted.get(i + 1) {
+            if next.start < span.end {
+                return Err(PdfError::InvalidArgument(format!(
+                    "spans {}..{} and {}..{} overlap",
+                    span.start, span.end, next.start, next.end
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// What is left of a show-text operator once it shows nothing.
@@ -15458,11 +16491,150 @@ impl PdfiumDocument {
             restore,
             frame,
             frame_width,
+            scale_x,
+            more,
+            rules,
             ..
         } = annotation
         else {
             return Err(PdfError::InvalidArgument("not a text annotation".into()));
         };
+
+        // The mark's own fields are its first part; `more` holds the rest, each in
+        // its own look. The restore blob describes the whole mark, so it goes on
+        // the very first object only.
+        let first = crate::document::TextPart {
+            font: font.clone(),
+            font_asset: font_asset.clone(),
+            size: *size,
+            color: *color,
+            glyphs: glyphs.clone(),
+            scale_x: *scale_x,
+        };
+        let parts: Vec<&crate::document::TextPart> = std::iter::once(&first).chain(more).collect();
+        let bindings = pdfium()?.bindings();
+        let document = self.document.handle();
+
+        // **One subset per face, however many parts draw in it.** PDFium names a
+        // page's fonts by their BaseFont as it writes the content, so a subset per part
+        // put two fonts of one name on the page and the second part's glyph ids were
+        // read through the first's: a styled box's "there" came back as letters of
+        // "Hello".
+        let mut fonts: Vec<(&str, FPDF_FONT, Vec<u32>)> = Vec::new();
+        for name in parts.iter().filter_map(|p| p.font_asset.as_deref()) {
+            if fonts.iter().any(|(face, ..)| *face == name) {
+                continue;
+            }
+            let glyphs: Vec<Glyph> =
+                parts.iter().filter(|p| p.font_asset.as_deref() == Some(name)).flat_map(|p| p.glyphs.iter().cloned()).collect();
+            // Safety: the document handle is live for the call.
+            let (handle, ids) = unsafe { load_embedded_font(bindings, document, name, &glyphs)? };
+            fonts.push((name, handle, ids));
+        }
+        let mut taken = vec![0usize; fonts.len()];
+        for (index, part) in parts.iter().enumerate() {
+            let embedded = part.font_asset.as_deref().map(|name| {
+                let at = fonts.iter().position(|(face, ..)| *face == name).expect("every face is loaded above");
+                let from = taken[at];
+                taken[at] += part.glyphs.len();
+                (fonts[at].1, &fonts[at].2[from..taken[at]])
+            });
+            self.write_text_part(page, part, embedded, *id, (index == 0).then_some(restore.as_str()))?;
+        }
+
+        let space = page.space()?;
+
+        // Safety: the document and page handles are live for the call, and every
+        // object created is either inserted into the page or the call fails.
+        unsafe {
+            // The lines under or through the words: page content like the letters,
+            // tagged with the same id, so undoing or erasing the mark takes them too.
+            for rule in rules {
+                let from = space.to_pdf(rule.from.x, rule.from.y);
+                let to = space.to_pdf(rule.to.x, rule.to.y);
+                let path = bindings.FPDFPageObj_CreateNewPath(from.0, from.1);
+                if path.is_null() {
+                    return Err(PdfError::Pdfium("could not create a line".into()));
+                }
+                bindings.FPDFPath_LineTo(path, to.0, to.1);
+                bindings.FPDFPageObj_SetStrokeColor(
+                    path,
+                    rule.color.r as c_uint,
+                    rule.color.g as c_uint,
+                    rule.color.b as c_uint,
+                    rule.color.a as c_uint,
+                );
+                bindings.FPDFPageObj_SetStrokeWidth(path, rule.width.max(0.1));
+                // Butt ends: the line stops where the words do.
+                bindings.FPDFPageObj_SetLineCap(path, 0);
+                bindings.FPDFPath_SetDrawMode(path, 0, 1);
+                let mark = bindings.FPDFPageObj_AddMark(path, TEXT_MARK_NAME);
+                if mark.is_null() {
+                    return Err(PdfError::Pdfium("could not tag a line".into()));
+                }
+                bindings.FPDFPageObjMark_SetIntParam(document, path, mark, TEXT_MARK_ID, *id);
+                bindings.FPDFPage_InsertObject(page.handle, path);
+            }
+
+            // The ring around the words, if there is one. Page content like the
+            // letters and tagged with the same id, so erasing the caption takes
+            // both — as a separate annotation it came apart the moment the file
+            // was reopened.
+            if frame.len() >= 2 {
+                let path = bindings.FPDFPageObj_CreateNewPath(
+                    space.to_pdf(frame[0].x, frame[0].y).0,
+                    space.to_pdf(frame[0].x, frame[0].y).1,
+                );
+                if path.is_null() {
+                    return Err(PdfError::Pdfium("could not create the frame path".into()));
+                }
+                for point in &frame[1..] {
+                    let placed = space.to_pdf(point.x, point.y);
+                    bindings.FPDFPath_LineTo(path, placed.0, placed.1);
+                }
+                bindings.FPDFPath_Close(path);
+                bindings.FPDFPageObj_SetStrokeColor(
+                    path,
+                    color.r as c_uint,
+                    color.g as c_uint,
+                    color.b as c_uint,
+                    color.a as c_uint,
+                );
+                bindings.FPDFPageObj_SetStrokeWidth(path, frame_width.max(0.1));
+                bindings.FPDFPath_SetDrawMode(path, 0, 1);
+
+                let mark = bindings.FPDFPageObj_AddMark(path, TEXT_MARK_NAME);
+                if mark.is_null() {
+                    return Err(PdfError::Pdfium("could not tag the frame".into()));
+                }
+                bindings.FPDFPageObjMark_SetIntParam(document, path, mark, TEXT_MARK_ID, *id);
+                bindings.FPDFPage_InsertObject(page.handle, path);
+            }
+
+            if bindings.FPDFPage_GenerateContent(page.handle) == 0 {
+                return Err(PdfError::Pdfium(
+                    "text was written but the page content was not regenerated".into(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// One part of a text mark — its glyphs in its own font, size, colour and
+    /// width — tagged with the mark's `id`; `restore` goes on its first object.
+    /// `embedded` is the subset its face was loaded as, with the part's own glyph
+    /// ids in it; `None` writes a standard-14 font by character.
+    fn write_text_part(
+        &self,
+        page: &RawPage,
+        part: &crate::document::TextPart,
+        embedded: Option<(FPDF_FONT, &[u32])>,
+        id: i32,
+        restore: Option<&str>,
+    ) -> Result<()> {
+        let crate::document::TextPart { font, size, color, glyphs, scale_x, .. } = part;
+        let id = &id;
 
         let bindings = pdfium()?.bindings();
         let space = page.space()?;
@@ -15479,15 +16651,12 @@ impl PdfiumDocument {
             // file that goes into the document, addressed by glyph id, which is
             // the only way to write a form that has no character of its own: a
             // joined Arabic letter, a Devanagari conjunct, a ligature.
-            let embedded = match font_asset {
-                Some(name) => Some(load_embedded_font(bindings, document, name, glyphs)?),
-                None => None,
-            };
+            //
             // The ids as they are *in the subset*, which is what has to be
             // written: subsetting renumbers everything that survives.
-            let written_ids = embedded.as_ref().map(|(_, ids)| ids.clone());
-            let loaded = match &embedded {
-                Some((handle, _)) => *handle,
+            let written_ids = embedded.map(|(_, ids)| ids);
+            let loaded = match embedded {
+                Some((handle, _)) => handle,
                 None => {
                     let handle = bindings.FPDFText_LoadStandardFont(document, font);
                     if handle.is_null() {
@@ -15538,10 +16707,13 @@ impl PdfiumDocument {
                 // page while still looking right in the app.
                 let placed = space.to_pdf(glyph.x, glyph.y);
                 let (sin, cos) = (-glyph.radians).sin_cos();
+                // The part's width: each glyph squeezed or stretched along its own
+                // line before it is turned — `(s·cos, s·sin, −sin, cos)`.
+                let s = *scale_x;
                 bindings.FPDFPageObj_Transform(
                     object,
-                    cos as f64,
-                    sin as f64,
+                    (s * cos) as f64,
+                    (s * sin) as f64,
                     -sin as f64,
                     cos as f64,
                     placed.0 as f64,
@@ -15559,7 +16731,7 @@ impl PdfiumDocument {
                 bindings.FPDFPageObjMark_SetIntParam(document, object, mark, TEXT_MARK_ID, *id);
                 // Only on the first: the blob describes the whole caption, and a
                 // copy of it on every letter would bloat the file for nothing.
-                if first {
+                if let (true, Some(restore)) = (first, restore) {
                     bindings.FPDFPageObjMark_SetStringParam(
                         document,
                         object,
@@ -15567,51 +16739,10 @@ impl PdfiumDocument {
                         TEXT_MARK_RESTORE,
                         restore,
                     );
-                    first = false;
                 }
+                first = false;
 
                 bindings.FPDFPage_InsertObject(page.handle, object);
-            }
-
-            // The ring around the words, if there is one. Page content like the
-            // letters and tagged with the same id, so erasing the caption takes
-            // both — as a separate annotation it came apart the moment the file
-            // was reopened.
-            if frame.len() >= 2 {
-                let path = bindings.FPDFPageObj_CreateNewPath(
-                    space.to_pdf(frame[0].x, frame[0].y).0,
-                    space.to_pdf(frame[0].x, frame[0].y).1,
-                );
-                if path.is_null() {
-                    return Err(PdfError::Pdfium("could not create the frame path".into()));
-                }
-                for point in &frame[1..] {
-                    let placed = space.to_pdf(point.x, point.y);
-                    bindings.FPDFPath_LineTo(path, placed.0, placed.1);
-                }
-                bindings.FPDFPath_Close(path);
-                bindings.FPDFPageObj_SetStrokeColor(
-                    path,
-                    color.r as c_uint,
-                    color.g as c_uint,
-                    color.b as c_uint,
-                    color.a as c_uint,
-                );
-                bindings.FPDFPageObj_SetStrokeWidth(path, frame_width.max(0.1));
-                bindings.FPDFPath_SetDrawMode(path, 0, 1);
-
-                let mark = bindings.FPDFPageObj_AddMark(path, TEXT_MARK_NAME);
-                if mark.is_null() {
-                    return Err(PdfError::Pdfium("could not tag the frame".into()));
-                }
-                bindings.FPDFPageObjMark_SetIntParam(document, path, mark, TEXT_MARK_ID, *id);
-                bindings.FPDFPage_InsertObject(page.handle, path);
-            }
-
-            if bindings.FPDFPage_GenerateContent(page.handle) == 0 {
-                return Err(PdfError::Pdfium(
-                    "text was written but the page content was not regenerated".into(),
-                ));
             }
         }
 

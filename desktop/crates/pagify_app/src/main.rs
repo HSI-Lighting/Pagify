@@ -29,6 +29,7 @@ mod edit;
 mod panels;
 mod picking;
 mod tool;
+mod rich_preview;
 #[cfg(test)]
 mod edit_text_hardening_tests;
 #[cfg(test)]
@@ -61,10 +62,11 @@ use pagify_shell::recent::Recent;
 use pagify_shell::tools::{self, SnapSet};
 use pagify_shell::verbs::{self, MeasureKind, PageTarget, SignatureAction, Verb, ZoomTarget};
 use pagify_shell::{PageRaster, Session};
+use pagify_shell::line_styles::{in_place_pieces, line_ranges, line_spans, range_looks_differ};
 use pagify_shell::paragraph_lines::{
-    asks_for_width, check_lines_up, commands_for, count_of, ends_at_one_margin, line_edits,
-    paragraph_applied_message, plan_log_line, plan_paragraph_edit, recolour_targets, removed_pieces,
-    STRETCH_JUSTIFIED_LINES,
+    asks_for_width, check_lines_up, commands_for, count_of, ends_at_one_margin, line_edits_with,
+    paragraph_applied_message, plan_log_line, plan_paragraph_edit, plan_paragraph_edit_with, recolour_targets,
+    removed_pieces, LineSpans, STRETCH_JUSTIFIED_LINES,
 };
 use pdf_core::document::Color;
 use pdf_core::error::PdfError;
@@ -1053,6 +1055,14 @@ struct FacesState {
     /// A face asked for and not yet installed, handed to `install_fonts` at the
     /// top of the next frame.
     pending_face: Option<Vec<u8>>,
+    /// The Edit Text box's face as last installed — handed to every later install
+    /// too, since `set_fonts` replaces the lot and a box's faces installed without
+    /// it would leave the next editor drawing in a family nothing is bound to.
+    installed_run_face: Option<Vec<u8>>,
+    /// The faces a new text box's runs are drawn in, as installed with egui…
+    box_faces: std::collections::BTreeSet<String>,
+    /// …and those of them usable this frame: installed on an earlier one.
+    box_faces_ready: std::collections::BTreeSet<String>,
     /// Words somebody typed that an editor is being let go of without applying —
     /// the engine refused them, or the page changed under the box — to be put on
     /// the clipboard, so that the typing is never simply lost. Said at the next
@@ -1916,6 +1926,50 @@ struct EditingRun {
     /// is picked ([`PagifyApp::paragraph_is_justified`]). Always `false` for a run
     /// and for drawn words.
     justify: bool,
+    /// **The look of every character of the box**, seeded from the page: what each
+    /// piece is drawn with (size, colour, font, spacing, rise, a line of ours under
+    /// it), so the box opens showing the page as it is. Kept equal to [`Self::buffer`]
+    /// as it is typed (`RichText::edit`). Drawn lettering has one look for all of it.
+    rich: pagify_shell::rich_text::RichText,
+    /// [`Self::rich`] as it was opened: what Apply compares against to know which
+    /// characters were restyled.
+    picked: pagify_shell::rich_text::RichText,
+    /// The characters selected in the box, kept while it has the focus.
+    selection: std::ops::Range<usize>,
+    /// Whether any character has been styled one by one. While it has not (and the box
+    /// opened with every line in one look), Apply sends what it always sent.
+    styled: bool,
+    /// Each line's first piece's look — the look a line written again is drawn in
+    /// wherever its characters say nothing else.
+    line_base: Vec<pagify_shell::rich_text::CharLook>,
+    /// For each character of [`Self::picked`] (newlines included): the piece that
+    /// drew it and its index in that piece's exact text. `None` for a newline, a
+    /// hyphen the box added, and a line the page draws as shapes.
+    box_chars: Vec<Option<(usize, usize)>>,
+    /// Each piece's words as the page draws them: what a piece restyled in place is
+    /// written again with.
+    piece_texts: std::collections::HashMap<usize, String>,
+    /// For each page font in the box, the first piece drawn in it: what a character
+    /// in that font is written "like".
+    font_objects: std::collections::HashMap<u32, usize>,
+}
+
+impl EditingRun {
+    /// Whether Apply writes this box through its characters' looks: some were styled
+    /// one by one, or a line of it opened with more than one look (which a retype of
+    /// that line would flatten into its first piece's). Drawn lettering has one look.
+    fn uses_looks(&self) -> bool {
+        !self.drawn
+            && (self.styled
+                || line_ranges(self.picked.text()).iter().any(|line| self.picked.spans(line.clone()).len() > 1))
+    }
+
+    /// Whether the characters look different from how the box opened — the same words.
+    fn looks_changed(&self) -> bool {
+        let mut now = self.rich.clone();
+        now.edit(&self.buffer);
+        pagify_shell::line_styles::looks_differ(&now, &self.picked)
+    }
 }
 
 /// Runs a person declared one paragraph by hand — see [`DocTab::joined_groups`].
@@ -1985,6 +2039,20 @@ enum TextAlign {
     Right,
 }
 
+impl From<TextAlign> for pagify_shell::text_layout::RowAlign {
+    fn from(align: TextAlign) -> Self {
+        use pagify_shell::text_layout::RowAlign;
+        match align {
+            TextAlign::Left => RowAlign::Left,
+            TextAlign::Center => RowAlign::Center,
+            TextAlign::Right => RowAlign::Right,
+        }
+    }
+}
+
+/// The new text box's margin, in screen points, between its edge and its words.
+const BOX_MARGIN_PX: i8 = 2;
+
 /// Text being composed for a brand new spot on the page — the click-and-drag
 /// box `addtext` (bare) arms, as opposed to [`EditingRun`], which is always
 /// an *existing* run already in the page's content.
@@ -1999,16 +2067,111 @@ struct NewTextBox {
     /// The dragged box, in page/app space — the width wraps the typing, and
     /// [`Self::align`] decides where each wrapped line sits inside it.
     rect: pdf_core::document::Rect,
+    /// What the box's text field edits; [`Self::rich`] is brought up to it every
+    /// frame, so the looks follow the typing.
     buffer: String,
-    size: f32,
-    color: pdf_core::document::Color,
-    /// An explicit pick from the same font picker a run's own edit uses —
-    /// see [`PagifyApp::draw_font_picker`]. `None` writes in the base
-    /// Helvetica `write_text_at` already uses for a single click.
-    face: Option<String>,
+    /// The words and the look of each character — what the Text Style panel
+    /// changes, the preview draws and Add to Page writes.
+    rich: pagify_shell::rich_text::RichText,
+    /// The characters the panel acts on: the box's selection, kept from the last
+    /// frame the box had the focus — a click on the panel takes the focus away,
+    /// and egui lets go of a text field's selection when it loses it.
+    selection: std::ops::Range<usize>,
     align: TextAlign,
     /// Focus is asked for once — see [`EditingRun::focused`].
     focused: bool,
+    /// The width, in screen points, the box's text field last wrapped its words to
+    /// — egui's to decide, so Add to Page lays them out again at the very same width.
+    /// Unbounded until the box is first drawn, which is before anything can add it.
+    wrap_px: f32,
+}
+
+impl NewTextBox {
+    /// The size the box's typing starts at — its first character's.
+    fn size(&self) -> f32 {
+        self.rich.look_at(0).size
+    }
+}
+
+/// Whether the characters of the Edit Text box are drawn one by one from the model: more
+/// than one look among them, or one that is decorated, spaced, raised or scripted. A box
+/// whose characters share a plain look is drawn from the box's own style, as it always was.
+fn looks_matter(rich: &pagify_shell::rich_text::RichText) -> bool {
+    let runs = rich.runs();
+    runs.len() > 1
+        || runs.first().is_some_and(|(_, look)| {
+            look.underline
+                || look.strike
+                || look.script != pagify_shell::rich_text::Script::Normal
+                || look.letter_spacing_pt != 0.0
+                || (look.width_pct - 100.0).abs() > 0.01
+                || look.baseline_pt != 0.0
+        })
+}
+
+/// The largest size, in points, any character of `rich` is drawn at (a script's
+/// reduction in) — what the box is as tall as. `None` for a box with no characters.
+fn largest_drawn_size(rich: &pagify_shell::rich_text::RichText) -> Option<f32> {
+    use pagify_shell::rich_text::Script;
+    (rich.char_count() > 0)
+        .then(|| {
+            rich.runs()
+                .iter()
+                .map(|(_, look)| if look.script == Script::Normal { look.size } else { look.size * pagify_shell::text_layout::SCRIPT_SCALE })
+                .fold(0.0f32, f32::max)
+        })
+        .filter(|size| *size > 0.0)
+}
+
+/// The selection's spans and their faces — every character's when `range` is
+/// empty, and the typing look's alone when the box is.
+fn box_spans(rich: &pagify_shell::rich_text::RichText, range: &std::ops::Range<usize>) -> Vec<(std::ops::Range<usize>, String)> {
+    let whole = if range.is_empty() { 0..rich.char_count() } else { range.clone() };
+    let spans: Vec<_> = rich.spans(whole).into_iter().map(|(span, look)| (span, look.face.clone())).collect();
+    if spans.is_empty() {
+        vec![(0..0, rich.look_at(0).face.clone())]
+    } else {
+        spans
+    }
+}
+
+/// `text` as `shaped` set it, from `origin` (the left end of its baseline): the pen
+/// moves on by `advances` (points, one per glyph), a glyph's own offset is scaled by
+/// `size` and, across, by `scale_x`, and each glyph carries the letters it draws.
+///
+/// A space the face has no glyph for — a pasted tab, in most faces — keeps its gap
+/// but is not written: glyph 0 draws an empty rectangle.
+fn place_glyphs(
+    shaped: &pdf_core::text::ShapedText,
+    text: &str,
+    origin: (f32, f32),
+    size: f32,
+    scale_x: f32,
+    advances: &[f32],
+) -> Vec<pdf_core::document::Glyph> {
+    let mut boundaries: Vec<usize> = shaped.glyphs.iter().map(|g| g.cluster as usize).collect();
+    boundaries.sort_unstable();
+    boundaries.dedup();
+    let mut pen = origin.0;
+    shaped
+        .glyphs
+        .iter()
+        .zip(advances)
+        .filter_map(|(glyph, advance)| {
+            let from = (glyph.cluster as usize).min(text.len());
+            let to = boundaries.iter().find(|&&b| b > from).copied().unwrap_or(text.len()).min(text.len());
+            let ch = text.get(from..to).unwrap_or_default();
+            let placed = pdf_core::document::Glyph {
+                ch: ch.to_string(),
+                id: glyph.id,
+                x: pen + glyph.offset_x * size * scale_x,
+                y: origin.1 - glyph.offset_y * size,
+                radians: 0.0,
+            };
+            pen += advance;
+            (glyph.id != 0 || !ch.chars().all(char::is_whitespace)).then_some(placed)
+        })
+        .collect()
 }
 
 /// What the reader has done to the box open round a run, by dragging the
@@ -2665,7 +2828,7 @@ const RUN_FAMILY: &str = "pagify-run-face";
 /// **One function rather than two calls**, because `set_fonts` replaces the lot:
 /// installing a document's face separately would take the ribbon's icons out
 /// with it, and the ribbon would then draw in a family nothing is bound to.
-fn install_fonts(ctx: &egui::Context, run_face: Option<Vec<u8>>) {
+fn install_fonts(ctx: &egui::Context, run_face: Option<Vec<u8>>, faces: &[(String, std::sync::Arc<Vec<u8>>)]) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
         ICON_FAMILY.to_owned(),
@@ -2699,11 +2862,19 @@ fn install_fonts(ctx: &egui::Context, run_face: Option<Vec<u8>>) {
             vec![RUN_FAMILY.to_owned(), "Ubuntu-Light".to_owned()],
         );
     }
+
+    // A new text box's faces, each in a family of its own (`rich_preview::face_family`),
+    // falling back to the program's face for a character one lacks.
+    for (name, bytes) in faces {
+        let family = rich_preview::face_family(name);
+        fonts.font_data.insert(family.clone(), std::sync::Arc::new(egui::FontData::from_owned(bytes.as_ref().clone())));
+        fonts.families.insert(egui::FontFamily::Name(family.clone().into()), vec![family, "Ubuntu-Light".to_owned()]);
+    }
     ctx.set_fonts(fonts);
 }
 
 fn install_icons(ctx: &egui::Context) {
-    install_fonts(ctx, None);
+    install_fonts(ctx, None, &[]);
 }
 
 fn icon_font(size: f32) -> egui::FontId {
@@ -2989,9 +3160,43 @@ impl PagifyApp {
         // the frame after it was asked for — and marked usable only on the
         // frame after *that*, when egui has rebuilt its atlas. Drawing in a
         // family that does not exist yet panics; see `install_fonts`.
-        if let Some(face) = self.faces_state.pending_face.take() {
-            install_fonts(&ctx, Some(face));
-        } else if self.faces_state.editor_face.is_some() {
+        //
+        // **A new text box's faces the same way**, and in the same call: `set_fonts`
+        // replaces the lot, so every install carries the Edit Text face and every
+        // box face already installed, and neither kind can unbind the other.
+        let run_face = self.faces_state.pending_face.take();
+        let installing_run_face = run_face.is_some();
+        let ready = self.faces_state.box_faces.clone();
+        let mut wanted: std::collections::BTreeSet<String> = self
+            .tab()
+            .edit
+            .new_text_box
+            .as_ref()
+            .map(|b| b.rich.runs().iter().map(|(_, look)| look.face.clone()).collect())
+            .unwrap_or_default();
+        // The faces typed into the Edit Text box too — not the page's own, which its box
+        // draws in the page's face.
+        if let Some(e) = self.tab().edit.editing_run.as_ref() {
+            wanted.extend(e.rich.runs().iter().filter(|(_, look)| look.page_font.is_none()).map(|(_, look)| look.face.clone()));
+        }
+        // A face `pdf_core::text` cannot hand over is never installed, and is not
+        // asked for again on every frame.
+        let wanted: std::collections::BTreeSet<String> =
+            wanted.into_iter().filter(|face| pdf_core::text::font_data(face).is_ok()).collect();
+        if installing_run_face || !wanted.is_subset(&ready) {
+            if let Some(face) = &run_face {
+                self.faces_state.installed_run_face = Some(face.clone());
+            }
+            let all: std::collections::BTreeSet<String> = ready.union(&wanted).cloned().collect();
+            let bytes: Vec<(String, std::sync::Arc<Vec<u8>>)> = all
+                .iter()
+                .filter_map(|face| pdf_core::text::font_data(face).ok().map(|data| (face.clone(), data)))
+                .collect();
+            install_fonts(&ctx, self.faces_state.installed_run_face.clone(), &bytes);
+            self.faces_state.box_faces = all;
+        }
+        self.faces_state.box_faces_ready = ready;
+        if !installing_run_face && self.faces_state.editor_face.is_some() {
             self.faces_state.editor_face_ready = true;
         }
 
@@ -4326,7 +4531,7 @@ impl PagifyApp {
                 pagify_shell::outlined_fonts::OutlinedFonts::default()
             } else {
                 pagify_shell::outlined_fonts::OutlinedFonts::load()
-            }, editor_face: None, editor_face_ready: false, editor_face_metrics: None, editor_face_coverage: None, pending_face: None, text_to_offer: None, face_cache: FaceCache::default(), system_fonts: None, font_picker_open: false, font_picker_filter: String::new(), },
+            }, editor_face: None, editor_face_ready: false, editor_face_metrics: None, editor_face_coverage: None, pending_face: None, installed_run_face: None, box_faces: Default::default(), box_faces_ready: Default::default(), text_to_offer: None, face_cache: FaceCache::default(), system_fonts: None, font_picker_open: false, font_picker_filter: String::new(), },
             update_state: UpdateState { update_check: None, update_available: None, update_report: None },
             tabs: vec![DocTab::new()],
             active_tab: 0,
@@ -12626,6 +12831,19 @@ impl PagifyApp {
             })
             .cloned()?;
         let placed = found.placement()?;
+        // No font of its own: named by the face its replacement is written in —
+        // the first that can spell the word, as `replace_outlined_word` chooses.
+        let written_in = self
+            .writing_faces()
+            .into_iter()
+            .find(|name| pdf_core::text::covers(name, &found.text))
+            .unwrap_or_else(|| "Helvetica".into());
+        // One look for all of it: drawn lettering is replaced in one look.
+        let looks = pagify_shell::line_styles::open_looks(
+            &[],
+            &found.text,
+            &pagify_shell::rich_text::CharLook::plain(written_in.clone(), placed.size, [20, 20, 20, 255]),
+        );
 
         self.tab_mut().edit.editing_run = Some(EditingRun {
             page,
@@ -12648,12 +12866,20 @@ impl PagifyApp {
                 face: None,
             },
             was: pdf_core::document::TextStyle::default(),
-            current_face: None,
+            current_face: Some(written_in),
             background: self.page_behind(page, found.rect, pdf_core::document::Color { r: 20, g: 20, b: 20, a: 255 }),
             drawn: true,
             focused: false,
             box_resize: RunBox::default(),
             justify: false,
+            picked: looks.rich.clone(),
+            rich: looks.rich,
+            selection: 0..0,
+            styled: false,
+            line_base: looks.line_base,
+            box_chars: looks.box_chars,
+            piece_texts: looks.piece_texts,
+            font_objects: looks.font_objects,
         });
         Some(
             "these words are drawn, not written — type converted to outlines. \
@@ -12986,7 +13212,8 @@ impl PagifyApp {
         let changed_look = pdf_core::document::TextStyle { face: None, ..edit.style.clone() }
             != pdf_core::document::TextStyle { face: None, ..edit.was.clone() };
         let picked_font = edit.style.face.is_some();
-        !(typed == edit.original.trim() && !changed_look && !picked_font)
+        let looks = edit.uses_looks() && edit.looks_changed();
+        !(typed == edit.original.trim() && !changed_look && !picked_font && !looks)
     }
 
     /// One `SetTextRun` per object per line, exactly the shape
@@ -13074,17 +13301,66 @@ impl PagifyApp {
         let n = edit.lines.len();
         let new_lines: Vec<&str> = typed.split('\n').collect();
 
+        // **Written through the characters' looks, or as it always was.** A box whose
+        // characters were styled one by one, or that opened with a line of more than
+        // one look, says what every character looks like (`rich`), and that is what is
+        // written: a size, a font or a colour for the whole box is already in it. Any
+        // other box sends exactly the commands it always sent.
+        let looked = edit.uses_looks() && edit.picked.text() == edit.original;
+        let mut rich = edit.rich.clone();
+        rich.edit(typed);
+        if looked {
+            // A size, colour or font set on the box itself — not through the panel, which
+            // sets the characters too — is every character's.
+            use pagify_shell::rich_text::{CharChange, Mixed};
+            let all = 0..rich.char_count();
+            let mut now = CharChange::default();
+            if let Some(c) = edit.style.color.filter(|c| Some(*c) != edit.was.color) {
+                if !matches!(rich.look_of(all.clone()).color, Mixed::One([r, g, b, _]) if [r, g, b] == [c.r, c.g, c.b]) {
+                    now.color = Some([c.r, c.g, c.b, 255]);
+                }
+            }
+            if let Some(size) = edit.style.size.filter(|s| Some(*s) != edit.was.size) {
+                if rich.look_of(all.clone()).size != Mixed::One(size) {
+                    now.size = Some(size);
+                }
+            }
+            if let Some(face) = edit.style.face.as_ref() {
+                if rich.look_of(all.clone()).face != Mixed::One(face.clone()) {
+                    now.face = Some(face.clone());
+                }
+            }
+            if now != CharChange::default() {
+                rich.set_char(all, &now);
+            }
+        }
+        let (orig_ranges, typed_ranges) = (line_ranges(edit.picked.text()), line_ranges(typed));
+
         // The font and the size travel on every retyped line; a colour and a
         // position never do — see `paragraph_lines::line_edits`.
-        let style = pdf_core::document::TextStyle {
-            face: edit.style.face.clone(),
-            size: (edit.style.size != edit.was.size).then_some(edit.style.size).flatten(),
-            ..Default::default()
+        let style = if looked {
+            pdf_core::document::TextStyle::default()
+        } else {
+            pdf_core::document::TextStyle {
+                face: edit.style.face.clone(),
+                size: (edit.style.size != edit.was.size).then_some(edit.style.size).flatten(),
+                ..Default::default()
+            }
         };
         // A new size or font has to reach every line, so none may be passed
         // over as unchanged.
         let restyle = style.face.is_some() || style.size.is_some();
-        let plan = plan_paragraph_edit(&original_lines, &edit.frozen, &new_lines, restyle);
+        // A line that says what it said is written all the same where its characters
+        // do not look as they did.
+        let looks_differ = |i: usize, j: usize| match (orig_ranges.get(i), typed_ranges.get(j)) {
+            (Some(was), Some(now)) => range_looks_differ(&rich, now.clone(), &edit.picked, was.clone()),
+            _ => false,
+        };
+        let plan = if looked {
+            plan_paragraph_edit_with(&original_lines, &edit.frozen, &new_lines, &looks_differ)
+        } else {
+            plan_paragraph_edit(&original_lines, &edit.frozen, &new_lines, restyle)
+        };
 
         // **The paragraph's own words, for the colour edits only.** A colour is
         // written as the object's current words with a new colour (the engine's
@@ -13093,7 +13369,8 @@ impl PagifyApp {
         // at all unless a colour was asked for: the replace itself names objects,
         // never words.
         let mut recolour = Vec::new();
-        if let Some(color) = (edit.style.color != edit.was.color).then_some(edit.style.color).flatten() {
+        // (Written through the looks, the colour travels in the spans.)
+        if let Some(color) = (!looked && edit.style.color != edit.was.color).then_some(edit.style.color).flatten() {
             let targets = recolour_targets(&plan.fates, &edit.lines);
             let wanted: std::collections::HashSet<usize> = targets.iter().copied().collect();
             let current_text = if wanted.is_empty() {
@@ -13121,8 +13398,39 @@ impl PagifyApp {
         // had — the editor's own test for drawing it justified, and that its
         // lines end at one margin (left-aligned text starts at one margin too).
         let justified = stretch && edit.justify;
-        let commands =
-            commands_for(edit.page, recolour, line_edits(&plan.fates, &edit.lines, &edit.twins, &style, justified));
+        // How the looks of a written line reach the page. A line whose words are its own
+        // is written piece by piece, in place, where its looks changed — the spacing the
+        // producer set is kept — unless it has twins, which only a retype takes off. A
+        // line retyped is written as a whole with the characters that are not in its own look.
+        let spans_for = |i: usize| -> LineSpans {
+            let whole = |ranges: Option<&std::ops::Range<usize>>| {
+                let base = edit.line_base.get(i).cloned().unwrap_or_else(|| rich.look_at(0).clone());
+                LineSpans::Whole(ranges.map_or_else(Vec::new, |now| line_spans(&rich, now.clone(), &base, &edit.font_objects)))
+            };
+            let Some(j) = looked.then(|| plan.typed_index.get(i).copied().flatten()).flatten() else {
+                return LineSpans::Whole(Vec::new());
+            };
+            let has_twins = edit.twins.get(i).is_some_and(|twins| !twins.is_empty());
+            if new_lines[j] == original_lines[i] && !has_twins {
+                LineSpans::InPlace(in_place_pieces(
+                    &edit.lines[i].0,
+                    &rich,
+                    typed_ranges[j].start,
+                    &edit.picked,
+                    orig_ranges[i].clone(),
+                    &edit.box_chars,
+                    &edit.piece_texts,
+                    &edit.font_objects,
+                ))
+            } else {
+                whole(typed_ranges.get(j))
+            }
+        };
+        let commands = commands_for(
+            edit.page,
+            recolour,
+            line_edits_with(&plan.fates, &edit.lines, &edit.twins, &style, justified, &spans_for),
+        );
 
         // Surplus typed lines in the touched middle with no original line
         // left to hold them — same shape as text typed past the paragraph's
@@ -13235,6 +13543,9 @@ impl PagifyApp {
                     restore: String::new(),
                     frame: Vec::new(),
                     frame_width: 0.0,
+                    scale_x: 1.0,
+                    more: Vec::new(),
+                    rules: Vec::new(),
                 },
             })
             .map_err(|e| format!("{e}"))?;
@@ -13296,16 +13607,17 @@ impl PagifyApp {
         // either direction — then the size follows the box down instead of
         // the box being refused for not fitting a size nobody asked for.
         let size = (rect.right - rect.left).min(rect.bottom - rect.top).min(14.0);
+        let face = self.default_box_face();
 
         self.tab_mut().edit.new_text_box = Some(NewTextBox {
             page,
             rect,
             buffer: String::new(),
-            size,
-            color: pdf_core::document::Color { r: 20, g: 20, b: 20, a: 255 },
-            face: None,
+            rich: pagify_shell::rich_text::RichText::new(pagify_shell::rich_text::CharLook::plain(face, size, [20, 20, 20, 255])),
+            selection: 0..0,
             align: TextAlign::Left,
             focused: false,
+            wrap_px: f32::INFINITY,
         });
         Ok("type into the box — the panel on the right sets its look, and Add to Page adds it to the page.".into())
     }
@@ -13375,31 +13687,8 @@ impl PagifyApp {
             Some(name) => {
                 let shaped = pdf_core::text::shape(name, text)
                     .map_err(|e| format!("{name} could not set those words — {e}"))?;
-                let mut boundaries: Vec<usize> =
-                    shaped.glyphs.iter().map(|g| g.cluster as usize).collect();
-                boundaries.sort_unstable();
-                boundaries.dedup();
-
-                let mut pen = origin.0;
-                let mut placed = Vec::with_capacity(shaped.glyphs.len());
-                for glyph in &shaped.glyphs {
-                    let from = (glyph.cluster as usize).min(text.len());
-                    let to = boundaries
-                        .iter()
-                        .find(|&&b| b > from)
-                        .copied()
-                        .unwrap_or(text.len())
-                        .min(text.len());
-                    placed.push(Glyph {
-                        ch: text.get(from..to).unwrap_or_default().to_string(),
-                        id: glyph.id,
-                        x: pen + glyph.offset_x * size * track,
-                        y: origin.1 - glyph.offset_y * size,
-                        radians: 0.0,
-                    });
-                    pen += glyph.advance * size * track;
-                }
-                (name.to_string(), Some(name.to_string()), placed)
+                let advances: Vec<f32> = shaped.glyphs.iter().map(|g| g.advance * size * track).collect();
+                (name.to_string(), Some(name.to_string()), place_glyphs(&shaped, text, origin, size, track, &advances))
             }
             None => (
                 "Helvetica".to_string(),
@@ -13423,106 +13712,162 @@ impl PagifyApp {
                 restore: String::new(),
                 frame: Vec::new(),
                 frame_width: 0.0,
+                scale_x: 1.0,
+                more: Vec::new(),
+                rules: Vec::new(),
             },
         }, swapped))
     }
 
-    /// Turn [`Self::new_text_box`]'s typed buffer into real page content,
-    /// one line per row it wrapped to on screen.
+    /// Turn [`Self::new_text_box`] into real page content: **one mark** for the whole
+    /// box — each run in its own look, and every row's underlines and strike-throughs
+    /// — so one undo takes it all off again.
     ///
-    /// The wrap is *reproduced* here rather than read back from the widget
-    /// that drew it — laying the same text out again, at the same width and
-    /// size, gives the exact rows `egui::TextEdit` showed while it was
-    /// being typed (see `LayoutJob`'s own wrapping, which is what the
-    /// widget uses internally too), so what lands on the page is what was
-    /// seen in the box.
+    /// The rows are the ones the box showed: its words laid out again exactly as its
+    /// text field laid them out (`rich_preview::box_job`, at the width it wrapped to),
+    /// each row on the baseline of its largest letter. Along a row each run is then
+    /// measured in its own face (`place_rows`), so what lands on the page is what was
+    /// seen in the box. A box that cannot be written is left open, its words kept.
     fn apply_new_text_box(&mut self, ui: &egui::Ui) {
-        let Some(new_text) = self.tab_mut().edit.new_text_box.take() else { return };
-        let typed = new_text.buffer.trim();
-        if typed.is_empty() {
+        let Some(mut new_text) = self.tab_mut().edit.new_text_box.take() else { return };
+        new_text.rich.edit(&new_text.buffer);
+        if new_text.buffer.trim().is_empty() {
             self.say_info("nothing typed — the box was left empty.");
             return;
         }
         let page = new_text.page;
-        // Page points per screen pixel at the moment Add to Page was
-        // pressed — the same conversion the box itself was drawn with, one
-        // frame earlier. A zoom between typing and pressing it would shift
-        // the wrap very slightly; not worth guarding against for how rare
-        // and how small a miss that is.
-        let scale = self.tab_mut().view_state.last_view.map(|v| v.scale).unwrap_or(1.0).max(0.01);
-        let box_width_pt = new_text.rect.right - new_text.rect.left;
-        let size_px = (new_text.size * scale).max(1.0);
+        let written = self.new_box_command(ui.ctx(), &new_text).and_then(|(command, notes)| {
+            let Some(doc) = &mut self.tab_mut().doc else { return Err("nothing open.".to_string()) };
+            doc.session.execute(command).map_err(|e| format!("{e}"))?;
+            doc.rendered_is_stale();
+            Ok(notes)
+        });
+        match written {
+            Ok(notes) => self.say_info(format!("text added to page {}.{notes}", page + 1)),
+            Err(e) => {
+                self.tab_mut().edit.new_text_box = Some(new_text);
+                self.say_error(e);
+            }
+        }
+    }
 
-        let mut job = egui::text::LayoutJob::default();
-        job.wrap.max_width = (box_width_pt * scale).max(1.0);
-        job.append(
-            typed,
-            0.0,
-            egui::TextFormat {
-                font_id: egui::FontId::proportional(size_px),
-                color: egui::Color32::BLACK,
-                ..Default::default()
-            },
-        );
-        let galley = ui.fonts_mut(|f| f.layout_job(job));
+    /// The mark [`Self::apply_new_text_box`] writes, **not yet run**, and what to say
+    /// of it.
+    ///
+    /// **Never writes boxes.** A run whose face shapes one of its letters to glyph 0
+    /// is written in [`Self::face_that_draws`]'s face, and that is said; where no face
+    /// can draw them it keeps its own, and that is said too.
+    fn new_box_command(
+        &mut self,
+        ctx: &egui::Context,
+        new_text: &NewTextBox,
+    ) -> Result<(pdf_core::command::Command, String), String> {
+        use pagify_shell::rich_text::{CharChange, Script};
+        use pagify_shell::text_layout::{place_rows, FaceMeasure, RowIn};
+        use pdf_core::document::{Annotation, Color, Point, TextPart, TextRule};
 
-        let face = new_text.face.as_deref();
-        let mut lines_written = 0u32;
-        let mut failed: Option<String> = None;
-        for placed in &galley.rows {
-            let text = placed.row.text();
-            let trimmed = text.trim_end();
-            if trimmed.is_empty() {
+        let rich = &new_text.rich;
+        let chars: Vec<char> = rich.text().chars().collect();
+        let mut written = rich.clone();
+        let mut swaps: Vec<(String, Option<String>)> = Vec::new();
+        for (range, look) in rich.spans(0..chars.len()) {
+            let text: String = chars[range.clone()].iter().collect();
+            if !Self::shapes_a_box(&look.face, &text) {
                 continue;
             }
-            let row_width_pt = placed.row.size.x / scale;
-            let x = match new_text.align {
-                TextAlign::Left => new_text.rect.left,
-                TextAlign::Center => new_text.rect.left + (box_width_pt - row_width_pt) / 2.0,
-                TextAlign::Right => new_text.rect.right - row_width_pt,
+            let other = self.face_that_draws(&look.face, &text).filter(|other| !Self::shapes_a_box(other, &text));
+            if let Some(other) = &other {
+                written.set_char(range, &CharChange { face: Some(other.clone()), ..Default::default() });
+            }
+            let swap = (look.face.clone(), other);
+            if !swaps.contains(&swap) {
+                swaps.push(swap);
+            }
+        }
+        let notes: String = swaps
+            .iter()
+            .map(|(own, other)| match other {
+                Some(other) => format!(" Written in {other} where {own} cannot draw the letters."),
+                None => format!(" {own} cannot draw some of the letters, nor can any face Pagify writes in — they show as empty boxes."),
+            })
+            .collect();
+
+        // The rows the box showed, laid out again with the very arguments it drew with.
+        let px_per_pt = self.tab().view_state.last_view.map(|v| v.scale).unwrap_or(1.0).max(0.01);
+        let ready = self.faces_state.box_faces_ready.clone();
+        let galley = ctx.fonts_mut(|f| f.layout_job(rich_preview::box_job(rich, rich.text(), px_per_pt, &ready, new_text.wrap_px)));
+        let margin_pt = BOX_MARGIN_PX as f32 / px_per_pt;
+        let normal: Vec<bool> = (0..chars.len()).map(|i| rich.look_at(i + 1).script == Script::Normal).collect();
+        let mut rows = Vec::with_capacity(galley.rows.len());
+        let mut start = 0;
+        for placed in &galley.rows {
+            let glyphs = &placed.row.glyphs;
+            let tallest = |only_normal: bool| {
+                glyphs
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| !only_normal || normal.get(start + i).copied().unwrap_or(true))
+                    .map(|(_, g)| g)
+                    .max_by(|a, b| a.font_height.total_cmp(&b.font_height))
             };
-            // The glyph closest to the row's own top gives its ascent — the
-            // same value for every glyph in the row, since the whole box is
-            // one font and size. A blank row (skipped above, `continue`)
-            // would have none to ask.
-            let ascent_px =
-                placed.row.glyphs.first().map(|g| g.font_ascent).unwrap_or(size_px * 0.8);
-            let baseline_y = new_text.rect.top + (placed.pos.y + ascent_px) / scale;
+            // A row of nothing but superscript or subscript sits on its own letters.
+            let baseline_px = tallest(true).or_else(|| tallest(false)).map_or(0.0, |g| g.pos.y);
+            let end = start + glyphs.len() + placed.ends_with_newline as usize;
+            rows.push(RowIn { chars: start..end, baseline_pt: new_text.rect.top + margin_pt + (placed.pos.y + baseline_px) / px_per_pt });
+            start = end;
+        }
+        let width_pt = new_text.rect.right - new_text.rect.left - 2.0 * margin_pt;
+        let placed = place_rows(&written, &rows, new_text.rect.left + margin_pt, width_pt, new_text.align.into(), &FaceMeasure);
 
-            match self.write_styled_line_at(
-                page,
-                (x, baseline_y),
-                trimmed,
-                new_text.size,
-                new_text.color,
-                face,
-            ) {
-                Ok(()) => lines_written += 1,
-                Err(e) => {
-                    failed = Some(e);
-                    break;
-                }
+        let color_of = |[r, g, b, a]: [u8; 4]| Color { r, g, b, a };
+        let mut parts: Vec<TextPart> = Vec::new();
+        let mut rules = Vec::new();
+        for row in &placed {
+            for span in &row.spans {
+                let face = &span.look.face;
+                let shaped = pdf_core::text::shape(face, &span.text).map_err(|e| format!("{face} could not set those words — {e}"))?;
+                let glyphs = place_glyphs(&shaped, &span.text, (span.x_pt, span.baseline_pt), span.size_pt, span.scale_x, &span.advances_pt);
+                // A part per span, in the order they are read: the page lists its glyphs
+                // in the order they are written, and the engine embeds a face once
+                // however many parts use it.
+                parts.push(TextPart {
+                    font: face.clone(),
+                    font_asset: Some(face.clone()),
+                    size: span.size_pt,
+                    color: color_of(span.look.color),
+                    glyphs,
+                    scale_x: span.scale_x,
+                });
             }
+            rules.extend(row.rules.iter().map(|rule| TextRule {
+                from: Point { x: rule.x0_pt, y: rule.y_pt },
+                to: Point { x: rule.x1_pt, y: rule.y_pt },
+                width: rule.thickness_pt,
+                color: color_of(rule.color),
+            }));
         }
-
-        if let Some(doc) = &mut self.tab_mut().doc {
-            doc.rendered_is_stale();
+        if parts.is_empty() {
+            return Err("nothing typed — the box was left empty.".into());
         }
-
-        match failed {
-            Some(e) => self.say_error(e),
-            None if lines_written == 1 => {
-                self.say_info(format!("text added to page {}.", page + 1))
-            }
-            // Each line is its own `AddAnnotation` — several steps, not
-            // one, the same as `replace_outlined_word`'s own "this took two
-            // steps" — so undoing it back off takes the same number back.
-            None if lines_written > 1 => self.say_info(format!(
-                "text added to page {} as {lines_written} lines — `undo` {lines_written} times puts it all back.",
-                page + 1
-            )),
-            None => self.say_info("nothing typed — the box was left empty."),
-        }
+        let first = parts.remove(0);
+        let id = self.tab_mut().next_text_id;
+        self.tab_mut().next_text_id += 1;
+        let annotation = Annotation::Text {
+            text: rich.text().to_string(),
+            font: first.font,
+            font_asset: first.font_asset,
+            size: first.size,
+            color: first.color,
+            glyphs: first.glyphs,
+            id,
+            restore: String::new(),
+            frame: Vec::new(),
+            frame_width: 0.0,
+            scale_x: first.scale_x,
+            more: parts,
+            rules,
+        };
+        Ok((pdf_core::command::Command::AddAnnotation { page_index: new_text.page, annotation }, notes))
     }
 
     fn add_image_dialog(&mut self) {
@@ -15019,6 +15364,8 @@ impl PagifyApp {
         let em_ratio = self.faces_state.editor_face_metrics.map(|m| (m.ascent - m.descent) as f32 / 1000.0);
         let face_ready = self.faces_state.editor_face.is_some() && self.faces_state.editor_face_ready;
         let coverage = self.faces_state.editor_face_coverage.clone();
+        // The faces typed into the box that egui can draw this frame.
+        let ready_faces = self.faces_state.box_faces_ready.clone();
 
         let Some(edit) = self.tab_mut().edit.editing_run.as_mut() else { return };
         if edit.page != page {
@@ -15078,13 +15425,24 @@ impl PagifyApp {
         // drawn inside this box, one level up, for the box itself.
         let base_screen_height = (bottom_right.y - top_left.y).max(0.5);
         let base_screen_width = (bottom_right.x - top_left.x).max(0.5);
+        // **Characters styled one by one are drawn from the box's model**, each in its
+        // own size, colour and decoration; a box whose characters share one look is
+        // drawn as it always was, from the box's own style. The box grows by its
+        // largest character over the largest it opened with.
+        let looked = !edit.drawn && looks_matter(&edit.rich);
+        let (opened_size, now_size) = if looked {
+            (largest_drawn_size(&edit.picked), largest_drawn_size(&edit.rich))
+        } else {
+            (edit.was.size, edit.style.size)
+        };
         let base_on_screen = run_editor_font_size(
             base_screen_height,
             edit.lines.len(),
-            edit.was.size.unwrap_or(0.0),
+            opened_size.unwrap_or(0.0),
             view.scale,
             em_ratio,
         );
+        // The size the box's own face is set in, whatever the characters are.
         let on_screen = run_editor_font_size(
             base_screen_height,
             edit.lines.len(),
@@ -15092,7 +15450,12 @@ impl PagifyApp {
             view.scale,
             em_ratio,
         );
-        let grow = run_editor_box_grow(base_on_screen, on_screen);
+        let grown_on_screen = if looked {
+            run_editor_font_size(base_screen_height, edit.lines.len(), now_size.unwrap_or(0.0), view.scale, em_ratio)
+        } else {
+            on_screen
+        };
+        let grow = run_editor_box_grow(base_on_screen, grown_on_screen);
         let height = base_screen_height * grow;
 
         // **Edited where it sits, looking like what it is.**
@@ -15234,30 +15597,50 @@ impl PagifyApp {
             ..Default::default()
         };
         let coverage = if face_ready { coverage } else { None };
+        // Each character in its own look, where the box has more than one.
+        let looks = looked.then(|| EditorLooks {
+            rich: edit.rich.clone(),
+            base_size: edit.style.size.filter(|s| *s > 0.0).unwrap_or(12.0),
+            base_px: glyph_size,
+            doc: format.clone(),
+            fallback: fallback.clone(),
+            ready: ready_faces,
+        });
         let mut layouter = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
             // Everything is drawable until the face's coverage is known.
             let covered = |c: char| coverage.as_ref().map_or(true, |known| known.has(c));
-            let job = editor_layout_job(
-                buf.as_str(),
-                justify,
-                wrap_width,
-                &format,
-                &fallback,
-                &covered,
-                &mut |word: &str| {
-                    // The same two-face layout the job gets, so a stretched
-                    // line's measured words are as wide as they will be drawn.
-                    let mut measured = egui::text::LayoutJob::default();
-                    append_sectioned(&mut measured, word, 0.0, &format, &fallback, &covered);
-                    ui.fonts_mut(|f| f.layout_job(measured)).size().x
-                },
-            );
+            let mut measure = |word: &str| {
+                // The same two-face layout the job gets, so a stretched
+                // line's measured words are as wide as they will be drawn.
+                let mut measured = egui::text::LayoutJob::default();
+                append_sectioned(&mut measured, word, 0.0, &format, &fallback, &covered);
+                ui.fonts_mut(|f| f.layout_job(measured)).size().x
+            };
+            let job = match &looks {
+                Some(looks) => {
+                    // The model brought up to what the field holds this frame.
+                    let mut looks = looks.clone();
+                    looks.rich.edit(buf.as_str());
+                    editor_layout_job_with_looks(
+                        buf.as_str(),
+                        justify,
+                        wrap_width,
+                        &format,
+                        &fallback,
+                        &covered,
+                        &mut measure,
+                        &looks,
+                    )
+                }
+                None => editor_layout_job(buf.as_str(), justify, wrap_width, &format, &fallback, &covered, &mut measure),
+            };
             ui.fonts_mut(|f| f.layout_job(job))
         };
 
         {
             let style = ui.style_mut();
-            style.visuals.override_text_color = Some(ink);
+            // Not forced to one colour where the characters have colours of their own.
+            style.visuals.override_text_color = (!looked).then_some(ink);
             style.visuals.extreme_bg_color = paper;
             style.visuals.selection.bg_fill = theme::violet().gamma_multiply(0.35);
             // Always multiline: a single run can grow a second line of its
@@ -15275,6 +15658,17 @@ impl PagifyApp {
             // meant to avoid; a blank frame leaves only what is drawn
             // explicitly.
             let response = ui.put(rect, editor.id(id).frame(egui::Frame::NONE));
+            // The looks follow the typing: what was typed takes the look before it.
+            if edit.buffer != edit.rich.text() {
+                edit.rich.edit(&edit.buffer);
+            }
+            // The selection the panel acts on, taken only while the box has the focus.
+            if response.has_focus() {
+                if let Some(range) = egui::text_edit::TextEditState::load(ui.ctx(), id).and_then(|s| s.cursor.char_range()) {
+                    let (a, z) = (range.primary.index.0, range.secondary.index.0);
+                    edit.selection = a.min(z)..a.max(z);
+                }
+            }
             // Once, the moment this editor first appears — not every frame,
             // or typing would never be able to give the focus back to
             // whatever else the user clicked afterwards.
@@ -15484,6 +15878,8 @@ fn wrap_typed_last_line(
     /// [`Self::apply_new_text_box`], from the same width and font size, so
     /// what gets written matches what was typed.
     fn draw_new_text_box(&mut self, ui: &mut egui::Ui, page: usize, view: PageView) {
+        // The faces egui can draw this frame — installed on an earlier one.
+        let ready = self.faces_state.box_faces_ready.clone();
         let Some(new_text) = &mut self.tab_mut().edit.new_text_box else { return };
         if new_text.page != page {
             return;
@@ -15508,16 +15904,38 @@ fn wrap_typed_last_line(
             egui::StrokeKind::Outside,
         );
 
-        let size_px = (new_text.size * view.scale).clamp(6.0, 200.0);
         let id = egui::Id::new(("new-text-box", page));
+        // **Drawn from the box's own model**: each run in its face, size, colour and
+        // decoration (`rich_preview::box_job`) — the rows Add to Page writes.
+        let px_per_pt = view.scale.max(0.01);
+        let model = new_text.rich.clone();
+        let wrap = std::cell::Cell::new(new_text.wrap_px);
+        let wrapped_at = &wrap;
+        let mut layouter = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
+            wrapped_at.set(wrap_width);
+            let job = rich_preview::box_job(&model, buf.as_str(), px_per_pt, &ready, wrap_width);
+            ui.fonts_mut(|f| f.layout_job(job))
+        };
         let response = ui.put(
             rect,
             egui::TextEdit::multiline(&mut new_text.buffer)
                 .id(id)
                 .background_color(paper)
-                .margin(egui::Margin::same(2))
-                .font(egui::FontId::proportional(size_px)),
+                .margin(egui::Margin::same(BOX_MARGIN_PX))
+                .layouter(&mut layouter),
         );
+        new_text.wrap_px = wrap.get();
+        // The looks follow the typing: what was typed takes the look before it.
+        if new_text.buffer != new_text.rich.text() {
+            new_text.rich.edit(&new_text.buffer);
+        }
+        // The selection the panel acts on, taken only while the box has the focus.
+        if response.has_focus() {
+            if let Some(range) = egui::text_edit::TextEditState::load(ui.ctx(), id).and_then(|s| s.cursor.char_range()) {
+                let (a, z) = (range.primary.index.0, range.secondary.index.0);
+                new_text.selection = a.min(z)..a.max(z);
+            }
+        }
 
         if !new_text.focused {
             new_text.focused = true;
@@ -15681,53 +16099,18 @@ fn wrap_typed_last_line(
     /// Everything else is drawn greyed with its reason on hover.
     fn draw_text_style(&mut self, ui: &mut egui::Ui, new_box: bool) {
         use text_style_panel as tsp;
-        let black = pdf_core::document::Color { r: 0, g: 0, b: 0, a: 255 };
-        let (face, size, color, align) = if new_box {
-            let Some(b) = self.tab().edit.new_text_box.as_ref() else { return };
-            let align = match b.align {
-                TextAlign::Left => tsp::Align::Left,
-                TextAlign::Center => tsp::Align::Center,
-                TextAlign::Right => tsp::Align::Right,
-            };
-            (b.face.clone(), b.size, b.color, Some(align))
-        } else {
-            let Some(e) = self.tab().edit.editing_run.as_ref() else { return };
-            // An explicit pick wins; short of that, the run's own current font
-            // beats a flat "(automatic)" that never said which font that meant.
-            (
-                e.style.face.clone().or_else(|| e.current_face.clone()),
-                e.style.size.unwrap_or(12.0),
-                e.style.color.unwrap_or(black),
-                None,
-            )
-        };
-        let (bold, italic) = face.as_deref().map(tsp::style_of).unwrap_or((false, false));
-        let look = tsp::Look {
-            font: face.clone().unwrap_or_else(|| "(automatic)".into()),
-            size,
-            color: [color.r, color.g, color.b],
-            bold,
-            italic,
-            underline: false,
-            strike: false,
-            script: tsp::Script::Normal,
-            align,
-        };
-        let mut gates = tsp::Gates::all_off("Not built yet. It comes in the next stage.");
-        gates.bold = None;
-        gates.italic = None;
         if new_box {
-            gates.left = None;
-            gates.center = None;
-            gates.right = None;
-            gates.justify = Some("Justified text is not available for a new box yet.".into());
-        } else {
-            let why = || {
-                Some("Alignment is for new text boxes for now. Drag the side handles of the box to set where the lines wrap.".to_string())
-            };
-            (gates.left, gates.center, gates.right, gates.justify) = (why(), why(), why(), why());
+            self.draw_box_style(ui);
+            return;
         }
-
+        // **The looks of the selection** — of every character when nothing is selected —
+        // read from the box's own model, which the page's looks seeded. A look that
+        // differs inside the selection shows as mixed.
+        let range = self.edit_selection();
+        let (look, gates) = {
+            let Some(e) = self.tab().edit.editing_run.as_ref() else { return };
+            (edit_text_look(e, range.clone()), edit_text_gates(e.drawn))
+        };
         let changes = tsp::show(ui, egui::Id::new(("text-style", new_box)), &look, &gates);
 
         if changes.font_clicked {
@@ -15736,38 +16119,241 @@ fn wrap_typed_last_line(
                 self.faces_state.system_fonts = Some(system_fonts::list());
             }
         }
-        if let Some(new_size) = changes.size {
-            if new_box {
-                if let Some(b) = self.tab_mut().edit.new_text_box.as_mut() {
-                    b.size = new_size;
+        self.restyle_selection(StyleTarget::EditText, range, &changes);
+    }
+
+    /// The Edit Text box's selection, in characters — kept from the last frame the box
+    /// had the focus ([`EditingRun::selection`]), so a click on the panel still acts on
+    /// it. Empty means every character.
+    fn edit_selection(&self) -> std::ops::Range<usize> {
+        let Some(e) = self.tab().edit.editing_run.as_ref() else { return 0..0 };
+        let count = e.rich.char_count();
+        e.selection.start.min(count)..e.selection.end.min(count)
+    }
+
+    /// **What a control of the Text Style panel does to `range`** of the text it is
+    /// for — every character when the range is empty. One body for both boxes.
+    ///
+    /// For the Edit Text box over a page's own words: a change to the whole box
+    /// (nothing selected) of its size or colour is still the box's own style, as it
+    /// always was, and shows on every character; any other change, and any change to
+    /// part of it, restyles characters one by one (`styled`), which Apply writes into
+    /// the page's own text.
+    fn restyle_selection(&mut self, target: StyleTarget, range: std::ops::Range<usize>, changes: &text_style_panel::Changes) {
+        use pagify_shell::rich_text::CharChange;
+        let rgba = |[r, g, b]: [u8; 3]| [r, g, b, 255];
+        let boxwide = CharChange { size: changes.size, color: changes.color.map(rgba), ..Default::default() };
+        let character = CharChange {
+            underline: changes.underline,
+            strike: changes.strike,
+            script: changes.script,
+            letter_spacing_pt: changes.letter_spacing,
+            width_pct: changes.width,
+            baseline_pt: changes.baseline,
+            ..Default::default()
+        };
+        match target {
+            StyleTarget::NewBox => {
+                let change = CharChange { size: boxwide.size, color: boxwide.color, ..character };
+                if change != CharChange::default() {
+                    if let Some(b) = self.tab_mut().edit.new_text_box.as_mut() {
+                        b.rich.set_char(range.clone(), &change);
+                    }
                 }
-            } else if let Some(e) = self.tab_mut().edit.editing_run.as_mut() {
-                e.style.size = Some(new_size);
             }
-        }
-        if let Some([r, g, b]) = changes.color {
-            let new = pdf_core::document::Color { r, g, b, a: color.a };
-            if new_box {
-                if let Some(held) = self.tab_mut().edit.new_text_box.as_mut() {
-                    held.color = new;
+            StyleTarget::EditText => {
+                let whole = range.is_empty();
+                if let Some(e) = self.tab_mut().edit.editing_run.as_mut() {
+                    if boxwide != CharChange::default() {
+                        e.rich.set_char(range.clone(), &boxwide);
+                        if whole {
+                            if let Some(size) = changes.size {
+                                e.style.size = Some(size);
+                            }
+                            if let Some([r, g, b]) = changes.color {
+                                let a = e.style.color.map_or(255, |c| c.a);
+                                e.style.color = Some(pdf_core::document::Color { r, g, b, a });
+                            }
+                        } else {
+                            e.styled = true;
+                        }
+                    }
+                    if character != CharChange::default() {
+                        e.rich.set_char(range.clone(), &character);
+                        e.styled = true;
+                    }
                 }
-            } else if let Some(e) = self.tab_mut().edit.editing_run.as_mut() {
-                e.style.color = Some(new);
             }
         }
         if changes.bold.is_some() || changes.italic.is_some() {
-            self.pick_style_face(face.as_deref(), changes.bold.unwrap_or(bold), changes.italic.unwrap_or(italic));
+            self.style_selection(target, range, changes.bold, changes.italic);
         }
-        if let (true, Some(a)) = (new_box, changes.align) {
+        if let (StyleTarget::NewBox, Some(a)) = (target, changes.align) {
             let picked = match a {
-                tsp::Align::Left => Some(TextAlign::Left),
-                tsp::Align::Center => Some(TextAlign::Center),
-                tsp::Align::Right => Some(TextAlign::Right),
-                tsp::Align::Justify => None,
+                text_style_panel::Align::Left => Some(TextAlign::Left),
+                text_style_panel::Align::Center => Some(TextAlign::Center),
+                text_style_panel::Align::Right => Some(TextAlign::Right),
+                text_style_panel::Align::Justify => None,
             };
             if let (Some(picked), Some(b)) = (picked, self.tab_mut().edit.new_text_box.as_mut()) {
                 b.align = picked;
             }
+        }
+    }
+
+    /// The new box's selection, in characters — kept from the last frame the box had
+    /// the focus ([`NewTextBox::selection`]), so a click on the panel still acts on
+    /// it. Empty means every character.
+    fn box_selection(&self, _ctx: &egui::Context) -> std::ops::Range<usize> {
+        let Some(b) = self.tab().edit.new_text_box.as_ref() else { return 0..0 };
+        let count = b.rich.char_count();
+        b.selection.start.min(count)..b.selection.end.min(count)
+    }
+
+    /// **The Text Style block for a new box: the looks of its selection.** Every
+    /// character style changes the selected characters, or all of them when nothing
+    /// is selected; a look that differs inside the selection shows as mixed. The
+    /// paragraph styles come in the next stage; alignment is still the whole box's.
+    fn draw_box_style(&mut self, ui: &mut egui::Ui) {
+        use pagify_shell::rich_text::Mixed;
+        use text_style_panel as tsp;
+        let range = self.box_selection(ui.ctx());
+        let Some(b) = self.tab().edit.new_text_box.as_ref() else { return };
+        let of = b.rich.look_of(range.clone());
+        // Bold and italic are faces: told apart by each span's own face.
+        let styles: Vec<(bool, bool)> = box_spans(&b.rich, &range).iter().map(|(_, face)| tsp::style_of(face)).collect();
+        let all = |pick: fn(&(bool, bool)) -> bool| match styles.first() {
+            Some(first) if styles.iter().all(|s| pick(s) == pick(first)) => Mixed::One(pick(first)),
+            Some(_) => Mixed::Mixed,
+            None => Mixed::One(false),
+        };
+        let align = match b.align {
+            TextAlign::Left => tsp::Align::Left,
+            TextAlign::Center => tsp::Align::Center,
+            TextAlign::Right => tsp::Align::Right,
+        };
+        let look = tsp::Look {
+            font: of.face.clone(),
+            size: of.size,
+            color: match of.color {
+                Mixed::One([r, g, b, _]) => Mixed::One([r, g, b]),
+                Mixed::Mixed => Mixed::Mixed,
+            },
+            bold: all(|s| s.0),
+            italic: all(|s| s.1),
+            underline: of.underline,
+            strike: of.strike,
+            script: of.script,
+            letter_spacing: of.letter_spacing_pt,
+            width: of.width_pct,
+            baseline: of.baseline_pt,
+            align: Some(align),
+        };
+        let later = || Some("Comes with paragraph styles, the next stage.".to_string());
+        let gates = tsp::Gates {
+            justify: later(),
+            indent: later(),
+            lists: later(),
+            line_spacing: later(),
+            paragraph_spacing: later(),
+            ..Default::default()
+        };
+
+        let changes = tsp::show(ui, egui::Id::new(("text-style", true)), &look, &gates);
+
+        if changes.font_clicked {
+            self.faces_state.font_picker_open = !self.faces_state.font_picker_open;
+            if self.faces_state.font_picker_open && self.faces_state.system_fonts.is_none() {
+                self.faces_state.system_fonts = Some(system_fonts::list());
+            }
+        }
+        self.restyle_selection(StyleTarget::NewBox, range, &changes);
+    }
+
+    /// The rich text of the box `target` names.
+    fn rich_of(&self, target: StyleTarget) -> Option<&pagify_shell::rich_text::RichText> {
+        match target {
+            StyleTarget::NewBox => self.tab().edit.new_text_box.as_ref().map(|b| &b.rich),
+            StyleTarget::EditText => self.tab().edit.editing_run.as_ref().map(|e| &e.rich),
+        }
+    }
+
+    /// `change` over `range` of the box `target` names; a character change over part of
+    /// the Edit Text box is a restyle (`styled`), and over all of it is not.
+    fn change_chars(&mut self, target: StyleTarget, range: std::ops::Range<usize>, change: &pagify_shell::rich_text::CharChange) {
+        match target {
+            StyleTarget::NewBox => {
+                if let Some(b) = self.tab_mut().edit.new_text_box.as_mut() {
+                    b.rich.set_char(range, change);
+                }
+            }
+            StyleTarget::EditText => {
+                if let Some(e) = self.tab_mut().edit.editing_run.as_mut() {
+                    let whole = range.is_empty();
+                    e.rich.set_char(range, change);
+                    // A font for the whole box is its own style; for part of it, a restyle.
+                    e.styled |= !whole;
+                }
+            }
+        }
+    }
+
+    /// Bold or Italic for the selection, span by span: the face of each span's own
+    /// family that is bold and italic as asked. Said, and left as it is, where a family
+    /// has no such face installed.
+    ///
+    /// **For the whole Edit Text box in one face** (nothing selected) this is the box's
+    /// own font, as it always was: its family's face, written to the box. Anything
+    /// else is a restyle of characters one by one.
+    fn style_selection(&mut self, target: StyleTarget, range: std::ops::Range<usize>, bold: Option<bool>, italic: Option<bool>) {
+        use pagify_shell::rich_text::CharChange;
+        if self.faces_state.system_fonts.is_none() {
+            self.faces_state.system_fonts = Some(system_fonts::list());
+        }
+        let bundled = self.writing_faces();
+        let Some(rich) = self.rich_of(target) else { return };
+        let spans = box_spans(rich, &range);
+        if target == StyleTarget::EditText && range.is_empty() && spans.windows(2).all(|w| w[0].1 == w[1].1) {
+            // One face throughout: the box's own font changes, as it does from the picker.
+            let (was_bold, was_italic) = text_style_panel::style_of(&spans[0].1);
+            let face = spans[0].1.clone();
+            self.pick_style_face(
+                Some(face.as_str()).filter(|f| !f.is_empty()),
+                bold.unwrap_or(was_bold),
+                italic.unwrap_or(was_italic),
+            );
+            return;
+        }
+        let names: Vec<String> =
+            self.faces_state.system_fonts.iter().flatten().map(|f| f.name.clone()).chain(bundled).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut missing = None;
+        let mut picked = Vec::new();
+        for (span, face) in spans {
+            let (was_bold, was_italic) = text_style_panel::style_of(&face);
+            let (bold, italic) = (bold.unwrap_or(was_bold), italic.unwrap_or(was_italic));
+            match text_style_panel::family_variant(&face, bold, italic, &names) {
+                Some(name) => picked.push((span, name)),
+                None => {
+                    missing = Some(format!(
+                        "there is no {} face of {} installed, so that font was left as it is.",
+                        match (bold, italic) {
+                            (true, true) => "bold italic",
+                            (true, false) => "bold",
+                            (false, true) => "italic",
+                            (false, false) => "regular",
+                        },
+                        text_style_panel::family_of(&face)
+                    ))
+                }
+            }
+        }
+        for (span, name) in picked {
+            self.register_system_face(&name);
+            self.change_chars(target, span, &CharChange { face: Some(name), ..Default::default() });
+        }
+        if let Some(said) = missing {
+            self.say_error(said);
         }
     }
 
@@ -15846,6 +16432,13 @@ fn wrap_typed_last_line(
     fn draw_font_picker(&mut self, ui: &mut egui::Ui, page: usize) {
         let mut close = false;
         let mut chosen: Option<Option<String>> = None;
+        // **The page's own font, by name** — what "(automatic)" used to mean for the
+        // page's words (reported from use as confusing). A new box has no page font
+        // to go back to, so it has no such entry.
+        let own_font = self.tab().edit.editing_run.as_ref().map(|edit| match &edit.current_face {
+            Some(name) => format!("{name} (the page's own font)"),
+            None => "The page's own font".to_string(),
+        });
 
         egui::Window::new("Font")
             .id(egui::Id::new(("font-picker", page)))
@@ -15873,8 +16466,10 @@ fn wrap_typed_last_line(
                 });
                 ui.separator();
                 egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                    if ui.selectable_label(false, "(automatic)").clicked() {
-                        chosen = Some(None);
+                    if let Some(own) = &own_font {
+                        if ui.selectable_label(false, own).clicked() {
+                            chosen = Some(None);
+                        }
                     }
                     let filter = self.faces_state.font_picker_filter.to_ascii_lowercase();
                     for font in self.faces_state.system_fonts.iter().flatten() {
@@ -15889,7 +16484,19 @@ fn wrap_typed_last_line(
             });
 
         if let Some(face) = chosen {
-            self.choose_face(face);
+            match (face, self.tab().edit.new_text_box.is_some()) {
+                // A new box: the font of its selection — every character's when
+                // nothing is selected. (A new box's picker has no page font to
+                // go back to, so no `None` comes from it.)
+                (Some(name), true) => {
+                    let range = self.box_selection(ui.ctx());
+                    self.register_system_face(&name);
+                    if let Some(b) = self.tab_mut().edit.new_text_box.as_mut() {
+                        b.rich.set_char(range, &pagify_shell::rich_text::CharChange { face: Some(name), ..Default::default() });
+                    }
+                }
+                (face, _) => self.choose_face(face),
+            }
             close = true;
         }
 
@@ -15902,46 +16509,87 @@ fn wrap_typed_last_line(
     /// Use `face` for the run or new text box being edited, registering the
     /// font file for both writing paths first. `None` is "automatic".
     fn choose_face(&mut self, face: Option<String>) {
-        {
-            // The file this picks a font by is read once, here, rather than
-            // every font on the machine being loaded up front — see
-            // `system_fonts::list`, which reads only enough of each file to
-            // find its name.
-            if let Some(name) = &face {
-                if let Some(path) = self
-                    .faces_state.system_fonts
-                    .iter()
-                    .flatten()
-                    .find(|f| &f.name == name)
-                    .map(|f| f.path.clone())
-                {
-                    match std::fs::read(&path) {
-                        Ok(bytes) => {
-                            // A new text box writes with `pdf_core::text::
-                            // shape` directly (see `write_styled_line_at`),
-                            // which reads from `pdf_core::text`'s own
-                            // name-keyed registry — a different pool from
-                            // `add_typing_font`'s, which is what a run's own
-                            // restyle (`SetTextRun`) draws from instead.
-                            // Registered for both so either path can find it
-                            // by this exact name.
-                            if !pdf_core::text::is_registered(name) {
-                                let _ = pdf_core::text::register(name, bytes.clone());
-                            }
-                            if let Some(doc) = &self.tab_mut().doc {
-                                let _ = doc.session.add_typing_font(bytes);
-                            }
-                        }
-                        Err(e) => self.say_error(format!("could not read {}: {e}", path.display())),
-                    }
+        use pagify_shell::rich_text::CharChange;
+        if let Some(name) = &face {
+            self.register_system_face(name);
+        }
+        let range = self.edit_selection();
+        let Some(edit) = self.tab_mut().edit.editing_run.as_mut() else { return };
+        // **A font for part of the box is a restyle of those characters**; for the
+        // whole of it, nothing selected, it is the box's own font as it always was —
+        // and shows on every character. "The page's own font" puts back each
+        // character's own, as the box opened.
+        if !range.is_empty() {
+            edit.styled = true;
+        } else {
+            edit.style.face = face.clone();
+        }
+        let span = if range.is_empty() { 0..edit.rich.char_count() } else { range };
+        match face {
+            Some(name) => edit.rich.set_char(span, &CharChange { face: Some(name), ..Default::default() }),
+            None if edit.rich.text() == edit.picked.text() => {
+                for (part, look) in edit.picked.spans(span) {
+                    let back = CharChange { face: Some(look.face.clone()), page_font: Some(look.page_font), ..Default::default() };
+                    edit.rich.set_char(part, &back);
                 }
             }
-            if let Some(edit) = self.tab_mut().edit.editing_run.as_mut() {
-                edit.style.face = face;
-            } else if let Some(new_text) = &mut self.tab_mut().edit.new_text_box {
-                new_text.face = face;
+            None => {}
+        }
+    }
+
+    /// Read the installed font `name` and register it for both writing paths.
+    /// `false` when it is not installed, or cannot be read (which is said).
+    ///
+    /// The file is read once, here, rather than every font on the machine being
+    /// loaded up front — see `system_fonts::list`, which reads only enough of each
+    /// file to find its name. A new text box writes with `pdf_core::text::shape`
+    /// directly (see `write_styled_line_at`), which reads from `pdf_core::text`'s
+    /// own name-keyed registry — a different pool from `add_typing_font`'s, which
+    /// is what a run's own restyle (`SetTextRun`) draws from instead. Registered
+    /// for both so either path can find it by this exact name.
+    fn register_system_face(&mut self, name: &str) -> bool {
+        let Some(path) =
+            self.faces_state.system_fonts.iter().flatten().find(|f| f.name == name).map(|f| f.path.clone())
+        else {
+            return false;
+        };
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                if !pdf_core::text::is_registered(name) && pdf_core::text::register(name, bytes.clone()).is_err() {
+                    return false;
+                }
+                if let Some(doc) = &self.tab_mut().doc {
+                    let _ = doc.session.add_typing_font(bytes);
+                }
+                true
+            }
+            Err(e) => {
+                self.say_error(format!("could not read {}: {e}", path.display()));
+                false
             }
         }
+    }
+
+    /// The font a new text box starts in: Arial where it is installed — Windows
+    /// lists it by its PostScript name, `ArialMT` — else the face Pagify carries
+    /// with it. **Never "(automatic)"**: reported from use as confusing, and a box
+    /// in no font in particular is one nothing can measure.
+    fn default_box_face(&mut self) -> String {
+        if self.faces_state.system_fonts.is_none() {
+            self.faces_state.system_fonts = Some(system_fonts::list());
+        }
+        for name in ["ArialMT", "Arial"] {
+            if self.register_system_face(name) {
+                return name.to_string();
+            }
+        }
+        let bundled = self.writing_faces();
+        bundled
+            .iter()
+            .find(|name| name.as_str() == "Montserrat-Regular")
+            .or(bundled.first())
+            .cloned()
+            .unwrap_or_else(|| "Helvetica".into())
     }
 
     /// An outline around whatever the layer rail has picked.
@@ -16190,6 +16838,106 @@ fn editor_layout_job(
     covered: &dyn Fn(char) -> bool,
     measure: &mut dyn FnMut(&str) -> f32,
 ) -> egui::text::LayoutJob {
+    layout_job(text, justify, wrap_width, doc, fallback, covered, measure, None)
+}
+
+/// What the run editor draws each character of its buffer with, beyond the box's own
+/// face: the characters' looks (`rich`, edited to the buffer), the size the box is set
+/// in (`base_size` points drawn at `base_px` pixels, so a character of 20 points is
+/// `base_px × 20 ÷ base_size`), the box's two formats, and the faces typed into it that
+/// egui can draw yet.
+#[derive(Clone)]
+struct EditorLooks {
+    rich: pagify_shell::rich_text::RichText,
+    base_size: f32,
+    base_px: f32,
+    doc: egui::TextFormat,
+    fallback: egui::TextFormat,
+    ready: std::collections::BTreeSet<String>,
+}
+
+/// [`editor_layout_job`] with every character drawn in its own look: its size, colour,
+/// a line under or through it, a superscript raised, its spacing and width — see
+/// [`EditorLooks`]. The job's text is the buffer's, character for character.
+fn editor_layout_job_with_looks(
+    text: &str,
+    justify: bool,
+    wrap_width: f32,
+    doc: &egui::TextFormat,
+    fallback: &egui::TextFormat,
+    covered: &dyn Fn(char) -> bool,
+    measure: &mut dyn FnMut(&str) -> f32,
+    looks: &EditorLooks,
+) -> egui::text::LayoutJob {
+    layout_job(text, justify, wrap_width, doc, fallback, covered, measure, Some(looks))
+}
+
+/// Append `token` — the buffer's characters from `at` — to `job`, each stretch of one
+/// look in the format that look asks for. `extra` is a justified line's nudge before it.
+fn append_looked(
+    job: &mut egui::text::LayoutJob,
+    token: &str,
+    extra: f32,
+    at: usize,
+    looks: &EditorLooks,
+    covered: &dyn Fn(char) -> bool,
+) {
+    let chars: Vec<char> = token.chars().collect();
+    let spans = looks.rich.spans(at..at + chars.len());
+    if spans.is_empty() {
+        append_sectioned(job, token, extra, &looks.doc, &looks.fallback, covered);
+        return;
+    }
+    let mut lead = extra;
+    for (range, look) in spans {
+        let words: String = chars[range.start - at..range.end - at].iter().collect();
+        let doc = rich_preview::look_over(&looks.doc, look, looks.base_size, &looks.ready);
+        let fallback = rich_preview::look_over(&looks.fallback, look, looks.base_size, &looks.ready);
+        if (look.width_pct - 100.0).abs() < 0.01 {
+            append_sectioned(job, &words, lead, &doc, &fallback, covered);
+            lead = 0.0;
+            continue;
+        }
+        // A width other than the letters' own: each letter spaced as wide as it will be
+        // on the page, its shape left as it is.
+        for (letter, advance_em) in words.chars().zip(rich_preview::letter_advances(&look.face, &words)) {
+            let wider = (look.width_pct / 100.0 - 1.0) * advance_em * doc.font_id.size;
+            let (mut d, mut f) = (doc.clone(), fallback.clone());
+            d.extra_letter_spacing += wider;
+            f.extra_letter_spacing += wider;
+            let mut buf = [0u8; 4];
+            append_sectioned(job, letter.encode_utf8(&mut buf), lead, &d, &f, covered);
+            lead = 0.0;
+        }
+    }
+}
+
+/// How much wider than the box's own size `token` is drawn — its characters' sizes
+/// and widths averaged — plus the spacing after its letters, in pixels: what turns the
+/// width of a word measured in the box's face into the width it will have.
+fn looked_width(measured: f32, token: &str, at: usize, looks: &EditorLooks) -> f32 {
+    let count = token.chars().count().max(1) as f32;
+    let (mut ratio, mut spacing) = (0.0f32, 0.0f32);
+    for (range, look) in looks.rich.spans(at..at + token.chars().count()) {
+        let n = (range.end - range.start) as f32;
+        let scale = if look.script == pagify_shell::rich_text::Script::Normal { 1.0 } else { pagify_shell::text_layout::SCRIPT_SCALE };
+        ratio += n * look.size * scale / looks.base_size.max(0.01) * look.width_pct / 100.0;
+        spacing += n * look.letter_spacing_pt * looks.base_px / looks.base_size.max(0.01);
+    }
+    let ratio = if ratio > 0.0 { ratio / count } else { 1.0 };
+    measured * ratio + spacing
+}
+
+fn layout_job(
+    text: &str,
+    justify: bool,
+    wrap_width: f32,
+    doc: &egui::TextFormat,
+    fallback: &egui::TextFormat,
+    covered: &dyn Fn(char) -> bool,
+    measure: &mut dyn FnMut(&str) -> f32,
+    looks: Option<&EditorLooks>,
+) -> egui::text::LayoutJob {
     // No `job.wrap.max_width` here — every line break is already explicit (one
     // object per line, joined by `\n`, or a fresh one just typed), and a
     // justified line's own stretch is computed by hand below to land right at
@@ -16200,6 +16948,12 @@ fn editor_layout_job(
     let mut job = egui::text::LayoutJob::default();
     let lines: Vec<&str> = text.split('\n').collect();
     let last = lines.len().saturating_sub(1);
+    // Where the line starts, in characters of the whole text.
+    let mut line_at = 0usize;
+    let append = |job: &mut egui::text::LayoutJob, token: &str, extra: f32, at: usize| match looks {
+        Some(looks) => append_looked(job, token, extra, at, looks, covered),
+        None => append_sectioned(job, token, extra, doc, fallback, covered),
+    };
     for (li, line) in lines.iter().enumerate() {
         if li > 0 {
             job.append("\n", 0.0, doc.clone());
@@ -16210,16 +16964,107 @@ fn editor_layout_job(
         // only ever adds a further, purely visual nudge on top of it.
         let tokens: Vec<&str> = line.split_inclusive(' ').collect();
         if !justify || li == last || tokens.len() < 2 {
-            append_sectioned(&mut job, line, 0.0, doc, fallback, covered);
-            continue;
+            append(&mut job, line, 0.0, line_at);
+        } else {
+            let mut starts = Vec::with_capacity(tokens.len());
+            let mut at = line_at;
+            for token in &tokens {
+                starts.push(at);
+                at += token.chars().count();
+            }
+            let widths: Vec<f32> = tokens
+                .iter()
+                .zip(&starts)
+                .map(|(t, at)| {
+                    let measured = measure(t.trim_end());
+                    match looks {
+                        Some(looks) => looked_width(measured, t.trim_end(), *at, looks),
+                        None => measured,
+                    }
+                })
+                .collect();
+            let gaps = justify_gaps(&widths, wrap_width);
+            for ((token, extra), at) in tokens.iter().zip(gaps).zip(starts) {
+                append(&mut job, token, extra, at);
+            }
         }
-        let widths: Vec<f32> = tokens.iter().map(|t| measure(t.trim_end())).collect();
-        let gaps = justify_gaps(&widths, wrap_width);
-        for (token, extra) in tokens.iter().zip(gaps) {
-            append_sectioned(&mut job, token, extra, doc, fallback, covered);
-        }
+        line_at += line.chars().count() + 1;
     }
     job
+}
+
+/// What the Text Style panel shows of `range` of the Edit Text box (every character
+/// when it is empty): the looks of those characters, each part one value or mixed.
+/// Bold and italic are faces, told apart by each span's own.
+fn edit_text_look(edit: &EditingRun, range: std::ops::Range<usize>) -> text_style_panel::Look {
+    use pagify_shell::rich_text::Mixed;
+    use text_style_panel as tsp;
+    let of = edit.rich.look_of(range.clone());
+    let styles: Vec<(bool, bool)> = box_spans(&edit.rich, &range).iter().map(|(_, face)| tsp::style_of(face)).collect();
+    let all = |pick: fn(&(bool, bool)) -> bool| match styles.first() {
+        Some(first) if styles.iter().all(|s| pick(s) == pick(first)) => Mixed::One(pick(first)),
+        Some(_) => Mixed::Mixed,
+        None => Mixed::One(false),
+    };
+    tsp::Look {
+        // A face the page's file gives no name to is the page's own font.
+        font: match of.face {
+            Mixed::One(name) if name.is_empty() => Mixed::One("The page's own font".to_string()),
+            other => other,
+        },
+        size: of.size,
+        color: match of.color {
+            Mixed::One([r, g, b, _]) => Mixed::One([r, g, b]),
+            Mixed::Mixed => Mixed::Mixed,
+        },
+        bold: all(|s| s.0),
+        italic: all(|s| s.1),
+        underline: of.underline,
+        strike: of.strike,
+        script: of.script,
+        letter_spacing: of.letter_spacing_pt,
+        width: of.width_pct,
+        baseline: of.baseline_pt,
+        align: None,
+    }
+}
+
+/// Which controls of the Edit Text panel work: every character style does, the paragraph
+/// styles say that they come next, and drawn lettering — replaced in one look — keeps
+/// only the font, its size, its colour, Bold and Italic.
+fn edit_text_gates(drawn: bool) -> text_style_panel::Gates {
+    let later = || Some("Comes with paragraph styles, the next stage.".to_string());
+    let alignment =
+        || Some("Alignment is for new text boxes for now. Drag the side handles of the box to set where the lines wrap.".to_string());
+    let mut gates = text_style_panel::Gates {
+        left: alignment(),
+        center: alignment(),
+        right: alignment(),
+        justify: later(),
+        indent: later(),
+        lists: later(),
+        line_spacing: later(),
+        paragraph_spacing: later(),
+        ..Default::default()
+    };
+    if drawn {
+        let why = || Some("Drawn lettering is replaced in one look.".to_string());
+        gates.underline = why();
+        gates.strike = why();
+        gates.script = why();
+        gates.letter_spacing = why();
+        gates.width = why();
+        gates.baseline = why();
+    }
+    gates
+}
+
+/// Which text the Text Style panel is restyling: the new box being composed, or the
+/// Edit Text box over the page's own words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StyleTarget {
+    NewBox,
+    EditText,
 }
 
 
@@ -16368,6 +17213,8 @@ mod nudge_tests;
 mod marquee_tests;
 #[cfg(test)]
 mod object_hover_tests;
+#[cfg(test)]
+mod text_style_tests;
 
 /// **Asked for with a screenshot: a rotate handle on a selected object, like the
 /// move and resize handles, and the angle shown while it is turned.**
@@ -16509,6 +17356,11 @@ fn strip_subset_prefix(name: &str) -> &str {
 /// matters — what applying it writes back into the page.
 #[cfg(test)]
 mod wrap_hyphen_tests;
+
+/// Character styles in the Edit Text box over a page's own words: it opens with the
+/// looks the page already has, and (later in the file's life) writes the looks back.
+#[cfg(test)]
+mod edit_text_style_tests;
 
 /// The editor's blank glyphs: a letter the document's embedded subset maps but
 /// never drew must come out in the program's own face, not as nothing.

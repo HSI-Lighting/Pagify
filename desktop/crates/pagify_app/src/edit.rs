@@ -197,6 +197,34 @@ impl crate::PagifyApp {
                     .into(),
             );
         }
+        // The font this run is drawn in: from the page's own read when there is one, with
+        // no further call. **Three things a click on a very large page does without**:
+        // each is a further open of the page (or, for the background, a render of all of
+        // it), and on such a page that is what a click costs. The box is drawn on white,
+        // in the program's own face, with the face's name left off its font field; what
+        // is typed is written the same.
+        let current_face = match &pb {
+            Some(pb) => pb.faces.get(&run.object).cloned(),
+            None if heavy.is_some() => None,
+            None => self.tab().doc.as_ref().and_then(|d| d.session.run_font_name(page, run.object).ok()).flatten(),
+        };
+        // The looks the page already has on these words, so the box opens showing them.
+        let looks = if heavy.is_some() { Default::default() } else { self.run_text_looks(page, &[run.object]) };
+        let color = [run.color.r, run.color.g, run.color.b, run.color.a];
+        let piece = pagify_shell::line_styles::Piece {
+            object: run.object,
+            text: exact.get(&run.object).cloned().unwrap_or_else(|| run.text.clone()),
+            face: current_face.clone().unwrap_or_default(),
+            page_font: pb.as_ref().and_then(|pb| pb.styles.get(&run.object)).map(|style| style.font),
+            size: run.size,
+            color,
+            look: looks.get(&run.object).copied().unwrap_or_default(),
+        };
+        let dominant = pagify_shell::rich_text::CharLook {
+            page_font: piece.page_font,
+            ..pagify_shell::rich_text::CharLook::plain(piece.face.clone(), run.size, color)
+        };
+        let opened = pagify_shell::line_styles::open_looks(&[vec![piece]], &readable_text, &dominant);
         self.tab_mut().edit.editing_run = Some(EditingRun {
             page,
             object: run.object,
@@ -229,21 +257,7 @@ impl crate::PagifyApp {
                 at: Some((run.origin.x, run.origin.y)),
                 face: None,
             },
-            // From the page's own read when there is one: no further call.
-            // **Three things a click on a very large page does without**: each is a
-            // further open of the page (or, for the background, a render of all of
-            // it), and on such a page that is what a click costs. The box is
-            // drawn on white, in the program's own face, with the face's name
-            // left off its font field; what is typed is written the same.
-            current_face: match &pb {
-                Some(pb) => pb.faces.get(&run.object).cloned(),
-                None if heavy.is_some() => None,
-                None => self.tab()
-                    .doc
-                    .as_ref()
-                    .and_then(|d| d.session.run_font_name(page, run.object).ok())
-                    .flatten(),
-            },
+            current_face,
             background: if heavy.is_some() {
                 Color { r: 255, g: 255, b: 255, a: 255 }
             } else {
@@ -253,6 +267,14 @@ impl crate::PagifyApp {
             focused: false,
             box_resize: RunBox::default(),
             justify: false,
+            picked: opened.rich.clone(),
+            rich: opened.rich,
+            selection: 0..0,
+            styled: false,
+            line_base: opened.line_base,
+            box_chars: opened.box_chars,
+            piece_texts: opened.piece_texts,
+            font_objects: opened.font_objects,
         });
         // The face these words are already in, for the field to be set in. Asked
         // for here and used a frame or two later — see `want_document_face`.
@@ -619,6 +641,41 @@ impl crate::PagifyApp {
         let geometry: Vec<(Vec<usize>, pdf_core::document::Rect)> =
             lines.iter().map(|line| (line.objects.clone(), line.rect)).collect();
         let justify = self.paragraph_is_justified(page, &geometry, size);
+
+        // **The looks the page already has**, character by character: each piece's
+        // size, colour, font, spacing and rise, and any line of ours under it, so the
+        // box opens showing the page as it is. The line's first piece sets the size a
+        // superscript is measured against.
+        let looks = self.run_text_looks(page, &objects);
+        let piece_of = |object: usize| {
+            let run = text_by_object.get(&object);
+            pagify_shell::line_styles::Piece {
+                object,
+                text: exact
+                    .get(&object)
+                    .map(String::as_str)
+                    .or_else(|| run.map(|r| r.text.as_str()))
+                    .unwrap_or("")
+                    .to_string(),
+                face: face_names.get(&object).cloned().unwrap_or_default(),
+                page_font: styles.get(&object).map(|style| style.font),
+                size: run.map_or(size, |r| r.size),
+                color: run.map_or([color.r, color.g, color.b, color.a], |r| [r.color.r, r.color.g, r.color.b, r.color.a]),
+                look: looks.get(&object).copied().unwrap_or_default(),
+            }
+        };
+        let pieces: Vec<Vec<pagify_shell::line_styles::Piece>> =
+            lines.iter().map(|line| line.objects.iter().map(|o| piece_of(*o)).collect()).collect();
+        let dominant = pagify_shell::rich_text::CharLook {
+            page_font: styles.get(&look_object).map(|style| style.font),
+            ..pagify_shell::rich_text::CharLook::plain(
+                face_names.get(&look_object).cloned().unwrap_or_default(),
+                size,
+                [color.r, color.g, color.b, color.a],
+            )
+        };
+        let opened = pagify_shell::line_styles::open_looks(&pieces, &combined, &dominant);
+
         let edit = EditingRun {
             page,
             object: seed_object,
@@ -641,8 +698,44 @@ impl crate::PagifyApp {
             focused: false,
             box_resize: RunBox::default(),
             justify,
+            picked: opened.rich.clone(),
+            rich: opened.rich,
+            selection: 0..0,
+            styled: false,
+            line_base: opened.line_base,
+            box_chars: opened.box_chars,
+            piece_texts: opened.piece_texts,
+            font_objects: opened.font_objects,
         };
         Ok((edit, look_object))
+    }
+
+    /// What the page draws `objects` with beyond font, size and colour — see
+    /// `Session::run_text_looks`. Empty on any failure: the box then opens in the
+    /// looks it always had. Timed into the session log: it reads the page's stream.
+    pub(crate) fn run_text_looks(
+        &mut self,
+        page: usize,
+        objects: &[usize],
+    ) -> std::collections::HashMap<usize, pdf_core::document::RunTextLook> {
+        let t = std::time::Instant::now();
+        let found = self
+            .tab()
+            .doc
+            .as_ref()
+            .and_then(|doc| doc.session.run_text_looks(page, objects).ok())
+            .unwrap_or_default();
+        self.recording_state.session_log.record(
+            "perf",
+            &format!(
+                "page {} text looks of {} runs: {} read in {:.0} ms",
+                page + 1,
+                objects.len(),
+                found.len(),
+                t.elapsed().as_secs_f64() * 1000.0
+            ),
+        );
+        found
     }
 
     /// The words of `objects` as the page draws them, for the ones that can be read
@@ -760,7 +853,11 @@ impl crate::PagifyApp {
         let changed_look = pdf_core::document::TextStyle { face: None, ..edit.style.clone() }
             != pdf_core::document::TextStyle { face: None, ..edit.was.clone() };
         let picked_font = edit.style.face.is_some();
-        if typed == edit.original.trim() && !changed_look && !picked_font {
+        // **Characters styled one by one**, or a line that opened with more than one
+        // look, are written through the paragraph path whatever the box holds — a single
+        // run included — with each character's look; see `paragraph_edit_commands_with`.
+        let looked = edit.uses_looks();
+        if typed == edit.original.trim() && !changed_look && !picked_font && !(looked && edit.looks_changed()) {
             self.say_info("unchanged.");
             return;
         }
@@ -778,6 +875,11 @@ impl crate::PagifyApp {
                 Ok(said) => self.say_info(said),
                 Err(e) => self.say_error(e),
             }
+            return;
+        }
+
+        if looked {
+            self.apply_paragraph_edit(&edit, &edit.buffer);
             return;
         }
 
@@ -1006,8 +1108,16 @@ impl crate::PagifyApp {
 
         let line_count = edit.lines.len();
         let nothing_to_execute = commands.is_empty();
+        // **A page whose objects move.** A piece taken off moves everything after it; so
+        // does a line drawn under a word (a path object of its own, after its text), which
+        // any retype that carries spans may add or take away.
         let renumbers = commands.iter().any(|command| match command {
-            pdf_core::command::Command::ReplaceTextLines { edits, .. } => removed_pieces(edits) > 0,
+            pdf_core::command::Command::ReplaceTextLines { edits, .. } => {
+                removed_pieces(edits) > 0
+                    || edits.iter().any(|edit| {
+                        matches!(edit, pdf_core::document::TextLineEdit::Retype { spans, .. } if !spans.is_empty())
+                    })
+            }
             _ => false,
         });
         let asked_for_width = asks_for_width(&commands);
@@ -1294,6 +1404,9 @@ impl crate::PagifyApp {
                     restore: String::new(),
                     frame: Vec::new(),
                     frame_width: 0.0,
+                    scale_x: 1.0,
+                    more: Vec::new(),
+                    rules: Vec::new(),
                 },
             })
             .map_err(|e| format!("the words came off but the new ones would not go on — {e}"))?;

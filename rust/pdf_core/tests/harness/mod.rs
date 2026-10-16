@@ -261,3 +261,114 @@ pub fn hand_built_pdf_with(pages: &[HandPage], objects: &[&str], pages_extra: &s
     );
     out
 }
+
+/// A one-page PDF written by hand with Helvetica as `/F1` and whatever `content`
+/// draws — the page every hermetic text-editing test starts from.
+pub fn helvetica_page(content: &[u8]) -> Vec<u8> {
+    helvetica_page_with(content, "", &[])
+}
+
+/// The same, with `resources` added to the page's resource dictionary and
+/// `extra` as objects 6, 7, ...
+pub fn helvetica_page_with(content: &[u8], resources: &str, extra: &[Vec<u8>]) -> Vec<u8> {
+    page_with_fonts(content, &[("F1", "Helvetica")], resources, extra)
+}
+
+/// A one-page PDF written by hand whose page selects `fonts` — each a resource
+/// name and a standard-14 `BaseFont` — as objects 5, 6, ...; `resources` is added
+/// to the page's resource dictionary and `extra` follows the fonts as the objects
+/// after them.
+pub fn page_with_fonts(content: &[u8], fonts: &[(&str, &str)], resources: &str, extra: &[Vec<u8>]) -> Vec<u8> {
+    let entries: Vec<String> = fonts.iter().enumerate().map(|(i, (name, _))| format!("/{name} {} 0 R", 5 + i)).collect();
+    let mut objects: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R              /Resources << /Font << {} >> {resources} >> >>",
+            entries.join(" ")
+        )
+        .into_bytes(),
+        [format!("<< /Length {} >>
+stream
+", content.len()).as_bytes(), content, b"
+endstream"].concat(),
+    ];
+    for (_, base) in fonts {
+        objects.push(format!("<< /Type /Font /Subtype /Type1 /BaseFont /{base} >>").into_bytes());
+    }
+    objects.extend(extra.iter().cloned());
+    let mut out = b"%PDF-1.4
+".to_vec();
+    let mut offsets = Vec::new();
+    for (i, body) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj
+", i + 1).as_bytes());
+        out.extend_from_slice(body);
+        out.extend_from_slice(b"
+endobj
+");
+    }
+    let xref_at = out.len();
+    out.extend_from_slice(format!("xref
+0 {}
+0000000000 65535 f 
+", objects.len() + 1).as_bytes());
+    for offset in &offsets {
+        out.extend_from_slice(format!("{offset:010} 00000 n 
+").as_bytes());
+    }
+    out.extend_from_slice(
+        format!("trailer
+<< /Size {} /Root 1 0 R >>
+startxref
+{xref_at}
+%%EOF", objects.len() + 1).as_bytes(),
+    );
+    out
+}
+
+/// Page `n`'s (counting from 0) decoded content stream, as the document would
+/// write it: the thing an edit changes. Two documents with the same bytes here
+/// have the same page.
+pub fn page_stream(doc: &mut PdfiumDocument, n: usize) -> Vec<u8> {
+    use pdf_core::document::DocumentMut;
+    use pdf_core::pdf::{content, Object};
+    let mut bytes = Vec::new();
+    DocumentMut::save_full_copy(doc, &mut bytes).expect("save");
+    let file = pdf_core::pdf::File::parse(&bytes).expect("parse");
+    let root = file.resolve(file.trailer().get(b"Root").expect("root")).expect("catalogue");
+    let pages = file.resolve(root.as_dict().and_then(|d| d.get(b"Pages")).expect("pages")).expect("tree");
+    fn pages_of(file: &pdf_core::pdf::File<'_>, node: &Object, out: &mut Vec<Object>) {
+        let Some(dict) = node.as_dict() else { return };
+        if dict.get(b"Type").and_then(Object::as_name) == Some(&b"Page"[..]) {
+            out.push(node.clone());
+            return;
+        }
+        if let Some(Ok(Object::Array(kids))) = dict.get(b"Kids").map(|k| file.resolve(k)) {
+            for kid in kids {
+                if let Ok(kid) = file.resolve(&kid) {
+                    pages_of(file, &kid, out);
+                }
+            }
+        }
+    }
+    let mut all_pages = Vec::new();
+    pages_of(&file, &pages, &mut all_pages);
+    let page = all_pages.get(n).cloned().unwrap_or_else(|| panic!("no page {}", n + 1));
+    let contents = page.as_dict().and_then(|d| d.get(b"Contents")).expect("contents");
+    let mut stream = Vec::new();
+    match file.resolve(contents).expect("contents") {
+        Object::Stream(d, r) => stream.extend_from_slice(&content::decode(&d, &bytes[r]).expect("decode")),
+        Object::Array(parts) => {
+            for part in parts {
+                if let Ok(Object::Stream(d, r)) = file.resolve(&part) {
+                    stream.extend_from_slice(&content::decode(&d, &bytes[r]).expect("decode"));
+                    stream.push(b'\n');
+                }
+            }
+        }
+        _ => panic!("odd contents"),
+    }
+    stream
+}

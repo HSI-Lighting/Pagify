@@ -542,6 +542,9 @@ mod tests {
             restore: String::new(),
             frame: Vec::new(),
             frame_width: 0.0,
+            scale_x: 1.0,
+            more: Vec::new(),
+            rules: Vec::new(),
         };
         history
             .execute(

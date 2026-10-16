@@ -65,6 +65,9 @@ fn main() {
             restore,
             frame: frame.clone(),
             frame_width: 1.4,
+            scale_x: 1.0,
+            more: Vec::new(),
+            rules: Vec::new(),
         };
         let blob = serde_json::to_string(&build(String::new())).expect("encode");
 

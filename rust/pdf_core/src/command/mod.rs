@@ -1311,6 +1311,7 @@ mod tests {
                         style: crate::document::TextStyle { size: Some(8.0), ..Default::default() },
                         remove: vec![986, 987, 988],
                         justify_to: Some(412.5),
+                        spans: Vec::new(),
                     },
                     crate::document::TextLineEdit::Remove { objects: vec![1041, 1042] },
                 ],
@@ -1356,6 +1357,7 @@ mod tests {
                 style: crate::document::TextStyle { size: Some(8.0), ..Default::default() },
                 remove: vec![986, 987],
                 justify_to: None,
+                spans: Vec::new(),
             }
         );
         assert_eq!(
@@ -1366,6 +1368,7 @@ mod tests {
                 style: crate::document::TextStyle::default(),
                 remove: Vec::new(),
                 justify_to: Some(300.5),
+                spans: Vec::new(),
             }
         );
         assert_eq!(edits[2], crate::document::TextLineEdit::Remove { objects: vec![1041, 1042] });

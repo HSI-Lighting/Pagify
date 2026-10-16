@@ -302,6 +302,7 @@ fn the_justified_paragraph_keeps_the_width_of_every_line() {
             style: TextStyle::default(),
             remove: line[1..].to_vec(),
             justify_to: if last { None } else { Some(width) },
+            spans: Vec::new(),
         });
     }
 
@@ -407,6 +408,7 @@ fn spreading_one_line_leaves_the_lines_after_it_alone() {
             style: TextStyle::default(),
             remove: removed.clone(),
             justify_to: Some(rect.right - rect.left),
+            spans: Vec::new(),
         }],
     )
     .unwrap_or_else(|e| panic!("refused: {e}"));
@@ -618,7 +620,7 @@ fn page_with(content: &str) -> PdfiumDocument {
 }
 
 fn spread(first: usize, text: &str, remove: &[usize], width: f32) -> TextLineEdit {
-    TextLineEdit::Retype { first, text: text.to_string(), style: TextStyle::default(), remove: remove.to_vec(), justify_to: Some(width) }
+    TextLineEdit::Retype { first, text: text.to_string(), style: TextStyle::default(), remove: remove.to_vec(), justify_to: Some(width), spans: Vec::new() }
 }
 
 fn width_of(doc: &PdfiumDocument, object: usize) -> f32 {
