@@ -130,7 +130,7 @@ From `desktop\` (Windows):
 
 ```
 $env:PAGIFY_PDFIUM_LIB = "third_party\pdfium\pdfium-win-x64\bin\pdfium.dll"
-cargo test -p pagify_app --release --bin pagify_app     # ~990 tests, ~35s once built
+cargo test -p pagify_app --release --bin pagify_app     # ~1000 tests, ~35s once built
 cargo test -p pagify_shell --release                     # ~800 tests
 cargo test -p pdf_core --release --manifest-path ..\rust\pdf_core\Cargo.toml --no-fail-fast
 ```
@@ -259,12 +259,23 @@ expanded the `~`.
 
 ### Not done, and honestly so
 
-- **Forty verbs are named and not built** (`verbs::PLANNED`) — 38 of the 209
-  ribbon buttons across the tabs answer "planned for <phase>, and not built
-  yet". The whole Share tab (6/6), most of Form's authoring tools (17/22 that
-  build fields rather than fill them), five PagiSign, four Convert, three View
-  and one each on Home/Edit/Accessibility. Nothing is greyed out; the answer
-  appears under the command bar when the button is pressed.
+- **Thirty-four verbs are named and not built** (`verbs::PLANNED`) — 32 of the
+  209 ribbon buttons across the tabs answer "planned for <phase>, and not built
+  yet". Most of Form's authoring tools (17/22 that build fields rather than
+  fill them), five PagiSign, four Convert, two View (Page Transitions,
+  Assistant), one Share (Attach to Email), and one each on
+  Home/Edit/Accessibility. Nothing is greyed out; the answer appears under the
+  command bar when the button is pressed.
+- **Sharing is local, not online.** `email` and `sendreview` draft a message in
+  the default mail client, `sharelink` copies a `file://` link, `cloudstorage`
+  reveals the document's file in the file manager, and `trackreviews` opens the
+  Comments panel — none of them uploads anything, and each says so. Attaching a
+  file to the draft (`emailattach`) needs OS mail integration this build does
+  not have; online signing, bulk send and cloud storage remain planned.
+- **Read is the OS's own voice.** `readaloud` speaks the page in view through
+  `say` (macOS), `System.Speech` (Windows) or `espeak-ng`/`espeak` (Linux);
+  `readaloud stop` or Escape stops it. A machine with none of those engines is
+  told which one it is missing.
 - **Form *authoring* is not built.** Filling works — click a widget to type,
   tick or choose — but the Form tab's tools that *create* fields are planned.
 - **There is no AI tab.** The mockup's Assistant is a single planned button
@@ -292,8 +303,9 @@ expanded the `~`.
 
 ```
 document   open close save saveas quit
-view       page <n|next|prev|first|last>   zoom <percent|in|out|fit|width|actual>   rotate [90]
+view       page <n|next|prev|first|last>   zoom <percent|in|out|fit|width|actual>   rotate [90]   readaloud [stop]
 organize   extract <pages> <file>   import <file> [pages]   deletepage <pages>   insertpage   movepage <pages> <before>
+share      email   sharelink   sendreview   trackreviews   cloudstorage
 review     highlight   note <text>
 measure    calibrate <distance> [unit]   pagescale   measure <distance|area>
 automate   record [name]   stop   replay <script.json>   clearhistory

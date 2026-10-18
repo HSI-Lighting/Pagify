@@ -5,8 +5,8 @@
 
 use crate::hub;
 use crate::{
-    signature_is_a_warning, signature_line, Awaiting, Closing, DrawKind, FindReplace, SignatureList,
-    SignaturePad, SnippetList, Tab, Tool,
+    signature_is_a_warning, signature_line, Awaiting, Closing, DrawKind, FindReplace, MailKind,
+    SignatureList, SignaturePad, SnippetList, Tab, Tool,
 };
 use pagify_shell::command_plan::{CommandEnv, Effect};
 use pagify_shell::command::{Dispatch, Kind};
@@ -199,7 +199,13 @@ impl crate::PagifyApp {
             | Effect::ReportAltText(_)
             | Effect::ReportReadingOrder(_)
             | Effect::ToggleSplitView
-            | Effect::ToggleReverseView => self.apply_files(effect),
+            | Effect::ToggleReverseView
+            | Effect::ShareLink
+            | Effect::RevealDocument
+            | Effect::EmailDocument
+            | Effect::SendForReview
+            | Effect::TrackReviews
+            | Effect::ReadAloud { .. } => self.apply_files(effect),
             Effect::RunReflow
             | Effect::RunFind(_)
             | Effect::RunFindStep { .. }
@@ -760,6 +766,12 @@ impl crate::PagifyApp {
             Effect::ReportReadingOrder(pages) => self.report_reading_order(&pages),
             Effect::ToggleSplitView => self.toggle_split_view(),
             Effect::ToggleReverseView => self.toggle_reverse_view(),
+            Effect::ShareLink => self.share_link(),
+            Effect::RevealDocument => self.reveal_document(),
+            Effect::EmailDocument => self.compose_mail(MailKind::Document),
+            Effect::SendForReview => self.compose_mail(MailKind::Review),
+            Effect::TrackReviews => self.track_reviews(),
+            Effect::ReadAloud { stop } => self.read_aloud(stop),
             Effect::RunAccessCheck => self.run_access_check(),
             Effect::WriteAccessReport { dest } => match dest {
                 Some(path) => self.write_access_report(&path),

@@ -290,6 +290,22 @@ pub enum Effect {
     ToggleSplitView,
     /// Read the rows right to left, or back.
     ToggleReverseView,
+    /// Copy a `file://` link to the open document to the clipboard — the app
+    /// is the only side with the `egui::Context` a real write needs.
+    ShareLink,
+    /// Show the open document's own file in the OS file manager.
+    RevealDocument,
+    /// Compose a message about the open document in the default mail client.
+    EmailDocument,
+    /// Compose a request to review the open document in the default mail
+    /// client.
+    SendForReview,
+    /// Open the Comments panel, which is where a document's review marks are
+    /// listed.
+    TrackReviews,
+    /// Read the page in view aloud with the OS's own speech engine; `stop`
+    /// stops a reading already under way.
+    ReadAloud { stop: bool },
     /// Write every field as CSV; `None` asks for the file first.
     ExportFormSheet { dest: Option<std::path::PathBuf> },
     /// Set a field's tooltip.
@@ -480,6 +496,12 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::ViewSplit
         | Verb::ReadingOptions
         | Verb::ReverseView
+        | Verb::ShareLink
+        | Verb::RevealDocument
+        | Verb::EmailDocument
+        | Verb::SendForReview
+        | Verb::TrackReviews
+        | Verb::ReadAloud { .. }
         | Verb::ShapeWords
         | Verb::KeepTool
         | Verb::Reflow
@@ -787,6 +809,15 @@ fn plan_files_and_text(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::ListMarks => vec![Effect::RunListMarks],
         Verb::RemoveMark(n) => vec![Effect::RunRemoveMark(*n)],
         Verb::Note(text) => vec![Effect::RunNote(text.clone())],
+        // Sharing and reading: the local half of the Share tab, and View's
+        // Read. Each hands off to the OS or opens a panel; none touches the
+        // document, which is why they are effects rather than page operations.
+        Verb::ShareLink => vec![Effect::ShareLink],
+        Verb::RevealDocument => vec![Effect::RevealDocument],
+        Verb::EmailDocument => vec![Effect::EmailDocument],
+        Verb::SendForReview => vec![Effect::SendForReview],
+        Verb::TrackReviews => vec![Effect::TrackReviews],
+        Verb::ReadAloud { stop } => vec![Effect::ReadAloud { stop: *stop }],
         _ => return None,
     })
 }
@@ -1194,6 +1225,13 @@ mod tests {
             (Verb::ListMarks, vec![Effect::RunListMarks]),
             (Verb::RemoveMark(2), vec![Effect::RunRemoveMark(2)]),
             (Verb::Note("t".into()), vec![Effect::RunNote("t".into())]),
+            (Verb::ShareLink, vec![Effect::ShareLink]),
+            (Verb::RevealDocument, vec![Effect::RevealDocument]),
+            (Verb::EmailDocument, vec![Effect::EmailDocument]),
+            (Verb::SendForReview, vec![Effect::SendForReview]),
+            (Verb::TrackReviews, vec![Effect::TrackReviews]),
+            (Verb::ReadAloud { stop: false }, vec![Effect::ReadAloud { stop: false }]),
+            (Verb::ReadAloud { stop: true }, vec![Effect::ReadAloud { stop: true }]),
         ];
         for (verb, want) in cases {
             assert_eq!(plan(&verb, &env), Some(want), "planning {verb:?}");

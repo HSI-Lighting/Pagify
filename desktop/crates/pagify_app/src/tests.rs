@@ -797,3 +797,102 @@ fn add_text_buttons_submit_bare_and_arm_the_box_tool() {
         }
     }
 }
+
+/// What the box has said, newest last — the same reading `lock_wiring_tests`
+/// uses, kept here for the sharing/reading actions.
+fn said(app: &PagifyApp) -> String {
+    app.cmd.history().iter().map(|entry| entry.text.as_str()).collect::<Vec<_>>().join("\n")
+}
+
+/// A path is not a URL: spaces, `#` and non-ASCII letters change what a URI
+/// means unless they are escaped, and a Windows `\` is not a separator in one.
+#[test]
+fn a_file_uri_escapes_what_a_path_cannot_carry() {
+    assert_eq!(file_uri(std::path::Path::new("/tmp/a b.pdf")), "file:///tmp/a%20b.pdf");
+    assert_eq!(
+        file_uri(std::path::Path::new("/tmp/notes #1.pdf")),
+        "file:///tmp/notes%20%231.pdf"
+    );
+    assert_eq!(
+        file_uri(std::path::Path::new("/tmp/naïve.pdf")),
+        "file:///tmp/na%C3%AFve.pdf"
+    );
+}
+
+/// A mail client gets the subject and body from the URI's own query, so both
+/// must be escaped: `&` in a subject would otherwise start a new parameter.
+#[test]
+fn a_mailto_uri_escapes_the_subject_and_the_body() {
+    let uri = mailto_uri("Review: a & b", "line one\nline two");
+    assert_eq!(
+        uri,
+        "mailto:?subject=Review%3A%20a%20%26%20b&body=line%20one%0Aline%20two"
+    );
+    assert_eq!(uri.matches('?').count(), 1, "a query value leaked into the query: {uri}");
+}
+
+/// **The Share tab's local half, on a real document.** Each says what it did;
+/// the mail and file-manager launches are seamed off in tests (see
+/// `open_in_browser`), while the link itself is real text waiting for the
+/// frame's clipboard pass.
+#[test]
+fn the_share_words_say_what_they_did() {
+    let mut app = PagifyApp::new(Some(&fixture("two-column.pdf")));
+
+    app.submit("sharelink");
+    let link = app.clipboard_state.pending_text.clone().expect("no link was put on the clipboard");
+    assert!(link.starts_with("file://"), "{link}");
+    assert!(said(&app).contains("link copied"), "{}", said(&app));
+
+    app.submit("cloudstorage");
+    assert!(said(&app).contains("file manager"), "{}", said(&app));
+
+    app.submit("email");
+    assert!(said(&app).contains("mail client"), "{}", said(&app));
+
+    app.submit("sendreview");
+    assert!(said(&app).contains("review request"), "{}", said(&app));
+}
+
+/// Track Reviews is the Comments panel, reached from where a reviewer looks
+/// for it — and it opens the list rather than toggling one already open.
+#[test]
+fn track_reviews_opens_the_comments_panel() {
+    let mut app = PagifyApp::new(Some(&fixture("two-column.pdf")));
+    app.submit("trackreviews");
+    assert!(app.tab().panels.comments.is_some(), "the Comments panel did not open");
+    assert!(said(&app).contains("Comments panel"), "{}", said(&app));
+    // Pressing it again must not close the panel it is meant to show.
+    app.submit("trackreviews");
+    assert!(app.tab().panels.comments.is_some(), "a second press closed the panel");
+}
+
+/// Read speaks the page in view; the test build never launches a voice, but
+/// the line it says proves the text was read and counted.
+#[test]
+fn read_aloud_reads_the_page_and_can_be_stopped() {
+    let mut app = PagifyApp::new(Some(&fixture("two-column.pdf")));
+    app.submit("readaloud");
+    let told = said(&app);
+    assert!(told.contains("reading page 1 aloud"), "{told}");
+    assert!(told.contains("the test voice"), "{told}");
+    assert!(told.split('(').nth(1).is_some_and(|rest| rest.contains(" words)")), "{told}");
+
+    app.submit("readaloud stop");
+    assert!(said(&app).contains("nothing is being read aloud"), "{}", said(&app));
+}
+
+/// The Share words need a document to share: on an empty window they say so
+/// rather than doing nothing.
+#[test]
+fn the_share_words_need_an_open_document() {
+    let mut app = PagifyApp::new(None);
+    for word in ["sharelink", "cloudstorage", "email", "sendreview", "trackreviews", "readaloud"] {
+        app.submit(word);
+        assert!(
+            said(&app).contains("nothing open."),
+            "`{word}` on an empty window said: {}",
+            said(&app)
+        );
+    }
+}

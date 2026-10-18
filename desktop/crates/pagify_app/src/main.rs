@@ -1420,6 +1420,11 @@ struct ClipboardState {
     /// adding it would mean every test calling them directly would need one
     /// too).
     clipboard_mirror_wanted: bool,
+    /// Text a verb has asked to put on the system clipboard but could not —
+    /// the clipboard write needs the frame's `egui::Context`, and `sharelink`
+    /// runs in dispatch, which has none. Consumed once per frame in `ui()`,
+    /// the same one-place rule as the mirror above.
+    pending_text: Option<String>,
 }
 
 /// Where the signature library, predefined-text and snippet files live on disk, and the
@@ -1579,6 +1584,9 @@ struct PagifyApp {
     /// that fronts it — see [`Conversion`]. One at a time.
     conversion: Option<Conversion>,
     clipboard_state: ClipboardState,
+    /// The OS voice reading a page aloud, while it is reading — see
+    /// [`SpeechState`].
+    speech_state: SpeechState,
     faces_state: FacesState,
     update_state: UpdateState,
     tabs: Vec<DocTab>,
@@ -2090,6 +2098,12 @@ fn area_between(a: AppPoint, b: AppPoint) -> Option<pdf_core::document::Rect> {
 /// straight through the platform's own process-creation call rather than
 /// interpreting it, so nothing in it is ever read as a command separator.
 fn open_in_browser(url: &str) -> std::io::Result<()> {
+    // **No launcher in a test.** A suite that opens a browser, a mail client or
+    // a file manager on whatever machine runs it is a suite nobody wants to
+    // run; the tests read the caller's own message instead.
+    if cfg!(test) {
+        return Ok(());
+    }
     #[cfg(target_os = "windows")]
     let child = {
         // `rundll32`'s own command line syntax, not this program's choice:
@@ -2118,6 +2132,200 @@ fn open_in_browser(url: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Percent-encode the bytes of `text` for a URI, keeping only what `keep`
+/// allows.
+///
+/// Written out rather than pulling a URL crate in for two callers: both need
+/// exactly "escape every byte that is not unreserved", and a dependency for
+/// that would be one more thing to keep patched.
+fn uri_escape(text: &str, keep: impl Fn(u8) -> bool) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.as_bytes() {
+        if keep(*byte) {
+            out.push(*byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+/// RFC 3986's unreserved set — what a query value may carry unescaped.
+fn uri_unreserved(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')
+}
+
+/// A `file://` URI for a local path — the Share tab's own link.
+///
+/// A path is not a URL: a space, a `#` or a non-ASCII letter in a filename all
+/// mean something else in a URI unless escaped. Windows separators become `/`
+/// first, and a drive letter keeps its `:`, which RFC 8089 puts in the path.
+fn file_uri(path: &std::path::Path) -> String {
+    let text = path.to_string_lossy().replace('\\', "/");
+    let mut out = String::from("file://");
+    if !text.starts_with('/') {
+        out.push('/');
+    }
+    out.push_str(&uri_escape(&text, |byte| {
+        uri_unreserved(byte) || matches!(byte, b'/' | b':')
+    }));
+    out
+}
+
+/// A `mailto:` URI carrying a subject and a body — what `email` and
+/// `sendreview` hand the mail client.
+fn mailto_uri(subject: &str, body: &str) -> String {
+    format!(
+        "mailto:?subject={}&body={}",
+        uri_escape(subject, uri_unreserved),
+        uri_escape(body, uri_unreserved)
+    )
+}
+
+/// Run one launcher and reap it on a thread of its own — the same reason
+/// `open_in_browser` waits: an unreaped child is a zombie, and waiting inside
+/// the frame would freeze the window.
+fn spawn_launcher(command: &mut std::process::Command) -> std::io::Result<()> {
+    let child = command.spawn()?;
+    std::thread::spawn(move || {
+        let mut child = child;
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+/// Show `path` in the platform's file manager, selected where it can be.
+///
+/// This is what "Cloud Storage" honestly is without an account: finding the
+/// local file those services would sync. Nothing is uploaded and the message
+/// says so.
+fn reveal_in_file_manager(path: &std::path::Path) -> std::io::Result<()> {
+    if cfg!(test) {
+        return Ok(());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // `/select,` takes the file itself, in the one argument.
+        let mut command = std::process::Command::new("explorer");
+        command.arg(format!("/select,{}", path.display()));
+        spawn_launcher(&mut command)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = std::process::Command::new("open");
+        command.arg("-R").arg(path);
+        spawn_launcher(&mut command)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // Most Linux file managers have no portable "select this file"; the
+        // folder it sits in is what can be opened.
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(path.parent().unwrap_or(path));
+        spawn_launcher(&mut command)
+    }
+}
+
+/// The OS's own voice, in the order to try it.
+///
+/// `say` reads standard input when given no words; PowerShell's
+/// `System.Speech` needs a short script and reads the words the same way;
+/// Linux has no single voice, so both common engines are offered.
+fn speech_commands() -> Vec<(&'static str, std::process::Command)> {
+    #[cfg(target_os = "macos")]
+    {
+        return vec![("say", std::process::Command::new("say"))];
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let script = "Add-Type -AssemblyName System.Speech; $s = New-Object \
+                      System.Speech.Synthesis.SpeechSynthesizer; $s.Speak([Console]::In.ReadToEnd())";
+        let mut command = std::process::Command::new("powershell");
+        command.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+        return vec![("the Windows voice", command)];
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let mut espeak_ng = std::process::Command::new("espeak-ng");
+        espeak_ng.arg("--stdin");
+        let mut espeak = std::process::Command::new("espeak");
+        espeak.arg("--stdin");
+        return vec![("espeak-ng", espeak_ng), ("espeak", espeak)];
+    }
+}
+
+/// Start the OS voice reading `text`.
+///
+/// Returns the engine's name and the process, where there is one. **Never in
+/// a test**: a suite that speaks aloud on the machine running it is a suite
+/// nobody runs, so the test build answers with a name and no process — the
+/// caller's own lines are what the tests read.
+fn start_speaking(text: &str) -> Result<(&'static str, Option<std::process::Child>), String> {
+    if cfg!(test) {
+        return Ok(("the test voice", None));
+    }
+    let mut last_error: Option<String> = None;
+    for (name, mut command) in speech_commands() {
+        command
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        match command.spawn() {
+            Ok(mut child) => {
+                if let Some(mut stdin) = child.stdin.take() {
+                    use std::io::Write as _;
+                    if let Err(e) = stdin.write_all(text.as_bytes()) {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        last_error = Some(format!("{name} would not take the words: {e}"));
+                        continue;
+                    }
+                }
+                return Ok((name, Some(child)));
+            }
+            Err(e) => last_error = Some(format!("{name}: {e}")),
+        }
+    }
+    Err(match last_error {
+        Some(why) => format!("no speech engine would start ({why})"),
+        None => "no speech engine was found on this machine".into(),
+    })
+}
+
+/// Which message the Share tab's two mail buttons draft.
+#[derive(Debug, Clone, Copy)]
+enum MailKind {
+    /// The plain message: "here is the document".
+    Document,
+    /// The review request: "please read this and send comments".
+    Review,
+}
+
+/// The OS speech engine reading a page aloud, while it is reading.
+///
+/// The process is killed when a new reading starts, when `readaloud stop` (or
+/// Escape) asks, and when the window closes — a voice that outlived the app
+/// would keep talking after the person had moved on.
+#[derive(Default)]
+struct SpeechState {
+    child: Option<std::process::Child>,
+}
+
+impl SpeechState {
+    /// Stop whatever is speaking; `true` when something was.
+    fn stop(&mut self) -> bool {
+        let Some(mut child) = self.child.take() else { return false };
+        let _ = child.kill();
+        let _ = child.wait();
+        true
+    }
+}
+
+impl Drop for SpeechState {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
 
 /// A run of text open for editing, in place.
 #[derive(Clone)]
@@ -3389,6 +3597,12 @@ impl PagifyApp {
         if self.tab().view_state.autoscroll {
             ctx.request_repaint();
         }
+        // A reading voice is stopped by Escape as well as by `readaloud stop`:
+        // it is the one thing the app keeps doing after the person has moved
+        // on, and the key that means "stop that" should stop it.
+        if keys.escape && self.speech_state.child.is_some() {
+            self.read_aloud(true);
+        }
         if keys.escape && self.tab().view_state.autoscroll {
             self.tab_mut().view_state.autoscroll = false;
             self.say_info("autoscroll: stopped.");
@@ -3436,6 +3650,11 @@ impl PagifyApp {
         // `egui::Context` a real write needs.
         if std::mem::take(&mut self.clipboard_state.clipboard_mirror_wanted) {
             ctx.copy_text(COPIED_IN_PAGIFY.to_string());
+        }
+        // A verb that put text on the clipboard (`sharelink`) left it here;
+        // this is the one place with the `Context` a real write needs.
+        if let Some(text) = self.clipboard_state.pending_text.take() {
+            ctx.copy_text(text);
         }
         // Snapshot: the render itself needs no window, but the clipboard
         // write does — the same one-place-has-the-context rule as the mirror
@@ -4735,7 +4954,8 @@ impl PagifyApp {
                 ))
             } else {
                 Self::shared_clipboard_dir()
-            }, clipboard_mirror_wanted: false, clipboard_pdf_wanted: false, clipboard_pdf_requested: false, },
+            }, clipboard_mirror_wanted: false, clipboard_pdf_wanted: false, clipboard_pdf_requested: false, pending_text: None, },
+            speech_state: SpeechState::default(),
             faces_state: FacesState { outlined_fonts: if quiet {
                 pagify_shell::outlined_fonts::OutlinedFonts::default()
             } else {
@@ -16731,6 +16951,150 @@ impl PagifyApp {
                 }
             }
             Err(e) => self.say_error(format!("note: {e}")),
+        }
+    }
+
+    // -- share and read -----------------------------------------------------
+
+    /// The open document's own file — what a link, a mail message and the file
+    /// manager all need.
+    fn open_document_path(&self) -> Option<std::path::PathBuf> {
+        self.tab().doc.as_ref().map(|doc| doc.session.path().to_path_buf())
+    }
+
+    /// Put a `file://` link to the open document on the clipboard — the Share
+    /// tab's Share Link.
+    ///
+    /// The clipboard write itself needs the frame's `egui::Context`, which
+    /// dispatch has none of, so the text waits in `clipboard_state.pending_text`
+    /// for `ui()` to put it there.
+    fn share_link(&mut self) {
+        let Some(path) = self.open_document_path() else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let link = file_uri(&path);
+        self.clipboard_state.pending_text = Some(link.clone());
+        self.say_info(format!(
+            "link copied — {link}. It opens this file where it is; nothing was uploaded."
+        ));
+    }
+
+    /// Show the document's file in the OS file manager — the Share tab's Cloud
+    /// Storage, without a cloud account: finding the local file one would sync.
+    fn reveal_document(&mut self) {
+        let Some(path) = self.open_document_path() else {
+            self.say_error("nothing open.");
+            return;
+        };
+        match reveal_in_file_manager(&path) {
+            Ok(()) => self.say_info(format!(
+                "showing {} in the file manager. Nothing was uploaded — this is the local file \
+                 a cloud folder would keep in sync.",
+                path.display()
+            )),
+            Err(e) => self.say_error(format!("cloudstorage: the file manager did not open: {e}")),
+        }
+    }
+
+    /// Compose a message in the default mail client — the Share tab's Email
+    /// and Send for Review. `mailto` carries words and a link, not the file.
+    fn compose_mail(&mut self, kind: MailKind) {
+        let Some(path) = self.open_document_path() else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "this document".into());
+        let pages = self.tab().doc.as_ref().map(|doc| doc.page_count).unwrap_or(0);
+        let link = file_uri(&path);
+        let plural = if pages == 1 { "" } else { "s" };
+        let (subject, body, said) = match kind {
+            MailKind::Document => (
+                format!("A PDF from Pagify: {name}"),
+                format!("Here is {name} ({pages} page{plural}).\n\n{link}\n"),
+                "a message about the document was opened in the mail client. It carries the \
+                 words and a link, not the file — attach the file there if the reader needs it.",
+            ),
+            MailKind::Review => (
+                format!("Review requested: {name}"),
+                format!(
+                    "Please review {name} ({pages} page{plural}) and send me your comments.\n\n{link}\n"
+                ),
+                "a review request was opened in the mail client — the words and a link, not the \
+                 file. Attach it there if the reviewer needs it.",
+            ),
+        };
+        match open_in_browser(&mailto_uri(&subject, &body)) {
+            Ok(()) => self.say_info(said),
+            Err(e) => self.say_error(format!("the mail client did not open: {e}")),
+        }
+    }
+
+    /// Open the Comments panel — where every review mark in the document is
+    /// listed — for the Share tab's Track Reviews.
+    ///
+    /// Not `toggle_comments_panel`: a button pressed from the Share tab should
+    /// open the list, never close one that is already open.
+    fn track_reviews(&mut self) {
+        if self.tab().doc.is_none() {
+            self.say_error("nothing open.");
+            return;
+        }
+        if self.tab().panels.comments.is_none() {
+            self.toggle_comments_panel();
+        }
+        self.say_info(
+            "the Comments panel lists every review mark in this document — Go jumps to its \
+             page, ✕ removes it. A note opens when clicked.",
+        );
+    }
+
+    /// Read the page in view aloud with the OS's own voice — the View tab's
+    /// Read. `stop` stops a reading already under way; a new reading replaces
+    /// the one before it rather than talking over it.
+    fn read_aloud(&mut self, stop: bool) {
+        if stop {
+            if self.speech_state.stop() {
+                self.say_info("stopped reading.");
+            } else {
+                self.say_info("nothing is being read aloud.");
+            }
+            return;
+        }
+        let page = self.tab().view_state.page;
+        let Some(session) = self.tab().doc.as_ref().map(|doc| doc.session.clone()) else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let text = match session.characters(page) {
+            Ok(characters) => characters.text(),
+            Err(e) => {
+                self.say_error(format!("readaloud: {e}"));
+                return;
+            }
+        };
+        let words = text.split_whitespace().count();
+        if words == 0 {
+            self.say_info(format!(
+                "page {} has no words to read — a scan needs `extracttext` first.",
+                page + 1
+            ));
+            return;
+        }
+        self.speech_state.stop();
+        match start_speaking(&text) {
+            Ok((engine, child)) => {
+                self.speech_state.child = child;
+                self.say_info(format!(
+                    "reading page {} aloud with {engine} ({words} words) — `readaloud stop` or \
+                     Escape stops it.",
+                    page + 1
+                ));
+            }
+            Err(e) => self.say_error(format!("readaloud: {e}")),
         }
     }
 

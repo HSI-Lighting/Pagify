@@ -757,6 +757,37 @@ pub enum Verb {
     /// `fromfiles <folder>`, which takes every picture in the folder in name
     /// order. Bare, the app opens a picker.
     FromFiles { folder: Option<PathBuf> },
+
+    /// Copy a `file://` link to the open document — the Share tab's Share
+    /// Link.
+    ///
+    /// A link, not the path, so it can be pasted where a URL is expected. On
+    /// this machine it opens the file in whatever reads PDFs, which is the
+    /// whole of what a local share link can promise without a service behind
+    /// it.
+    ShareLink,
+    /// Show the open document's own file in the OS file manager — the Share
+    /// tab's Cloud Storage.
+    ///
+    /// Nothing is uploaded. Without a service, the honest local part of "cloud
+    /// storage" is finding the file that would be synced; a message says as
+    /// much rather than pretending a folder is a cloud.
+    RevealDocument,
+    /// Compose a message about the open document in the default mail client —
+    /// the Share tab's Email. `mailto` carries subject and body, not the file.
+    EmailDocument,
+    /// Compose a request to review the open document — the Share tab's Send
+    /// for Review. The request is drafted locally; there is no service to send
+    /// it through, and the message says so.
+    SendForReview,
+    /// Open the Comments panel, where every review mark in the document is
+    /// listed — the Share tab's Track Reviews. It is the same panel
+    /// `managecomments` opens, reached from where a reviewer looks for it.
+    TrackReviews,
+    /// Read the page in view aloud with the OS's own speech engine — the View
+    /// tab's Read. `readaloud stop` stops a reading already under way.
+    ReadAloud { stop: bool },
+
     Quit { force: bool },
     /// Recognised, deliberately not implemented yet, and carrying the phase
     /// that will implement it.
@@ -980,12 +1011,10 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("assistant", "the viewing phase", "the Assistant tool"),
     ("autotag", "the accessibility phase", "the Autotag Document tool"),
     ("calcorder", "the forms phase", "the Calculation Order tool"),
-    ("cloudstorage", "the sharing phase", "the Cloud Storage tool"),
     ("combfield", "the forms phase", "the Comb Field tool"),
     ("createform", "the forms phase", "the Form tool"),
     ("crossref", "the editing phase", "the Cross Reference tool"),
     ("editxfa", "the forms phase", "the Edit Static XFA Form tool"),
-    ("email", "the sharing phase", "the Email tool"),
     ("emailattach", "the sharing phase", "the Attach to Email tool"),
     ("fieldbarcode", "the forms phase", "the Barcode tool"),
     ("fieldbutton", "the forms phase", "the Push Button tool"),
@@ -1005,15 +1034,11 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("onlineform", "the signing phase", "the Create Online Form tool"),
     ("pagetemplates", "the forms phase", "the Page Templates tool"),
     ("portfolio", "the conversion phase", "the PDF Portfolio tool"),
-    ("readaloud", "the viewing phase", "the Read tool"),
     ("requestsignature", "the signing phase", "the Request Signature tool"),
     ("sendbulk", "the signing phase", "the Send in Bulk tool"),
-    ("sendreview", "the sharing phase", "the Send for Review tool"),
-    ("sharelink", "the sharing phase", "the Share Link tool"),
     ("signbranding", "the signing phase", "the Add E-Sign Branding tool"),
     ("tooffice", "the conversion phase", "the To MS Office tool"),
     ("toolsettings", "the forms phase", "the Tool Settings tool"),
-    ("trackreviews", "the sharing phase", "the Track Reviews tool"),
     ("transitions", "the viewing phase", "the Page Transitions tool"),
 ];
 
@@ -1047,6 +1072,7 @@ pub fn parse(line: &str) -> Option<Result<Verb, String>> {
         .or_else(|| parse_security_options(head.as_str(), rest, tail))
         .or_else(|| parse_document_edits(head.as_str(), rest, tail))
         .or_else(|| parse_file_and_view(head.as_str(), rest, tail))
+        .or_else(|| parse_sharing_and_reading(head.as_str(), rest, tail))
         .or_else(|| parse_conversion(head.as_str(), rest, tail))
         .or_else(|| parse_marks_and_misc(head.as_str(), rest, tail))
 }
@@ -1147,6 +1173,9 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "tickmark", "inserttext", "replacetext", "addlink", "customstamp", "imageannotation",
         "textbox",
         "unsecure", "redact",
+        // Share and Read: built in the sharing phase — see
+        // `parse_sharing_and_reading`.
+        "sharelink", "cloudstorage", "email", "sendreview", "trackreviews", "readaloud",
     ];
     tokens.extend(PLANNED.iter().map(|(v, _, _)| *v));
     tokens
@@ -1196,6 +1225,8 @@ pub fn help_text(topic: Option<&str>) -> Vec<String> {
         "text       find <text>   findnext / fn   findprev / fp   — ⌘C copies a selection".into(),
         "           reflow — rebuild this page's reading order, when it does not read right".into(),
         "measure    calibrate <distance> [unit]   pagescale   measure <distance|area>".into(),
+        "share      email   sharelink   sendreview   trackreviews   cloudstorage".into(),
+        "view       readaloud [stop] — reads the page in view aloud with the OS voice".into(),
         "automate   record [name]   stop   replay <script.json>".into(),
         "edit       undo redo".into(),
         "text       textlayer   — what kind of text this page has, and why selection".into(),
@@ -1593,6 +1624,31 @@ fn parse_document_edits(head: &str, rest: &[&str], tail: &str) -> Option<Result<
 }
 
 /// One domain of [`parse`]: the 17 commands below.
+/// The sharing and reading words — the Share tab, and View's Read.
+///
+/// A parser of their own rather than arms in `parse_file_and_view`, because
+/// what most of them do is not a file operation at all: they hand something to
+/// the OS (a mail client, the file manager, a speech engine) or open a panel,
+/// and none of them touches the document. Keeping the domain boundary honest
+/// keeps `help` and the collision test honest too.
+fn parse_sharing_and_reading(head: &str, rest: &[&str], _tail: &str) -> Option<Result<Verb, String>> {
+    Some(match head {
+        "sharelink" => Ok(Verb::ShareLink),
+        "cloudstorage" => Ok(Verb::RevealDocument),
+        "email" => Ok(Verb::EmailDocument),
+        "sendreview" => Ok(Verb::SendForReview),
+        "trackreviews" => Ok(Verb::TrackReviews),
+        "readaloud" => match rest.first().map(|word| word.to_ascii_lowercase()).as_deref() {
+            None => Ok(Verb::ReadAloud { stop: false }),
+            Some("stop") if rest.len() == 1 => Ok(Verb::ReadAloud { stop: true }),
+            Some(other) => Err(format!(
+                "readaloud: expected nothing or `stop`, got '{other}'"
+            )),
+        },
+        _ => return None,
+    })
+}
+
 fn parse_file_and_view(head: &str, rest: &[&str], tail: &str) -> Option<Result<Verb, String>> {
     Some(match head {
         "selecttool" => Ok(Verb::Pointer(PointerMode::Select)),
@@ -2097,6 +2153,43 @@ mod parse_domain_tests {
                 "`{word}` is claimed by `{domain}` but `parse` returns None for it"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod sharing_and_reading_tests {
+    use super::*;
+
+    /// The Share tab's local half and View's Read are real words now: each
+    /// parses to a verb, and none is still a placeholder. Removing a word from
+    /// `PLANNED` without teaching `parse` it is exactly what these catch.
+    #[test]
+    fn the_share_and_read_words_parse_to_their_verbs() {
+        assert_eq!(parse("sharelink"), Some(Ok(Verb::ShareLink)));
+        assert_eq!(parse("cloudstorage"), Some(Ok(Verb::RevealDocument)));
+        assert_eq!(parse("email"), Some(Ok(Verb::EmailDocument)));
+        assert_eq!(parse("sendreview"), Some(Ok(Verb::SendForReview)));
+        assert_eq!(parse("trackreviews"), Some(Ok(Verb::TrackReviews)));
+        assert_eq!(parse("readaloud"), Some(Ok(Verb::ReadAloud { stop: false })));
+        assert_eq!(parse("readaloud stop"), Some(Ok(Verb::ReadAloud { stop: true })));
+        assert_eq!(
+            parse("readaloud louder"),
+            Some(Err("readaloud: expected nothing or `stop`, got 'louder'".into()))
+        );
+        for word in ["sharelink", "cloudstorage", "email", "sendreview", "trackreviews", "readaloud"] {
+            assert!(
+                PLANNED.iter().all(|(v, _, _)| *v != word),
+                "`{word}` is still in the planned table"
+            );
+        }
+    }
+
+    /// What is still planned on the Share tab is planned for an honest reason:
+    /// attaching a file to a mail message is OS mail integration this build
+    /// does not have. It must keep answering as a placeholder, not as a typo.
+    #[test]
+    fn attaching_to_mail_is_still_honestly_planned() {
+        assert!(matches!(parse("emailattach"), Some(Ok(Verb::Planned { verb: "emailattach", .. }))));
     }
 }
 
