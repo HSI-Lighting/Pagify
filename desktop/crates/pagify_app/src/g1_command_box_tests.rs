@@ -249,32 +249,69 @@ fn a_click_that_only_fills_the_box_is_not_recorded_and_keeps_the_armed_tool() {
     );
 }
 
-/// The start screen's Tool Wizard cards send `extract` and `import` bare
-/// through the same handler — the first Extract a tester meets.
+/// **The start screen's Merge and Extract cards ask for a document first,
+/// then do their own work.** Reported from use: "merge and extract buttons on
+/// the main window dont do anything" — with nothing open, `import` had no
+/// document to bring pages into and `extract` none to pull them out of, so
+/// the click ended in one line of text and the buttons read as dead. Each now
+/// opens a picker for the document to work on (see `open_then`), and the
+/// suite's own test answer cancels it, which is the "nothing chosen." line
+/// these assert — proof the picker was asked for, not just a message said.
 #[test]
-fn the_extract_card_with_nothing_open_says_to_open_a_pdf_first() {
+fn the_start_screen_cards_ask_for_a_document_first() {
     let mut app = PagifyApp::new(None);
     app.faces_state.outlined_fonts = Default::default();
     let mut h = harness_from(app);
     assert!(h.state().tab().doc.is_none());
 
-    // Merge is the card that would otherwise open a native picker, which
-    // nothing in this suite may do: with nothing open it must not.
-    for blurb in ["Pull a range of pages", "Bring pages in from another document"] {
+    for blurb in ["Bring pages in from another document", "Pull a range of pages"] {
         h.get_by_label_contains(blurb).click();
         h.run_steps(3);
 
         assert!(errors(&h).is_empty(), "{blurb}: raised an error: {:?}", errors(&h));
         assert!(echoes(&h).is_empty(), "{blurb}: ran a command: {:?}", echoes(&h));
         let last = h.state().cmd.history().last().expect("a message");
-        assert_eq!(last.kind, pagify_shell::command::Kind::Info);
-        assert!(last.text.contains("open a PDF first"), "{blurb}: {:?}", last.text);
+        assert!(
+            last.text.contains("nothing chosen"),
+            "{blurb}: the picker was not asked for: {:?}",
+            last.text
+        );
+        assert!(h.state().tab().panels.extract_ask.is_none(), "{blurb}: extract ran with nothing open");
     }
 }
 
-/// The decision itself, with no window — and the one branch the UI tests
-/// cannot reach, because Merge's bare `import` with a document open
-/// raises a blocking native picker and nothing in this suite may click it.
+/// **With a document open the cards do their own work** — the other half of
+/// the same report: Merge asks for the file to bring pages from (the suite's
+/// test answer cancels it, hence "nothing chosen."), Extract opens its own
+/// dialog bent on the current page.
+#[test]
+fn with_a_document_open_the_cards_do_their_own_work() {
+    let mut h = harness("single-page.pdf");
+    h.state_mut().tab_mut().ribbon = Tab::File;
+    h.run_steps(2);
+
+    h.get_by_label_contains("Bring pages in from another document").click();
+    h.run_steps(3);
+    assert!(errors(&h).is_empty(), "merge raised an error: {:?}", errors(&h));
+    assert!(
+        h.state().cmd.history().iter().any(|e| e.text.contains("nothing chosen")),
+        "the merge picker was not asked for: {:?}",
+        h.state().cmd.history().iter().map(|e| e.text.clone()).collect::<Vec<_>>()
+    );
+
+    h.get_by_label_contains("Pull a range of pages").click();
+    h.run_steps(2);
+    assert!(errors(&h).is_empty(), "extract raised an error: {:?}", errors(&h));
+    assert!(
+        h.state().tab().panels.extract_ask.is_some(),
+        "the extract dialog did not open"
+    );
+}
+
+/// The decision itself, with no window — the map from a bare command to
+/// "run it", "fill it", "pick a file" or "ask for pages", which the card and
+/// ribbon clicks above then act on (`open_then` in the handler is what the
+/// file-picking pair do with it when nothing is open yet).
 #[test]
 fn a_click_runs_fills_or_asks_for_a_file_by_what_the_bare_command_would_get() {
     // Runs as it always did.

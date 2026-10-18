@@ -1,4 +1,4 @@
-use super::{newer_version, read_update_manifest};
+use super::{newer_version, read_update_manifest, update_outcome, UpdateOutcome};
 
 #[test]
 fn a_newer_patch_counts() {
@@ -75,4 +75,38 @@ fn an_empty_manifest_reports_nothing() {
     std::fs::write(dir.join("version.txt"), "   \n").expect("write manifest");
     assert_eq!(read_update_manifest(&dir), None);
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// **The three answers are different facts.** A missing folder is "no channel"
+/// (what every macOS/Linux machine and most Windows machines will see), a
+/// readable manifest that is not newer is "up to date", and only a newer one
+/// is offered.
+#[test]
+fn a_look_at_the_channel_answers_no_channel_up_to_date_or_found() {
+    let base = std::env::temp_dir().join(format!(
+        "pagify-update-outcome-{:?}",
+        std::thread::current().id()
+    ));
+    let missing = base.join("missing");
+    let _ = std::fs::remove_dir_all(&base);
+    assert!(
+        matches!(update_outcome(&missing, "0.1.0"), UpdateOutcome::NoChannel),
+        "a folder that is not there is no update channel"
+    );
+
+    std::fs::create_dir_all(&base).expect("scratch dir");
+    std::fs::write(base.join("version.txt"), "0.1.0\n").expect("manifest");
+    assert!(
+        matches!(update_outcome(&base, "0.1.0"), UpdateOutcome::UpToDate),
+        "the published build is the one running"
+    );
+    std::fs::write(base.join("version.txt"), "9.9.9\n").expect("manifest");
+    match update_outcome(&base, "0.1.0") {
+        UpdateOutcome::Found(version, dir) => {
+            assert_eq!(version, "9.9.9");
+            assert_eq!(dir, base);
+        }
+        other => panic!("a newer manifest was not found: {other:?}"),
+    }
+    std::fs::remove_dir_all(&base).ok();
 }

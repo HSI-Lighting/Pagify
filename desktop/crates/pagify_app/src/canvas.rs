@@ -588,7 +588,10 @@ impl crate::PagifyApp {
             .enumerate()
             .map(|(i, piece)| {
                 let corner = |x: f32, y: f32| view.to_screen(AppPoint::new(x as f64, y as f64));
-                let outline = egui::Rect::from_min_max(
+                // With air around it, then normalised: a quarter turn swaps
+                // which corner is top-left, and `from_min_max` would produce
+                // an inverted box for the box highlight.
+                let outline = egui::Rect::from_two_pos(
                     corner(piece.rect.left - AIR_PT, piece.rect.top - AIR_PT),
                     corner(piece.rect.right + AIR_PT, piece.rect.bottom + AIR_PT),
                 );
@@ -609,12 +612,7 @@ impl crate::PagifyApp {
     pub(crate) fn draw_object_selection(&mut self, ui: &mut egui::Ui, page: usize, view: PageView) {
         self.draw_move_guides(ui, page, view);
         let Some(sel) = self.tab_mut().selection.selected.clone().filter(|s| s.page == page) else { return };
-        let to_screen = |r: &pdf_core::document::Rect| {
-            egui::Rect::from_min_max(
-                view.to_screen(AppPoint::new(r.left as f64, r.top as f64)),
-                view.to_screen(AppPoint::new(r.right as f64, r.bottom as f64)),
-            )
-        };
+        let to_screen = |r: &pdf_core::document::Rect| view.screen_rect(r);
         let painter = ui.painter();
         let outline = to_screen(&sel.rect);
 
@@ -955,7 +953,9 @@ impl crate::PagifyApp {
     /// clicking a title goes to its page; a grouping heading (no
     /// destination of its own) is dim and not clickable. Children are drawn
     /// indented when the row is open (everything starts collapsed); the row
-    /// of the chapter the page in view belongs to is lit.
+    /// of the chapter the page in view belongs to is lit. A title wider than
+    /// the panel truncates with an ellipsis — the full words on hover — so no
+    /// row ever holds the panel wider than it has been dragged.
     fn draw_outline_row(
         &mut self,
         ui: &mut egui::Ui,
@@ -1003,15 +1003,32 @@ impl crate::PagifyApp {
             }
             match entry.page {
                 Some(page) => {
-                    if ui
-                        .selectable_label(is_active || page == current, &entry.title)
-                        .clicked()
-                    {
+                    // **The title truncates with an ellipsis, not the panel.**
+                    // A selectable label sized to its own words was a floor the
+                    // panel could not be dragged below — reported from use: "unable
+                    // to reduce the width of the contents panel to smaller than the
+                    // longest text". Where the words do not fit, they are cut with
+                    // an ellipsis and the whole title on hover; the row never asks
+                    // for more width than the panel has, so narrowing it always
+                    // works.
+                    let response = ui
+                        .add(
+                            egui::Button::selectable(
+                                is_active || page == current,
+                                entry.title.as_str(),
+                            )
+                            .truncate(),
+                        )
+                        .on_hover_text(&entry.title);
+                    if response.clicked() {
                         *jump_to = Some(page);
                     }
                 }
                 None => {
-                    ui.label(egui::RichText::new(&entry.title).weak());
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(&entry.title).weak()).truncate(),
+                    )
+                    .on_hover_text(&entry.title);
                 }
             }
         });
@@ -1410,7 +1427,16 @@ impl crate::PagifyApp {
                             egui::Color32::WHITE,
                         );
 
-                        let view = PageView { origin, scale: zoom };
+                        // **The turn goes in here**, with the frame as drawn:
+                        // a rotated page is laid out by its turned size, and
+                        // `PageView` turns every page point the same way —
+                        // see its own doc for the report this answers.
+                        let view = PageView {
+                            origin,
+                            scale: zoom,
+                            rotation: self.tab().view_state.rotation,
+                            frame: (w, h),
+                        };
                         self.draw_detail_overlay(ctx, ui, page, view, rect, device_scale);
                         self.draw_text_highlights(ui.painter(), page, view);
                         if let Some(layer) = self.tab_mut().markup.existing(page) {
@@ -1530,6 +1556,7 @@ impl crate::PagifyApp {
                         // clicking. Drawn last, it is simply clickable.
                         self.draw_run_editor(ui, page, view);
                         self.draw_new_text_box(ui, page, view);
+                        self.draw_field_editor(ui, page, view);
                     }
                 }
 
@@ -1935,12 +1962,10 @@ impl crate::PagifyApp {
                     .line_rects(0..chars.len())
                     .into_iter()
                     .map(|r| {
-                        egui::Rect::from_min_max(
-                            view.to_screen(AppPoint::new(r.left as f64, r.top as f64)),
-                            view.to_screen(AppPoint::new(r.right as f64, r.bottom as f64)),
-                        )
-                        // A little room, so a square does not clip an ascender.
-                        .expand(2.0)
+                        // Normalised through the turn — see `PageView::screen_rect`.
+                        view.screen_rect_of(r.left, r.top, r.right, r.bottom)
+                            // A little room, so a square does not clip an ascender.
+                            .expand(2.0)
                     })
                     .collect()
             })
@@ -1950,9 +1975,9 @@ impl crate::PagifyApp {
         let mut asked: Option<String> = None;
 
         for item in &items {
-            let min = view.to_screen(AppPoint::new(item.rect.left as f64, item.rect.top as f64));
-            let max = view.to_screen(AppPoint::new(item.rect.right as f64, item.rect.bottom as f64));
-            let area = egui::Rect::from_min_max(min, max);
+            // Normalised through the turn — a rotated page's locked area is
+            // painted right-side-up, not inverted.
+            let area = view.screen_rect(&item.rect);
 
             // A chequerboard, which every editor uses for "nothing here" — the
             // gap reads as deliberate emptiness rather than as a design
@@ -2220,6 +2245,14 @@ impl crate::PagifyApp {
             return;
         }
 
+        // **And for a form widget: clicking a field fills it**, the way it
+        // does in every reader — a text field opens its editor over itself,
+        // a box or radio takes the click, a choice opens its options. Only
+        // with no tool in hand: a tool in hand owns the pointer.
+        if self.tab_mut().tool.is_none() && response.clicked() && self.fill_field_at(page, at) {
+            return;
+        }
+
         // The object tool takes the pointer whole while it is in hand — its
         // clicks select and its drags move or resize, none of which is a mark
         // or a text selection.
@@ -2404,6 +2437,20 @@ impl crate::PagifyApp {
         at: AppPoint,
     ) {
         if response.drag_started() {
+            // **Where the button went down, not where the drag was
+            // recognised.** egui reports `drag_started` only once the pointer
+            // has moved far enough to tell a drag from a click, so `at` here
+            // is a few points along the gesture — and a selection that began
+            // at *that* point started at the wrong character. Reported from
+            // use alongside the turned-view trouble: a drag across a word
+            // marked from its second letter. The press origin is the point
+            // the reader aimed at; `at` remains the fallback for platforms
+            // that do not report one.
+            let at = ui
+                .input(|i| i.pointer.press_origin())
+                .map(|p| view.to_page(p))
+                .unwrap_or(at);
+
             // The rotate handle, if a markup shape is already selected here,
             // wins over everything else a drag could mean at this point —
             // the same priority [`Self::signature_handle_at`] gets over a

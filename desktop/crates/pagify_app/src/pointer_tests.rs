@@ -25,6 +25,49 @@ fn said(app: &PagifyApp) -> String {
     app.cmd.history().iter().map(|e| e.text.as_str()).collect::<Vec<_>>().join("\n")
 }
 
+/// Ink somewhere in a rectangle of a raster, in pixels.
+fn ink_in(raster: &pagify_shell::session::PageRaster, x0: u32, x1: u32, y0: u32, y1: u32) -> usize {
+    let mut ink = 0;
+    for y in y0..y1.min(raster.height) {
+        for x in x0..x1.min(raster.width) {
+            let at = ((y * raster.width + x) * 4) as usize;
+            if raster.pixels[at..at + 3] != [255, 255, 255] {
+                ink += 1;
+            }
+        }
+    }
+    ink
+}
+
+/// **The snapshot carries what has been drawn on the page.** Reported from
+/// use: "if i have drawn 2d shapes on the page, they do not show up in the
+/// snapshot" — the render is the *file's* page, and the shapes drawn on top
+/// live in this app's own layer until a save commits them, so the snapshot
+/// paints them in itself (`PagifyApp::snapshot_raster`).
+#[test]
+fn a_snapshot_carries_the_shapes_drawn_on_the_page() {
+    let mut app = app("single-page.pdf");
+    // The fixture is a small page — 200×400 points — so the line stays on it.
+    let plain = app.snapshot_raster(0, 1.0).expect("the plain raster");
+    assert_eq!(ink_in(&plain, 40, 160, 40, 65), 0, "the bare page has ink where the line will go");
+
+    app.submit("line");
+    assert!(app.tab_mut().tool.is_some(), "line did not arm:\n{}", said(&app));
+    app.take_pick(at(50.0, 50.0));
+    app.take_pick(at(150.0, 50.0));
+    assert_eq!(marks(&app), 1, "the line was not drawn:\n{}", said(&app));
+
+    let marked = app.snapshot_raster(0, 1.0).expect("the marked raster");
+    assert!(
+        ink_in(&marked, 50, 150, 46, 54) > 40,
+        "the drawn line is not on the snapshot: {} pixels of ink",
+        ink_in(&marked, 50, 150, 46, 54)
+    );
+    // The line is *the* difference: nothing else moved.
+    assert_eq!(ink_in(&marked, 0, 40, 0, 400), 0, "something was drawn left of the line");
+    assert_eq!(ink_in(&marked, 160, 200, 0, 400), 0, "something was drawn right of the line");
+}
+
 // -- drawing ----------------------------------------------------------
 
 /// Pick the tool, then click twice. This is the whole interaction, and

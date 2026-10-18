@@ -16,6 +16,17 @@ use pagify_shell::verbs::{PageTarget, Verb};
 use pdf_core::Rotation;
 
 impl crate::PagifyApp {
+    /// This window's own id for a floating panel or modal.
+    ///
+    /// **Salted by window serial**, because every window is drawn into one
+    /// egui context (`hub`): two windows with the same panel open would
+    /// otherwise share one id — its position, size, open state and text — and
+    /// one of them would misbehave. The command box already salts this way
+    /// (`hub::PagifyApp::command_id`); these panels did not.
+    pub(crate) fn window_id(&self, salt: &str) -> egui::Id {
+        egui::Id::new((salt, self.hub_state.win.serial))
+    }
+
     /// "A newer build is sitting in Dropbox — install it?" Modelled on
     /// `ask_about_unsaved`'s modal: a local decision set inside the closure,
     /// acted on once it returns.
@@ -25,7 +36,7 @@ impl crate::PagifyApp {
         // outcomes this dialog has, not `Decision`'s three (that one is
         // `ask_about_unsaved`'s own, for a different question).
         let mut decision: Option<bool> = None;
-        egui::Modal::new(egui::Id::new("update_available")).show(ctx, |ui| {
+        egui::Modal::new(self.window_id("update_available")).show(ctx, |ui| {
             ui.set_width(340.0);
             ui.heading("Update available");
             ui.add_space(6.0);
@@ -88,7 +99,7 @@ impl crate::PagifyApp {
         let mut replace_all = false;
 
         egui::Window::new("Search & Replace")
-            .id(egui::Id::new("find-replace-window"))
+            .id(self.window_id("find-replace-window"))
             .open(&mut open)
             .resizable(false)
             .collapsible(false)
@@ -242,7 +253,7 @@ impl crate::PagifyApp {
         let chinese = panel.chinese_note();
 
         egui::Window::new("Check Spelling")
-            .id(egui::Id::new("spell-check-window"))
+            .id(self.window_id("spell-check-window"))
             .open(&mut open)
             .resizable(false)
             .collapsible(false)
@@ -480,7 +491,7 @@ impl crate::PagifyApp {
         let zoom_pct = has_doc.then(|| (self.resolved_zoom() * 100.0).round());
 
         egui::Window::new("View Setting")
-            .id(egui::Id::new("view-settings-window"))
+            .id(self.window_id("view-settings-window"))
             .open(&mut open)
             .resizable(false)
             .collapsible(false)
@@ -608,7 +619,7 @@ impl crate::PagifyApp {
         let mut close = false;
 
         egui::Window::new("Accounting Calculator")
-            .id(egui::Id::new("calculator-window"))
+            .id(self.window_id("calculator-window"))
             .open(&mut open)
             .resizable(false)
             .collapsible(false)
@@ -692,7 +703,7 @@ impl crate::PagifyApp {
         let mut close = false;
 
         egui::Window::new("Tags")
-            .id(egui::Id::new("tags-window"))
+            .id(self.window_id("tags-window"))
             .open(&mut open)
             .resizable(false)
             .collapsible(false)
@@ -737,7 +748,7 @@ impl crate::PagifyApp {
         let mut remove: Option<(usize, usize)> = None;
 
         egui::Window::new("Comments")
-            .id(egui::Id::new("comments-window"))
+            .id(self.window_id("comments-window"))
             .open(&mut open)
             .resizable(false)
             .collapsible(false)
@@ -790,7 +801,7 @@ impl crate::PagifyApp {
         let mut go_to_page: Option<usize> = None;
 
         egui::Window::new("Bookmarks")
-            .id(egui::Id::new("bookmark-panel"))
+            .id(self.window_id("bookmark-panel"))
             .open(&mut open)
             .default_size(egui::vec2(240.0, 300.0))
             .resizable(true)
@@ -827,7 +838,7 @@ impl crate::PagifyApp {
         let mut add = false;
 
         egui::Window::new("Add Web Link")
-            .id(egui::Id::new("web-link-window"))
+            .id(self.window_id("web-link-window"))
             .open(&mut open)
             .resizable(false)
             .collapsible(false)
@@ -886,7 +897,7 @@ impl crate::PagifyApp {
         let mut add = false;
 
         egui::Window::new("Add Article Box")
-            .id(egui::Id::new("article-box-window"))
+            .id(self.window_id("article-box-window"))
             .open(&mut open)
             .resizable(false)
             .collapsible(false)
@@ -954,7 +965,7 @@ impl crate::PagifyApp {
         let mut add = false;
         let kept: Vec<String> = self.library_state.predefined.entries().to_vec();
 
-        egui::Modal::new(egui::Id::new("snippet-list")).show(ctx, |ui| {
+        egui::Modal::new(self.window_id("snippet-list")).show(ctx, |ui| {
             ui.set_width(520.0);
             ui.heading("Predefined text");
             ui.add_space(6.0);
@@ -1079,7 +1090,7 @@ impl crate::PagifyApp {
         let current = self.library_state.signatures.current().map(|s| s.name.clone());
         let entries = self.library_state.signatures.entries().to_vec();
 
-        egui::Modal::new(egui::Id::new("signature-list")).show(ctx, |ui| {
+        egui::Modal::new(self.window_id("signature-list")).show(ctx, |ui| {
             ui.set_width(560.0);
             ui.heading("Your signatures");
             ui.add_space(6.0);
@@ -1293,7 +1304,7 @@ impl crate::PagifyApp {
 
         let mut keep = false;
         let mut gave_up = false;
-        egui::Modal::new(egui::Id::new("signature-pad")).show(ctx, |ui| {
+        egui::Modal::new(self.window_id("signature-pad")).show(ctx, |ui| {
             ui.set_width(560.0);
             ui.heading("Draw your signature");
             ui.add_space(6.0);
@@ -1432,7 +1443,7 @@ impl crate::PagifyApp {
 
         let mut submitted = false;
         let mut gave_up = false;
-        egui::Modal::new(egui::Id::new("passcode")).show(ctx, |ui| {
+        egui::Modal::new(self.window_id("passcode")).show(ctx, |ui| {
             ui.set_width(440.0);
             ui.heading(&heading);
             ui.add_space(6.0);
@@ -1588,7 +1599,7 @@ impl crate::PagifyApp {
 
         let mut go = false;
         let mut cancel = false;
-        egui::Modal::new(egui::Id::new("extract-pages")).show(ctx, |ui| {
+        egui::Modal::new(self.window_id("extract-pages")).show(ctx, |ui| {
             ui.set_width(420.0);
             ui.heading("Extract pages");
             ui.add_space(6.0);

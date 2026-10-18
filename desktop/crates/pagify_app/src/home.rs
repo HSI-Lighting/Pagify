@@ -40,13 +40,13 @@ struct Card {
 
 /// The mockup's three cards.
 ///
-/// Its third is labelled "Convert", which Pagify cannot do — there is no
-/// conversion engine and none is planned in the build plan. A card that does
-/// nothing is worse than one that does something, so the slot holds Extract,
-/// which is real and is the operation people reach for next to Merge.
-/// The mockup's colours are themed now, so this builds fresh each call
-/// instead of sitting as a `const` — cheap (three small structs), and the
-/// one place this runs is the start screen, not a per-frame hot path.
+/// Its third is labelled "Convert". Conversion now exists — the Convert tab
+/// carries To Image/HTML/Other, Split, Combine and the rest — but this card
+/// slot still holds Extract, which is the operation people reach for next to
+/// Merge and the one this start-screen button has always run. The mockup's
+/// colours are themed now, so this builds fresh each call instead of sitting
+/// as a `const` — cheap (three small structs), and the one place this runs is
+/// the start screen, not a per-frame hot path.
 fn cards() -> [Card; 3] {
     [
         Card {

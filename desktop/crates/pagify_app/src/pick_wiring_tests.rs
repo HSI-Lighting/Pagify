@@ -1618,7 +1618,7 @@ fn edit_text_boxes_the_paragraphs_around_a_drawn_line_and_lights_the_one_under_t
         .iter()
         .find(|b| b.lines.len() == 4 && b.lines[2].objects.is_empty() && !b.lines[2].outlined.is_empty())
         .expect("the four-line paragraph with a drawn third line is gone from page 1");
-    let view = crate::overlay::PageView { origin: egui::Pos2::new(0.0, 0.0), scale: 1.0 };
+    let view = crate::overlay::PageView::upright(egui::Pos2::new(0.0, 0.0), 1.0);
     let screen = |at: AppPoint| view.to_screen(at);
     let upper = centre(&page.runs[&block.lines[0].objects[0]].rect);
     let lower = centre(&page.runs[&block.lines[3].objects[0]].rect);

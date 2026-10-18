@@ -683,6 +683,13 @@ pub trait Document: Send + Sync {
 
     /// Set the value of the first text field named `name`; `false` when the
     /// document holds no such field.
+    ///
+    /// **Driven through the form environment, so the value shows.** A plain
+    /// write of the field's `/V` persists — a later open reads it back — and
+    /// moves no pixel of any render, because the widget keeps drawing the
+    /// appearance stream its author made. Focus-select-replace is the route
+    /// a reader's own typing takes and the one PDFium regenerates
+    /// appearances for.
     fn set_form_text(&mut self, _name: &str, _value: &str) -> Result<bool> {
         Ok(false)
     }
@@ -696,17 +703,40 @@ pub trait Document: Send + Sync {
     /// Check the radio widget of the group named `name` whose own state is
     /// `state`; `false` when no widget matches.
     ///
-    /// **This build cannot set radio buttons, and says so by answering
-    /// `false` rather than writing something wrong.** Measured while
-    /// building the form filler: the C API's checked-setter
-    /// (`FPDFAnnot_SetFormFieldChecked`) is not in the bindings this crate
-    /// ships, a button's own on-state (its export value) reads empty
-    /// through them for every widget this repo can make — tried keys-inline
-    /// and parent-with-`/Kids`, with minimal and well-formed appearance
-    /// streams — and writing `/AS` and the value by hand drives PDFium's
-    /// per-control state machine into reporting the *other* control
-    /// checked. A version bump of the pdfium bindings is the real fix.
+    /// **A click on the widget, through the form environment** — the same
+    /// route the user's own click takes, and the only one that works. This
+    /// method used to refuse: writing `/AS` and the value by hand drove
+    /// PDFium's per-control state machine into reporting the *other*
+    /// control checked, and the C API's checked-setter is not in the
+    /// bindings this crate ships. Driving the environment sidesteps both —
+    /// the group's own rules (which widget clears, what the value becomes)
+    /// are PDFium's, not a reimplementation of them.
     fn set_form_radio(&mut self, _name: &str, _state: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Set the value of the first combo or list field named `name`;
+    /// `false` when the document holds no such field.
+    ///
+    /// A combo box takes text through the same environment route a text
+    /// field does — PDFium documents `FORM_SelectAllText` itself for "form
+    /// text field or form combo-box text field" — and the option it matches
+    /// is the value that lands. A **list box** is a different control: it is
+    /// set by clicking its entry (see [`Self::click_form_field`]) rather
+    /// than by taking text, and this answers `false` for one.
+    fn set_form_choice(&mut self, _name: &str, _value: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Click the form widget at `(x, y)` — **page points, top-left origin**,
+    /// the space every other coordinate this program hands out uses.
+    ///
+    /// **PDFium's own control decides what the click means**: a checkbox
+    /// toggles, a radio joins its group and clears the rest, a list box
+    /// selects the entry under the point — the form's own state machine,
+    /// not a reimplementation of it. `false` when nothing is there to
+    /// click.
+    fn click_form_field(&mut self, _page_index: usize, _at: (f32, f32)) -> Result<bool> {
         Ok(false)
     }
 
@@ -1108,6 +1138,49 @@ pub trait Document: Send + Sync {
             .into_iter()
             .filter(|d| d.kind == DrawnKind::Shape)
             .collect())
+    }
+
+    /// Every path a page draws, in drawing order, **with its own outline and
+    /// paint** — see [`PagePaint`]. Where [`Self::drawn_shapes`] answers where
+    /// each shape reaches and how opaque it is, this answers what it *is*: the
+    /// points, the fill and stroke colours, the width, the dash. For a caller
+    /// drawing the page again rather than listing it — the HTML export is the
+    /// one there is.
+    ///
+    /// **A backend that cannot read paths refuses; it must not look like a
+    /// page with none.** An empty answer here paints a page with its rules
+    /// and boxes silently gone.
+    fn page_paints(&self, _page_index: usize) -> Result<Vec<PagePaint>> {
+        Err(PdfError::Unsupported("reading a page's paths"))
+    }
+
+    /// The bytes a page's image is stored with, when they are in a form a
+    /// browser can show exactly as they are — a plain JPEG in RGB or grey —
+    /// with the media type to serve them under.
+    ///
+    /// **`None` is "ask for the pixels instead"**, meaning two different
+    /// things a caller does not need told apart: the stream is not a JPEG at
+    /// all (flate bitmaps, fax, JPEG 2000), or it is one no browser paints
+    /// right — a CMYK JPEG, whose colours come back inverted on screen —
+    /// and [`Self::image_data`] plus an encoder is what serves that. It is
+    /// also `None` for an index that is not an image.
+    fn image_raw(&self, _page_index: usize, _object: usize) -> Result<Option<(Vec<u8>, &'static str)>> {
+        Err(PdfError::Unsupported("reading an image's own bytes"))
+    }
+
+    /// Every font a page draws with, **in [`RunStyle::font`]'s own numbering**
+    /// — id for id, so a run's `styles[run.object].font` indexes straight into
+    /// this — each with the document's embedded program where there is one,
+    /// the face's own stated weight, and whether it is italic.
+    ///
+    /// For a caller that has to draw the page's words in the page's own
+    /// letters somewhere outside this program: the HTML export embeds these
+    /// as `@font-face`, which is what stops a substituted face's different
+    /// widths from overlapping the pieces of a kerned word. **Only programs
+    /// the document itself embeds**: see [`PageFont::program`] for why a
+    /// substitution font is not passed on.
+    fn page_fonts(&self, _page_index: usize) -> Result<Vec<PageFont>> {
+        Err(PdfError::Unsupported("reading a page's font programs"))
     }
 
     /// The walk [`Document::drawn_objects`] and [`Document::drawn_shapes`] are
@@ -2627,7 +2700,7 @@ pub enum FormFieldKind {
 }
 
 /// One form widget, as the reader walks it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FormFieldInfo {
     /// The field's name — what a form's own tooling addresses it by. Radio
     /// widgets of one group all carry the group's name.
@@ -2638,6 +2711,15 @@ pub struct FormFieldInfo {
     /// (`Yes`, `slow`) when checked and `None` when not; `None` for buttons
     /// and signatures, which hold no value of their own.
     pub value: Option<String>,
+    /// The page the widget is drawn on.
+    pub page: usize,
+    /// Where it is drawn — page points, top-left origin, like every other
+    /// rectangle this program reports. What a filling UI hit-tests a click
+    /// against, and where it puts the field's own editor.
+    pub rect: Rect,
+    /// A combo or list field's options, in the form's own order, by their
+    /// display labels. Empty for every other kind.
+    pub options: Vec<String>,
 }
 
 /// What kind of thing is drawn on a page.
@@ -2703,6 +2785,125 @@ pub struct DrawnObject {
     /// clicking one of them means. They are listed so the page can be read, and
     /// the group itself is what moves.
     pub movable: bool,
+}
+
+/// One path a page draws, with **the geometry and paint it is drawn with** —
+/// the outline itself, not just its box: what a renderer needs to draw it
+/// again, where [`DrawnObject`]'s entry for the same path has only where it
+/// reaches.
+///
+/// Read by [`Document::page_paints`], which is the only reader: the list model
+/// deliberately keeps a box and an opacity, and the callers of that list
+/// (redaction's bridging, restacking's neighbours, the paragraph detector)
+/// have no use for thousands of points each.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PagePaint {
+    /// Position in the page's object list, the same address
+    /// [`TextRun::object`], [`PageImage::object`] and [`DrawnObject::object`]
+    /// use. A path inside a form carries the form's own index, as a path's
+    /// [`DrawnObject`] entry does.
+    pub object: usize,
+    /// The path's outline in drawing order, coordinates already on the page:
+    /// every point has been through the path's own matrix and every form
+    /// matrix between it and the page, and is in **page points, top-left
+    /// origin** like everything else this program reports.
+    pub segments: Vec<PaintSegment>,
+    /// Page points, top-left origin — the box the outline reaches.
+    pub rect: Rect,
+    /// The colour the path is filled with, or `None` when it is not filled.
+    /// The colour's own alpha is the fill's, as PDFium resolved the `ca` in
+    /// force where the path was drawn.
+    pub fill: Option<Color>,
+    /// Whether a fill is wound even-odd rather than by the non-zero rule —
+    /// a donut's hole is only a hole under the right one.
+    pub even_odd: bool,
+    /// The colour the outline is stroked with, or `None` when it is not
+    /// stroked. Its alpha is the stroke's.
+    pub stroke: Option<Color>,
+    /// The stroke's width in page points — the path's own width times the
+    /// scale of the matrices that placed it, so a rule inside a
+    /// half-size form stays the width the page draws it.
+    pub stroke_width: f32,
+    /// The dash pattern in page points, empty for a solid stroke.
+    pub dash: Vec<f32>,
+    pub line_cap: LineCap,
+    pub line_join: LineJoin,
+}
+
+/// One step of a path's outline — the three moves a PDF path is made of.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PaintSegment {
+    /// Lifts the pen: starts a new sub-path here.
+    Move(Point),
+    /// A straight line to this point. `close` says the line runs back to the
+    /// sub-path's own start and the sub-path ends there — the `h` of the
+    /// content stream, one line's worth of it.
+    Line { to: Point, close: bool },
+    /// One cubic Bézier: two control points and the point it ends at.
+    Curve {
+        control1: Point,
+        control2: Point,
+        to: Point,
+    },
+}
+
+/// What a stroke does at its ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineCap {
+    Butt,
+    Round,
+    Square,
+}
+
+/// What a stroke does at its corners.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineJoin {
+    Miter,
+    Round,
+    Bevel,
+}
+
+/// One font a page draws with, **program bytes included** — see
+/// [`Document::page_fonts`]. The id is the one [`RunStyle::font`] hands out.
+///
+/// A whole font program is hundreds of kilobytes, which is why this is a read
+/// of its own and not part of [`crate::document::PageTextSnapshot`]: the
+/// paragraph detector reads that snapshot for every page it touches and has no
+/// use for a byte of this.
+#[derive(Clone, PartialEq)]
+pub struct PageFont {
+    /// The id [`RunStyle::font`] numbers this face with, within one page:
+    /// 0, 1, 2 … in the order the page first uses its fonts.
+    pub id: u32,
+    /// The PDF's own name for the face, **with any subset tag dropped** —
+    /// `"ABCDEF+Montserrat-SemiBold"` reads `"Montserrat-SemiBold"`, which is
+    /// what a browser's `font-family` has to be given. Empty when the file
+    /// does not name it.
+    pub name: String,
+    /// **The document's own embedded program**, and only that: `None` for a
+    /// font the file does not embed, whatever PDFium substitutes to draw it —
+    /// a stand-in shipped with the engine is not this document's to pass on,
+    /// and the reader's own substitution is the honest fallback.
+    pub program: Option<Vec<u8>>,
+    /// The face's own weight, 100 to 900, as the font itself states it; `0`
+    /// when it states nothing (a Type 3 face has no weight).
+    pub weight: u32,
+    /// Whether the face is drawn at an angle — italic or oblique.
+    pub italic: bool,
+}
+
+impl std::fmt::Debug for PageFont {
+    /// The program is hundreds of kilobytes; the debug form says how many
+    /// rather than printing them.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PageFont")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("program", &self.program.as_ref().map(Vec::len))
+            .field("weight", &self.weight)
+            .field("italic", &self.italic)
+            .finish()
+    }
 }
 
 /// Where to put something in the page's drawing order.

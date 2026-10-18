@@ -32,6 +32,7 @@ pub mod markup;
 pub mod measure;
 pub mod organize;
 pub mod page_space;
+pub mod paint;
 pub mod paragraph_lines;
 pub mod predefined;
 pub mod preflight;

@@ -285,6 +285,23 @@ pub struct PageRaster {
 }
 
 impl PageRaster {
+    /// The raster as PNG bytes — what the Conversion tab's To Image writes.
+    ///
+    /// Its own method because the bytes are not always all there is: a page
+    /// with marks drawn on it is painted into the raster *before* this (see
+    /// [`crate::paint::PageMarks`]), and the encode has to come after that,
+    /// not around it.
+    pub fn to_png(&self) -> pdf_core::Result<Vec<u8>> {
+        let bitmap = pdf_core::render::Bitmap {
+            width: self.width,
+            height: self.height,
+            stride: self.width as usize * pdf_core::render::BYTES_PER_PIXEL,
+            order: pdf_core::render::PixelOrder::Rgba,
+            data: self.pixels.clone(),
+        };
+        pdf_core::render::export::encode(&bitmap, pdf_core::render::ImageFormat::Png)
+    }
+
     /// How many pixels are darker than `threshold` on the red channel.
     ///
     /// Crude on purpose. Its job is to answer one question — *did anything

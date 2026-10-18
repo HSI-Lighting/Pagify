@@ -8,7 +8,8 @@ use std::os::raw::{c_char, c_int, c_uint, c_ulong};
 use std::sync::OnceLock;
 
 use pdfium_render::prelude::{
-    PdfBitmap, PdfBitmapFormat, PdfColor, PdfDocument, PdfFormFieldCommon, PdfFormFieldType,
+    PdfBitmap, PdfBitmapFormat, PdfColor, PdfDocument, PdfFormField, PdfFormFieldCommon,
+    PdfFormFieldType,
     PdfPage, PdfPagePaperSize,
     PdfPageObjectCommon, PdfPageObjectType, PdfPageObjectsCommon, PdfPageRenderRotation, PdfPoints,
     PdfRenderConfig, Pdfium, PdfiumError, PdfiumLibraryBindingsAccessor,
@@ -100,7 +101,14 @@ fn read_tag_node(
 
 // The `FPDF_FORMFIELD_*` values from PDFium's C API, which its Rust
 // bindings keep private. Named here as the header names them.
+const FPDF_FORMFIELD_UNKNOWN: i32 = 0;
+const FPDF_FORMFIELD_PUSHBUTTON: i32 = 1;
 const FPDF_FORMFIELD_CHECKBOX: i32 = 2;
+const FPDF_FORMFIELD_RADIOBUTTON: i32 = 3;
+const FPDF_FORMFIELD_COMBOBOX: i32 = 4;
+const FPDF_FORMFIELD_LISTBOX: i32 = 5;
+const FPDF_FORMFIELD_TEXTFIELD: i32 = 6;
+const FPDF_FORMFIELD_SIGNATURE: i32 = 7;
 
 // `FPDFPage_Flatten`'s flag (`fpdf_flatten.h`), kept private by the
 // bindings: bake what a reader shows and a printer sends.
@@ -1257,6 +1265,100 @@ impl Document for PdfiumDocument {
         Ok(Some(DecodedImage { width: meta.width, height: meta.height, rgba }))
     }
 
+    /// See [`Document::image_raw`]: the stream's own bytes when they are a
+    /// JPEG a browser shows as they are.
+    fn image_raw(
+        &self,
+        page_index: usize,
+        object_index: usize,
+    ) -> Result<Option<(Vec<u8>, &'static str)>> {
+        self.validate_page_index(page_index)?;
+        let page_number = i32::try_from(page_index)
+            .map_err(|_| PdfError::InvalidArgument(format!("page index {page_index} is out of range")))?;
+        let raw = RawPage::open(self.document.handle(), page_number)?;
+        let bindings = pdfium()?.bindings();
+
+        let handle = unsafe { bindings.FPDFPage_GetObject(raw.handle, object_index as i32) };
+        if handle.is_null()
+            || unsafe { bindings.FPDFPageObj_GetType(handle) }
+                != pdfium_render::prelude::FPDF_PAGEOBJ_IMAGE as i32
+        {
+            return Ok(None);
+        }
+
+        // **One filter, and it is DCTDecode: the stream is the JPEG itself.**
+        // Anything else is stored some other way, and re-encoding is the only
+        // route that serves it — see [`Document::image_data`].
+        let filter_count = unsafe { bindings.FPDFImageObj_GetImageFilterCount(handle) };
+        let mut filters: Vec<String> = Vec::new();
+        for index in 0..filter_count {
+            let length = unsafe {
+                bindings.FPDFImageObj_GetImageFilter(handle, index, std::ptr::null_mut(), 0)
+            };
+            if length <= 1 {
+                continue;
+            }
+            let mut name = vec![0u8; length as usize];
+            unsafe {
+                bindings.FPDFImageObj_GetImageFilter(
+                    handle,
+                    index,
+                    name.as_mut_ptr() as *mut c_void,
+                    length,
+                )
+            };
+            while name.last() == Some(&0) {
+                name.pop();
+            }
+            filters.push(String::from_utf8_lossy(&name).into_owned());
+        }
+        if filters.len() != 1 || filters[0] != "DCTDecode" {
+            return Ok(None);
+        }
+
+        // **And a colour space a browser's JPEG decoder gets right.** An
+        // Adobe CMYK JPEG — every one InDesign writes for print — comes back
+        // inverted in every browser there is; those keep to the decode path.
+        let mut meta = pdfium_render::prelude::FPDF_IMAGEOBJ_METADATA {
+            width: 0,
+            height: 0,
+            horizontal_dpi: 0.0,
+            vertical_dpi: 0.0,
+            bits_per_pixel: 0,
+            colorspace: 0,
+            marked_content_id: 0,
+        };
+        unsafe { bindings.FPDFImageObj_GetImageMetadata(handle, raw.handle, &mut meta) };
+        if !matches!(
+            meta.colorspace,
+            FPDF_COLORSPACE_DEVICERGB
+                | FPDF_COLORSPACE_CALRGB
+                | FPDF_COLORSPACE_DEVICEGRAY
+                | FPDF_COLORSPACE_CALGRAY
+        ) {
+            return Ok(None);
+        }
+
+        let length =
+            unsafe { bindings.FPDFImageObj_GetImageDataRaw(handle, std::ptr::null_mut(), 0) };
+        if length == 0 {
+            return Ok(None);
+        }
+        let mut bytes = vec![0u8; length as usize];
+        let written = unsafe {
+            bindings.FPDFImageObj_GetImageDataRaw(
+                handle,
+                bytes.as_mut_ptr() as *mut c_void,
+                length,
+            )
+        };
+        if written == 0 {
+            return Ok(None);
+        }
+        bytes.truncate(written as usize);
+        Ok(Some((bytes, "image/jpeg")))
+    }
+
     /// Every form widget in the document, page by page — through
     /// pdfium-render's own form plumbing (`PdfDocument::form`), which is
     /// what gives the widget annotations a form-fill handle to be read
@@ -1273,7 +1375,71 @@ impl Document for PdfiumDocument {
                 .pages()
                 .get(index)
                 .map_err(|e| PdfError::InvalidArgument(format!("{e}")))?;
-            for annotation in page.annotations().iter() {
+            // **Where the widgets are, read raw first, handle dropped before
+            // the object model opens its own** — pdfium-render's annotation
+            // enum keeps its `bounds` to itself (`PdfPageAnnotationPrivate`
+            // is not reachable from outside the crate), so the rectangle
+            // comes from `FPDFAnnot_GetRect` on a page handle of its own.
+            // Two live handles on one page is the arrangement this file
+            // warns about, so this one is open, read from, and dropped
+            // before `page` is used. Annotation order is the same in both
+            // APIs — `PdfPageAnnotations::get(i)` is
+            // `FPDFPage_GetAnnot(page, i)` — so the indices line up.
+            let raw_rects = {
+                let rects: Vec<crate::document::Rect> = (|| -> Result<_> {
+                    let page_number = i32::try_from(index).map_err(|_| {
+                        PdfError::InvalidArgument(format!("page index {index} is out of range"))
+                    })?;
+                    let raw = RawPage::open(self.document.handle(), page_number)?;
+                    let space = raw.space()?;
+                    let bindings = pdfium()?.bindings();
+                    let count = unsafe { bindings.FPDFPage_GetAnnotCount(raw.handle) };
+                    let mut rects = Vec::with_capacity(count.max(0) as usize);
+                    for annot_index in 0..count.max(0) {
+                        let annot =
+                            unsafe { bindings.FPDFPage_GetAnnot(raw.handle, annot_index) };
+                        if annot.is_null() {
+                            rects.push(crate::document::Rect {
+                                left: 0.0,
+                                top: 0.0,
+                                right: 0.0,
+                                bottom: 0.0,
+                            });
+                            continue;
+                        }
+                        let mut rect = FS_RECTF { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 };
+                        let has =
+                            unsafe { bindings.FPDFAnnot_GetRect(annot, &mut rect) } != 0;
+                        unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+                        if !has {
+                            rects.push(crate::document::Rect {
+                                left: 0.0,
+                                top: 0.0,
+                                right: 0.0,
+                                bottom: 0.0,
+                            });
+                            continue;
+                        }
+                        // PDF space, y up, to the page's own top-left points.
+                        let (left, top) = space.to_top_left(rect.left, rect.top);
+                        let (right, bottom) = space.to_top_left(rect.right, rect.bottom);
+                        rects.push(crate::document::Rect {
+                            left: left.min(right),
+                            top: top.min(bottom),
+                            right: left.max(right),
+                            bottom: top.max(bottom),
+                        });
+                    }
+                    Ok(rects)
+                })()
+                .unwrap_or_default();
+                rects
+            };
+            let annotations = page.annotations();
+            for annotation_index in 0..annotations.len() {
+                let annotation = annotations
+                    .get(annotation_index)
+                    .map_err(|e| PdfError::InvalidArgument(format!("{e}")))?;
                 let Some(field) = annotation.as_form_field() else {
                     continue;
                 };
@@ -1316,10 +1482,41 @@ impl Document for PdfiumDocument {
                     }
                     PdfFormFieldType::Unknown => (FormFieldKind::Unknown, None, None),
                 };
+                // A choice field's options, by the labels a reader shows.
+                let mut options = Vec::new();
+                match &field {
+                    PdfFormField::ComboBox(combo) => {
+                        for option in combo.options().iter() {
+                            if let Some(label) = option.label() {
+                                options.push(label.clone());
+                            }
+                        }
+                    }
+                    PdfFormField::ListBox(list) => {
+                        for option in list.options().iter() {
+                            if let Some(label) = option.label() {
+                                options.push(label.clone());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                let rect = raw_rects
+                    .get(annotation_index as usize)
+                    .copied()
+                    .unwrap_or(crate::document::Rect {
+                        left: 0.0,
+                        top: 0.0,
+                        right: 0.0,
+                        bottom: 0.0,
+                    });
                 out.push(FormFieldInfo {
                     name: name.unwrap_or_default(),
                     kind,
                     value,
+                    page: index as usize,
+                    rect,
+                    options,
                 });
             }
         }
@@ -1327,6 +1524,20 @@ impl Document for PdfiumDocument {
     }
 
     fn set_form_text(&mut self, name: &str, value: &str) -> Result<bool> {
+        // **Driven through the form environment, not written behind it.**
+        // The plain string write (`PdfFormTextField::set_value`) leaves the
+        // widget's appearance stream exactly as the author drew it, so the
+        // value reads back from every later open and shows on none of them —
+        // measured on the form fixture: a name put in came back changed and
+        // the render's pixels did not move. Focus-select-replace is how a
+        // reader's own typing reaches the field, and it is what makes
+        // PDFium regenerate the appearance the user then sees.
+        if self.fill_form_text(name, value)? {
+            return Ok(true);
+        }
+        // Not a widget the environment would take text into (a text field
+        // hidden inside a page the environment refuses, say) — the old
+        // string write still lands the value in the file.
         let pdf_err = |e: pdfium_render::prelude::PdfiumError| {
             PdfError::InvalidArgument(format!("{e}"))
         };
@@ -1353,6 +1564,127 @@ impl Document for PdfiumDocument {
             }
         }
         Ok(false)
+    }
+
+    fn set_form_radio(&mut self, name: &str, state: &str) -> Result<bool> {
+        // **A radio is set by clicking its widgets in turn until the group
+        // reads the state asked for.** A click is the only route that works
+        // — the hand-written `/AS`+`/V` write drove PDFium's per-control
+        // state machine into reporting the *other* control checked, and the
+        // bindings' export-value read comes back empty for the widgets this
+        // repo can make, so a widget cannot be *chosen* by state from the
+        // file alone. What can be read is the group's value after each
+        // click, and the click that produced the state asked for is the one
+        // that stays.
+        //
+        // **A refused state must leave the group where it was.** The search
+        // has to click to learn what each widget carries, so the value the
+        // group held before is remembered and clicked back if the walk comes
+        // up empty — otherwise a form import with a stale value would answer
+        // `false` (so the caller "correctly" reports it not applied) while
+        // silently re-answering the question to the last widget in the group.
+        let Some(form) = self.document.form() else {
+            return Ok(false);
+        };
+        let form_handle = form.handle();
+        let bindings = pdfium()?.bindings();
+        // Every radio widget of the group, by (page, annotation index).
+        let mut widgets: Vec<(usize, i32)> = Vec::new();
+        for page_index in 0..self.page_count {
+            let page_number =
+                i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
+                    index: page_index,
+                    count: self.page_count,
+                })?;
+            let page = RawPage::open(self.document.handle(), page_number)?;
+            let count = unsafe { bindings.FPDFPage_GetAnnotCount(page.handle) };
+            for index in 0..count.max(0) {
+                let annot = unsafe { bindings.FPDFPage_GetAnnot(page.handle, index) };
+                if annot.is_null() {
+                    continue;
+                }
+                let kind = unsafe { bindings.FPDFAnnot_GetFormFieldType(form_handle, annot) };
+                let annot_name = read_form_wide(|buf, len| unsafe {
+                    bindings.FPDFAnnot_GetFormFieldName(form_handle, annot, buf, len)
+                });
+                unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+                if kind == FPDF_FORMFIELD_RADIOBUTTON && annot_name.as_deref() == Some(name) {
+                    widgets.push((page_index, index));
+                }
+            }
+        }
+        let original = self.radio_group_value(name)?;
+        // Already answered: clicking would only dirty the document.
+        if original.as_deref() == Some(state) {
+            return Ok(true);
+        }
+        for &(page_index, index) in &widgets {
+            self.click_radio_widget(page_index, index)?;
+            if self.radio_group_value(name)?.as_deref() == Some(state) {
+                return Ok(true);
+            }
+        }
+        // A state no widget carries: put back what was selected before. (A
+        // group with nothing selected cannot be restored by clicking, which
+        // is the one case this cannot cover — a radio cannot be unset.)
+        if original.is_some() {
+            for &(page_index, index) in &widgets {
+                self.click_radio_widget(page_index, index)?;
+                if self.radio_group_value(name)? == original {
+                    break;
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    fn set_form_choice(&mut self, name: &str, value: &str) -> Result<bool> {
+        // **The option route first**: picking the label out of the list is
+        // what the field's own dropdown does, and it is the only route a
+        // non-editable combo or a list box takes — measured on the form
+        // fixture, where a non-editable combo took the text route and kept
+        // its old value, because there is nothing to type into.
+        if self.select_form_option(name, value)? {
+            return Ok(true);
+        }
+        // Then the text route, for an *editable* combo whose value is not
+        // one of its options: PDFium's own `FORM_SelectAllText` documents
+        // itself for "form text field or form combo-box text field".
+        if !self.fill_form_text(name, value)? {
+            return Ok(false);
+        }
+        // **Believe only what the field reports back.** `FORM_ReplaceSelection`
+        // is declared void and PDFium silently ignores it for a non-editable
+        // combo, so without this read-back a value the field does not carry
+        // answered `true` while the widget kept its old one — and a form
+        // import counted it as applied.
+        Ok(Document::form_fields(self)?.into_iter().any(|field| {
+            matches!(field.kind, FormFieldKind::Combo | FormFieldKind::List)
+                && field.name == name
+                && field.value.as_deref() == Some(value)
+        }))
+    }
+
+    fn click_form_field(&mut self, page_index: usize, at: (f32, f32)) -> Result<bool> {
+        // **The page's own box, not just its height.** The app's click is in
+        // page points from the *crop's* top-left; the form environment speaks
+        // PDF space (y up, origin at the crop's bottom-left). Using the height
+        // alone silently dropped the crop's left and top, so every click on a
+        // page cropped with `croppages` landed the crop offset away from the
+        // widget it was aimed at — found by clicking a checkbox's own reported
+        // centre after a crop and missing it.
+        let (x, y) = {
+            let page_number =
+                i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
+                    index: page_index,
+                    count: self.page_count,
+                })?;
+            // Its own page handle, dropped before the form environment opens
+            // one: see `form_fields` on why two at once is avoided.
+            let page = RawPage::open(self.document.handle(), page_number)?;
+            page.space()?.to_pdf(at.0, at.1)
+        };
+        self.click_form_widget_on(page_index, (x, y))
     }
 
     fn set_form_checkbox(&mut self, name: &str, checked: bool) -> Result<bool> {
@@ -1662,27 +1994,62 @@ impl Document for PdfiumDocument {
             if font.is_null() {
                 continue;
             }
-            let needed = unsafe { bindings.FPDFFont_GetBaseFontName(font, std::ptr::null_mut(), 0) };
-            if needed == 0 {
-                continue;
-            }
-            let mut buffer = vec![0u8; needed as usize];
-            let written = unsafe {
-                bindings.FPDFFont_GetBaseFontName(font, buffer.as_mut_ptr() as *mut c_char, needed)
-            };
-            if written == 0 {
-                continue;
-            }
-            buffer.truncate(written as usize);
-            if buffer.last() == Some(&0) {
-                buffer.pop();
-            }
-            let name = String::from_utf8_lossy(&buffer).into_owned();
-            if !name.is_empty() {
+            if let Some(name) = font_base_name(bindings, font) {
                 names.insert(index as usize, name);
             }
         }
         Ok(names)
+    }
+
+    /// Every font the page draws with, program bytes and all — see
+    /// [`crate::document::PageFont`] and [`Document::page_fonts`].
+    ///
+    /// **Id for id with [`Self::run_styles`].** Both walks number the page's
+    /// fonts in the order the page first uses them, keyed by the PDFium font
+    /// handle, and both walk the page's objects in the same order — so the
+    /// `font` a style carries indexes straight into this list, which is the
+    /// whole point: a caller holds a run, its style's id, and needs that
+    /// face's program.
+    ///
+    /// **Only a program the document embeds is passed on.** PDFium will also
+    /// answer with the substitute it draws a non-embedded font with — its own
+    /// shipped stand-ins — and that is the engine's font, not this
+    /// document's: embedding it in what a caller writes out would be passing
+    /// off a borrowed face, and the reader's own substitution is the honest
+    /// fallback. `None` says so, and the name, weight and italic still come
+    /// back for the reader to match on.
+    fn page_fonts(&self, page_index: usize) -> Result<Vec<crate::document::PageFont>> {
+        self.validate_page_index(page_index)?;
+        let page_number = i32::try_from(page_index).map_err(|_| {
+            PdfError::InvalidArgument(format!("page index {page_index} is out of range"))
+        })?;
+        let raw = RawPage::open(self.document.handle(), page_number)?;
+        let bindings = pdfium()?.bindings();
+        let count = unsafe { bindings.FPDFPage_CountObjects(raw.handle) };
+
+        let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut fonts: Vec<crate::document::PageFont> = Vec::new();
+        for index in 0..count.max(0) {
+            let handle = unsafe { bindings.FPDFPage_GetObject(raw.handle, index) };
+            if handle.is_null()
+                || unsafe { bindings.FPDFPageObj_GetType(handle) }
+                    != pdfium_render::prelude::FPDF_PAGEOBJ_TEXT as i32
+            {
+                continue;
+            }
+            let font = unsafe { bindings.FPDFTextObj_GetFont(handle) };
+            if font.is_null() || !seen.insert(font as usize) {
+                continue;
+            }
+            fonts.push(crate::document::PageFont {
+                id: fonts.len() as u32,
+                name: font_base_name(bindings, font).map(|name| drop_subset_tag(&name)).unwrap_or_default(),
+                program: font_program(bindings, font),
+                weight: font_weight(bindings, font),
+                italic: font_italic(bindings, font),
+            });
+        }
+        Ok(fonts)
     }
 
     /// One page open and one walk over its objects, like `run_font_names`.
@@ -2303,7 +2670,7 @@ impl Document for PdfiumDocument {
         let page = self.page_object(&file, page_index)?;
         let (stream, streams) = self.page_content(&file, &page)?;
         let operations = content::parse(&stream)?;
-        let placed = content::placed(&operations);
+        let placed = self.placed_on_page(page_index, &operations)?;
 
         let span: std::ops::Range<usize> = 'span: {
             let pictures = self.images_on(page_index)?;
@@ -2348,7 +2715,6 @@ impl Document for PdfiumDocument {
             }
 
             if let Some(run) = self.text_run_at(page_index, object)? {
-                let height = self.page_size(page_index)?.height_pt;
                 let fonts = self.page_fonts(&file, &page);
                 let codes_in = |p: &content::Placed| -> usize {
                     let width = p
@@ -2368,7 +2734,7 @@ impl Document for PdfiumDocument {
                 };
                 let order = self.text_order(page_index, object);
                 let (first, last, _) =
-                    run_operators(&run, height, &placed, &operations, &codes_in, order)?;
+                    run_operators(&run, &placed, &operations, &codes_in, order)?;
                 break 'span first..last + 1;
             }
 
@@ -2420,7 +2786,7 @@ impl Document for PdfiumDocument {
         let page = self.page_object(&file, page_index)?;
         let (stream, streams) = self.page_content(&file, &page)?;
         let operations = content::parse(&stream)?;
-        let placed = content::placed(&operations);
+        let placed = self.placed_on_page(page_index, &operations)?;
 
         let spans = self.span_tables(page_index, &file, &page, &operations, &placed)?;
         let fonts = self.page_fonts(&file, &page);
@@ -2495,9 +2861,8 @@ impl Document for PdfiumDocument {
         let page = self.page_object(&file, page_index)?;
         let (stream, streams) = self.page_content(&file, &page)?;
         let operations = content::parse(&stream)?;
-        let placed = content::placed(&operations);
+        let placed = self.placed_on_page(page_index, &operations)?;
         let states = content::states(&operations);
-        let height = self.page_size(page_index)?.height_pt;
 
         let fonts = self.page_fonts(&file, &page);
         let codes_in = |p: &content::Placed| -> usize {
@@ -2518,7 +2883,7 @@ impl Document for PdfiumDocument {
         };
         let order = self.text_order(page_index, object);
         let (first, last, continues) =
-            run_operators(&run, height, &placed, &operations, &codes_in, order)?;
+            run_operators(&run, &placed, &operations, &codes_in, order)?;
         if continues {
             return Err(PdfError::Unsupported(
                 "more text is drawn right after these words on the same line with nothing \
@@ -2676,6 +3041,83 @@ impl Document for PdfiumDocument {
     /// shape's entry does not hold.
     fn drawn_shapes(&self, page_index: usize) -> Result<Vec<crate::document::DrawnObject>> {
         self.drawn_walk(page_index, true)
+    }
+
+    /// Every path a page draws, with its outline and paint — see
+    /// [`Document::page_paints`].
+    ///
+    /// **A walk of its own, not the list's.** The list walk exists to *name*
+    /// what a page draws (words, picture sizes, the placeholder rule) and
+    /// reads whatever that takes; this one reads what the list deliberately
+    /// does not: for every path, its segments through the whole matrix chain,
+    /// and its fill, stroke, dash, caps and joins. Sharing the list walk
+    /// would mean paying one cost on the app's hot path
+    /// ([`crate::document::PageTextSnapshot`] reads shapes for every page the
+    /// paragraph detector sees) to serve an export that wants the other.
+    ///
+    /// What is shared is the shape of the walk: the same form stepping, the
+    /// same matrix composition ([`matrices`]), the same conversion to the
+    /// page's top-left points ([`PageSpace`]) — so a path inside a form, in a
+    /// matrix, or in a form inside a matrix lands where the page draws it,
+    /// which is where the list's box says it lands.
+    fn page_paints(&self, page_index: usize) -> Result<Vec<crate::document::PagePaint>> {
+        use crate::document::PagePaint;
+        use pdfium_render::prelude::{FPDF_PAGEOBJ_FORM, FPDF_PAGEOBJ_PATH};
+
+        self.validate_page_index(page_index)?;
+        let page_number = i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
+            index: page_index,
+            count: self.page_count,
+        })?;
+        let raw = RawPage::open(self.document.handle(), page_number)?;
+        let space = raw.space()?;
+        let bindings = pdfium()?.bindings();
+
+        /// The same bound the list walk uses — see `drawn_walk`.
+        const DEEPEST: usize = 4;
+
+        let mut out: Vec<PagePaint> = Vec::new();
+        // `(object, depth, top-level index, matrix to the page)` — the exact
+        // arrangement `drawn_walk` steps forms with.
+        let mut stack: Vec<(FPDF_PAGEOBJECT, usize, usize, [f32; 6])> = Vec::new();
+        let count = unsafe { bindings.FPDFPage_CountObjects(raw.handle) };
+        for index in (0..count).rev() {
+            let handle = unsafe { bindings.FPDFPage_GetObject(raw.handle, index) };
+            if !handle.is_null() {
+                stack.push((handle, 0, index as usize, IDENTITY_MATRIX));
+            }
+        }
+
+        while let Some((handle, depth, top, to_page)) = stack.pop() {
+            let kind = unsafe { bindings.FPDFPageObj_GetType(handle) } as u32;
+            if kind == FPDF_PAGEOBJ_PATH {
+                let mut matrix =
+                    FS_MATRIX { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
+                unsafe { bindings.FPDFPageObj_GetMatrix(handle, &mut matrix) };
+                // The path's own matrix first, then everything between it and
+                // the page — `FPDFPathSegment_GetPoint` reports in the path's
+                // own space, unlike `GetBounds`, which has the object's own
+                // matrix already in it.
+                let total = matrices([matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f], to_page);
+                if let Some(paint) = path_paint(bindings, handle, total, top, &space) {
+                    out.push(paint);
+                }
+            }
+            if kind == FPDF_PAGEOBJ_FORM && depth < DEEPEST {
+                let mut matrix =
+                    FS_MATRIX { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
+                unsafe { bindings.FPDFPageObj_GetMatrix(handle, &mut matrix) };
+                let inner = matrices([matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f], to_page);
+                let children = unsafe { bindings.FPDFFormObj_CountObjects(handle) };
+                for index in (0..children).rev() {
+                    let child = unsafe { bindings.FPDFFormObj_GetObject(handle, index as c_ulong) };
+                    if !child.is_null() {
+                        stack.push((child, depth + 1, top, inner));
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Every drawn object of a page — or, with `shapes_only`, just its paths.
@@ -3045,7 +3487,7 @@ impl Document for PdfiumDocument {
         let (stream, streams) = self.page_content(&file, &page)?;
         let operations = content::parse(&stream)?;
         let states = content::states(&operations);
-        let placed = content::placed(&operations);
+        let placed = self.placed_on_page(page_index, &operations)?;
         let site = self.object_wrap_site(page_index, object, &file, &page, &operations, &states, &placed)?;
 
         // **A resource of its own on the page.** Opacity is a graphics-state
@@ -3138,7 +3580,6 @@ impl Document for PdfiumDocument {
 
         let pictures = self.images_on(page_index)?;
         let runs = self.text_runs(page_index)?;
-        let height = self.page_size(page_index)?.height_pt;
 
         let was_secured = self.already_secured;
         let plus = self.secure_plus;
@@ -3150,7 +3591,7 @@ impl Document for PdfiumDocument {
         let (stream, streams) = self.page_content(&file, &page)?;
         let operations = content::parse(&stream)?;
         let states = content::states(&operations);
-        let placed = content::placed(&operations);
+        let placed = self.placed_on_page(page_index, &operations)?;
 
         // **Which operations draw it, and whether they are words.** A run has
         // to be re-opened inside its own `BT`; a picture does not. A shape may
@@ -3221,7 +3662,7 @@ impl Document for PdfiumDocument {
             };
             let order = self.text_order(page_index, object);
             let (first, last, continues) =
-                run_operators(run, height, &placed, &operations, &codes_in, order)?;
+                run_operators(run, &placed, &operations, &codes_in, order)?;
             if continues {
                 // Lifting them out takes their advance with them, and the words
                 // that follow on the line would close up over the gap.
@@ -4103,6 +4544,209 @@ impl<'a> Page for PdfiumPage<'a> {
 }
 
 impl PdfiumDocument {
+    /// Put `value` into the first text or combo widget named `name` **by
+    /// driving the form environment** — focus it, select what is there,
+    /// replace it — the route a reader's own typing takes.
+    ///
+    /// See [`Document::set_form_text`] for why this route and not the plain
+    /// string write: only this one makes PDFium regenerate the widget's
+    /// appearance, so only this one shows. `false` when no widget the
+    /// environment would take text into carries that name.
+    fn fill_form_text(&mut self, name: &str, value: &str) -> Result<bool> {
+        let Some(form) = self.document.form() else {
+            return Ok(false);
+        };
+        let form_handle = form.handle();
+        let bindings = pdfium()?.bindings();
+        for page_index in 0..self.page_count {
+            let page_number =
+                i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
+                    index: page_index,
+                    count: self.page_count,
+                })?;
+            let page = RawPage::open(self.document.handle(), page_number)?;
+            let count = unsafe { bindings.FPDFPage_GetAnnotCount(page.handle) };
+            let mut target = None;
+            for index in 0..count.max(0) {
+                let annot = unsafe { bindings.FPDFPage_GetAnnot(page.handle, index) };
+                if annot.is_null() {
+                    continue;
+                }
+                let kind = unsafe { bindings.FPDFAnnot_GetFormFieldType(form_handle, annot) };
+                let annot_name = read_form_wide(|buf, len| unsafe {
+                    bindings.FPDFAnnot_GetFormFieldName(form_handle, annot, buf, len)
+                });
+                let takes_text = kind == FPDF_FORMFIELD_TEXTFIELD || kind == FPDF_FORMFIELD_COMBOBOX;
+                let found = takes_text && annot_name.as_deref() == Some(name);
+                unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+                if found {
+                    target = Some(index);
+                    break;
+                }
+            }
+            let Some(index) = target else { continue };
+
+            // `FORM_SetFocusedAnnot` takes the annotation's own handle, so it
+            // is opened again here and closed when the drive is done.
+            let annot = unsafe { bindings.FPDFPage_GetAnnot(page.handle, index) };
+            if annot.is_null() {
+                continue;
+            }
+            unsafe { bindings.FORM_OnAfterLoadPage(page.handle, form_handle) };
+            unsafe { bindings.FORM_SetFocusedAnnot(form_handle, annot) };
+            unsafe { bindings.FORM_SelectAllText(form_handle, page.handle) };
+            let mut wide: Vec<u16> = value.encode_utf16().collect();
+            wide.push(0);
+            unsafe { bindings.FORM_ReplaceSelection(form_handle, page.handle, wide.as_ptr()) };
+            unsafe { bindings.FORM_ForceToKillFocus(form_handle) };
+            unsafe { bindings.FORM_OnBeforeClosePage(page.handle, form_handle) };
+            unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+            self.touch_annotation();
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Select the option labelled `value` in the combo or list field named
+    /// `name` — **the dropdown's own route, and the only one a non-editable
+    /// combo or a list box takes.** The option's index is found by reading
+    /// the field's own option labels, the strings a reader shows; selection
+    /// goes through `FORM_SetIndexSelected` on the focused widget, so the
+    /// form environment updates the value and the appearance together.
+    fn select_form_option(&mut self, name: &str, value: &str) -> Result<bool> {
+        let Some(form) = self.document.form() else {
+            return Ok(false);
+        };
+        let form_handle = form.handle();
+        let bindings = pdfium()?.bindings();
+        for page_index in 0..self.page_count {
+            let page_number =
+                i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
+                    index: page_index,
+                    count: self.page_count,
+                })?;
+            let page = RawPage::open(self.document.handle(), page_number)?;
+            let count = unsafe { bindings.FPDFPage_GetAnnotCount(page.handle) };
+            for index in 0..count.max(0) {
+                let annot = unsafe { bindings.FPDFPage_GetAnnot(page.handle, index) };
+                if annot.is_null() {
+                    continue;
+                }
+                let kind = unsafe { bindings.FPDFAnnot_GetFormFieldType(form_handle, annot) };
+                let annot_name = read_form_wide(|buf, len| unsafe {
+                    bindings.FPDFAnnot_GetFormFieldName(form_handle, annot, buf, len)
+                });
+                let is_choice =
+                    kind == FPDF_FORMFIELD_COMBOBOX || kind == FPDF_FORMFIELD_LISTBOX;
+                if !is_choice || annot_name.as_deref() != Some(name) {
+                    unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+                    continue;
+                }
+                // The option whose label is the value asked for.
+                let option_count = unsafe { bindings.FPDFAnnot_GetOptionCount(form_handle, annot) };
+                let mut found = None;
+                for option in 0..option_count.max(0) {
+                    let label = read_form_wide(|buf, len| unsafe {
+                        bindings.FPDFAnnot_GetOptionLabel(form_handle, annot, option, buf, len)
+                    });
+                    if label.as_deref() == Some(value) {
+                        found = Some(option);
+                        break;
+                    }
+                }
+                let Some(option) = found else {
+                    unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+                    continue;
+                };
+
+                unsafe { bindings.FORM_OnAfterLoadPage(page.handle, form_handle) };
+                unsafe { bindings.FORM_SetFocusedAnnot(form_handle, annot) };
+                let selected = unsafe {
+                    bindings.FORM_SetIndexSelected(form_handle, page.handle, option, 1)
+                };
+                unsafe { bindings.FORM_ForceToKillFocus(form_handle) };
+                unsafe { bindings.FORM_OnBeforeClosePage(page.handle, form_handle) };
+                unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+                if selected != 0 {
+                    self.touch_annotation();
+                }
+                return Ok(selected != 0);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Click the form widget at `(x, y)` — **PDF page space, y up**, the
+    /// space `FORM_OnLButtonDown` and `FPDFAnnot_GetRect` both speak; the
+    /// app's own top-left clicks go through
+    /// [`Document::click_form_field`].
+    ///
+    /// **PDFium's own control decides what a click means**: a checkbox
+    /// toggles, a radio joins its group and clears the rest, a push button
+    /// fires — the form's own state machine, not a reimplementation of it.
+    /// `false` when nothing is there to click. The press *and* the release
+    /// are sent, because controls wait for both.
+    fn click_form_widget_on(&mut self, page_index: usize, at: (f32, f32)) -> Result<bool> {
+        let Some(form) = self.document.form() else {
+            return Ok(false);
+        };
+        let form_handle = form.handle();
+        let bindings = pdfium()?.bindings();
+        let page_number = i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
+            index: page_index,
+            count: self.page_count,
+        })?;
+        let page = RawPage::open(self.document.handle(), page_number)?;
+        unsafe { bindings.FORM_OnAfterLoadPage(page.handle, form_handle) };
+        let (x, y) = (at.0 as f64, at.1 as f64);
+        let down = unsafe { bindings.FORM_OnLButtonDown(form_handle, page.handle, 0, x, y) };
+        let up = unsafe { bindings.FORM_OnLButtonUp(form_handle, page.handle, 0, x, y) };
+        let left = unsafe { bindings.FORM_ForceToKillFocus(form_handle) };
+        unsafe { bindings.FORM_OnBeforeClosePage(page.handle, form_handle) };
+        if down != 0 || up != 0 {
+            self.touch_annotation();
+        }
+        Ok(down != 0 || up != 0 || left != 0)
+    }
+
+    /// The value the named radio group currently reports, if one is selected
+    /// — the read [`Document::set_form_radio`]'s door uses both to skip an
+    /// already-answered request and to put a refused one back.
+    fn radio_group_value(&self, name: &str) -> Result<Option<String>> {
+        Ok(Document::form_fields(self)?
+            .into_iter()
+            .find(|f| f.kind == FormFieldKind::Radio && f.name == name && f.value.is_some())
+            .and_then(|f| f.value))
+    }
+
+    /// Click one radio widget at its centre, in PDF space — the only route a
+    /// radio's state can be driven by, since a written `/AS` is not believed
+    /// by PDFium's own state machine (see the trait's `set_form_radio`).
+    fn click_radio_widget(&mut self, page_index: usize, index: i32) -> Result<bool> {
+        let bindings = pdfium()?.bindings();
+        let page_number = i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
+            index: page_index,
+            count: self.page_count,
+        })?;
+        let (at, has_rect) = {
+            let page = RawPage::open(self.document.handle(), page_number)?;
+            let annot = unsafe { bindings.FPDFPage_GetAnnot(page.handle, index) };
+            if annot.is_null() {
+                return Ok(false);
+            }
+            let mut rect = FS_RECTF { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 };
+            let has_rect = unsafe { bindings.FPDFAnnot_GetRect(annot, &mut rect) } != 0;
+            unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+            (((rect.left + rect.right) / 2.0, (rect.bottom + rect.top) / 2.0), has_rect)
+        };
+        if !has_rect {
+            return Ok(false);
+        }
+        // `GetRect` speaks PDF space (y up), which is the space the click
+        // takes — nothing is flipped.
+        self.click_form_widget_on(page_index, at)
+    }
+
     /// Check or clear a checkbox: walk every widget, match by field type
     /// and name, then write `/AS` and the field's value through
     /// `FPDFAnnot_SetStringValue`.
@@ -6945,8 +7589,7 @@ impl DocumentMut for PdfiumDocument {
         let page = self.page_object(&file, page_index)?;
         let (stream, streams) = self.page_content(&file, &page)?;
         let operations = content::parse(&stream)?;
-        let placed = content::placed(&operations);
-        let height = self.page_size(page_index)?.height_pt;
+        let placed = self.placed_on_page(page_index, &operations)?;
         let fonts = self.page_fonts(&file, &page);
         let codes_in = |p: &content::Placed| -> usize {
             let width = p
@@ -6970,7 +7613,7 @@ impl DocumentMut for PdfiumDocument {
             let Some(run) = self.text_run_at(page_index, *object)? else { continue };
             let order = self.text_order(page_index, *object);
             let (first, last, _) =
-                run_operators(&run, height, &placed, &operations, &codes_in, order)?;
+                run_operators(&run, &placed, &operations, &codes_in, order)?;
             let from = operations[first].span.start;
             let to = operations[last].span.end;
             edits.push((from..to, Vec::new()));
@@ -7851,7 +8494,7 @@ impl PdfiumDocument {
         let (stream, streams) = self.page_content(&file, &page)?;
 
         let operations = content::parse(&stream)?;
-        let placed = content::placed(&operations);
+        let placed = self.placed_on_page(request.page_index, &operations)?;
         let fonts = self.page_fonts(&file, &page);
 
         // Every character on the page, with where it sits — what decides
@@ -7890,7 +8533,7 @@ impl PdfiumDocument {
         };
 
         for run in &covered {
-            let (want_x, want_y) = (run.rect.left, height - run.rect.bottom);
+            let (want_x, want_y) = (run.rect.left, run.rect.bottom);
 
             // **The operators that draw this run, identified from the
             // stream's own state machine.**
@@ -7966,7 +8609,7 @@ impl PdfiumDocument {
         // separately, which would otherwise be left behind. Only where nothing
         // is being sliced there, or the two edits would fight over the bytes.
         for p in &placed {
-            let (x, y) = (p.origin.x, height - p.origin.y);
+            let (x, y) = (p.origin.x, p.origin.y);
             if request.holds(x, y)
                 && !cuts.edits.iter().any(|(span, _)| *span == operations[p.origin.operation].span)
             {
@@ -8065,7 +8708,6 @@ fn font_to_unicode(
             drawn: image_operators(operations, &names),
             pictures,
             painted: path_operators(operations),
-            height: self.page_size(page_index)?.height_pt,
             shapes: shape_number.len(),
             shape_number,
             text_objects: self.text_objects_in_order(page_index).unwrap_or_default(),
@@ -8128,7 +8770,7 @@ fn font_to_unicode(
         if let Some(run) = self.text_run_at(page_index, object)? {
             let order = spans.text_order(object);
             let (first, last, _) =
-                run_operators(&run, spans.height, spans.placed, operations, codes_in, order)?;
+                run_operators(&run, spans.placed, operations, codes_in, order)?;
             return Ok(first..last + 1);
         }
 
@@ -8182,7 +8824,7 @@ fn font_to_unicode(
         let operations = content::parse(&stream)?;
         let closing = closing_state(&operations)
             .ok_or(PdfError::Unsupported("this page's content stops inside a text object"))?;
-        let placed = content::placed(&operations);
+        let placed = self.placed_on_page(page_index, &operations)?;
         let spans = self.span_tables(page_index, &file, &page, &operations, &placed)?;
         let fonts = self.page_fonts(&file, &page);
         let codes_in = |p: &content::Placed| -> usize {
@@ -8239,7 +8881,7 @@ fn font_to_unicode(
             };
             let order = spans.text_order(cut.object);
             let (first, last, continues) =
-                run_operators(&run, spans.height, &placed, &operations, &codes_in, order)?;
+                run_operators(&run, &placed, &operations, &codes_in, order)?;
             let parts: Vec<&content::Placed> = placed
                 .iter()
                 .filter(|p| (first..=last).contains(&p.origin.operation))
@@ -8672,7 +9314,6 @@ fn font_to_unicode(
         use crate::pdf::content;
 
         let runs = self.text_runs(page_index)?;
-        let height = self.page_size(page_index)?.height_pt;
         let bytes = self
             .document
             .save_to_bytes()
@@ -8681,7 +9322,7 @@ fn font_to_unicode(
         let page = self.page_object(&file, page_index)?;
         let (stream, _) = self.page_content(&file, &page)?;
         let operations = content::parse(&stream)?;
-        let placed = content::placed(&operations);
+        let placed = self.placed_on_page(page_index, &operations)?;
 
         let nearest = |x: f32, y: f32| -> (usize, f32) {
             placed
@@ -8694,8 +9335,8 @@ fn font_to_unicode(
         Ok(runs
             .iter()
             .map(|run| {
-                let (at, by_box) = nearest(run.rect.left, height - run.rect.bottom);
-                let (_, by_origin) = nearest(run.origin.x, height - run.origin.y);
+                let (at, by_box) = nearest(run.rect.left, run.rect.bottom);
+                let (_, by_origin) = nearest(run.origin.x, run.origin.y);
                 (run.object, run.text.clone(), by_box, by_origin, at, placed.len())
             })
             .collect())
@@ -8777,7 +9418,6 @@ fn font_to_unicode(
         let run = self
             .text_run_at(page_index, object)?
             .ok_or_else(|| PdfError::InvalidArgument("that is not a run of text".into()))?;
-        let height = self.page_size(page_index)?.height_pt;
 
         let was_secured = self.already_secured;
         let plus = self.secure_plus;
@@ -8788,7 +9428,7 @@ fn font_to_unicode(
         let page = self.page_object(&file, page_index)?;
         let (stream, streams) = self.page_content(&file, &page)?;
         let operations = content::parse(&stream)?;
-        let placed = content::placed(&operations);
+        let placed = self.placed_on_page(page_index, &operations)?;
         let states = content::states(&operations);
 
         // How many codes each show-text operator draws, which is what says
@@ -8812,7 +9452,7 @@ fn font_to_unicode(
         };
         let order = self.text_order(page_index, object);
         let (first, last, continues) =
-            run_operators(&run, height, &placed, &operations, &codes_in, order)?;
+            run_operators(&run, &placed, &operations, &codes_in, order)?;
 
         // **The move, expressed where the operator lives.** A text matrix's
         // translation reaches the page through the CTM alone, so the distance
@@ -8948,7 +9588,6 @@ fn font_to_unicode(
     ) -> Result<()> {
         use crate::pdf::content;
 
-        let height = self.page_size(page_index)?.height_pt;
 
         let was_secured = self.already_secured;
         let plus = self.secure_plus;
@@ -8959,7 +9598,7 @@ fn font_to_unicode(
         let page = self.page_object(&file, page_index)?;
         let (stream, streams) = self.page_content(&file, &page)?;
         let operations = content::parse(&stream)?;
-        let placed = content::placed(&operations);
+        let placed = self.placed_on_page(page_index, &operations)?;
 
         let fonts = self.page_fonts(&file, &page);
         let codes_in = |p: &content::Placed| -> usize {
@@ -8979,7 +9618,7 @@ fn font_to_unicode(
                 .sum()
         };
         let order = self.text_order(page_index, run.object);
-        let (first, last, _) = run_operators(run, height, &placed, &operations, &codes_in, order)?;
+        let (first, last, _) = run_operators(run, &placed, &operations, &codes_in, order)?;
 
         // The font and size already in force where the run starts — written
         // back afterward, unconditionally, because both are graphics state
@@ -9159,6 +9798,53 @@ fn font_to_unicode(
         Some((which, text.len()))
     }
 
+    /// The page's show-text operators, **with every origin moved into the space
+    /// a run's own `origin` and `rect` live in** — the crop box's top-left, y
+    /// down ([`PageSpace`]). Elsewhere in this file that is `content::placed`'s
+    /// callers' own job; here it is done once, where the walk's origins first
+    /// meet PDFium's, so every lookup below compares like with like.
+    ///
+    /// **Why this is not optional.** [`crate::pdf::content::placed`] works in
+    /// the stream's own coordinates — PDF page space, y up, measured from the
+    /// MediaBox — while PDFium reports text geometry from the CropBox. On a
+    /// page whose two boxes share an origin the difference is nil; on a
+    /// print-ready one — a bleed, trim marks, print margins, the ordinary work
+    /// of Illustrator and InDesign — they are points apart, and every run then
+    /// had no operator within any matching tolerance: retyping refused with
+    /// "that text is drawn in a way this cannot edit" on plain text that is
+    /// perfectly ordinary, and the erase and recolour paths failed the same
+    /// way. Reported from use on exactly such a document.
+    ///
+    /// The translation changes no distance and no axis, so lookups that only
+    /// compare operators with each other ([`nearest_placed`] against a
+    /// converted want, the `along`/`across` of [`order_agrees`]) are unaffected;
+    /// what changes is that comparing an origin with a run's own geometry now
+    /// means something.
+    fn placed_on_page(
+        &self,
+        page_index: usize,
+        operations: &[crate::pdf::content::Operation],
+    ) -> Result<Vec<crate::pdf::content::Placed>> {
+        let page_number = i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
+            index: page_index,
+            count: self.page_count,
+        })?;
+        // A handle of its own, dropped before the caller's own work resumes —
+        // this file warns elsewhere about holding two live handles on one page.
+        let space = RawPage::open(self.document.handle(), page_number)?.space()?;
+        let mut placed = crate::pdf::content::placed(operations);
+        for operator in &mut placed {
+            (operator.origin.x, operator.origin.y) =
+                space.to_top_left(operator.origin.x, operator.origin.y);
+            // The direction the text advances needs the same y flip the origin
+            // got: the walk reads it from a matrix in page space, y up, while
+            // every `along`/`across` comparison from here on measures in the
+            // run's own space, y down. A magnitude like `scale` is untouched.
+            operator.axis.1 = -operator.axis.1;
+        }
+        Ok(placed)
+    }
+
     /// Which names in a page's resources are pictures.
     ///
     /// A `Do` may draw a form rather than an image, and the operator does not
@@ -9215,7 +9901,6 @@ fn font_to_unicode(
         };
 
         let census = self.object_census(page_index)?;
-        let height = self.page_size(page_index)?.height_pt;
         let mut spans: Vec<Option<(usize, usize)>> = vec![None; census.len()];
 
         // Words, each by its own run.
@@ -9244,7 +9929,7 @@ fn font_to_unicode(
                 .position(|o| *o == run.object)
                 .map(|which| (which, text_objects.len()));
             if let Ok((first, last, continues)) =
-                run_operators(&run, height, placed, operations, &codes_in, order)
+                run_operators(&run, placed, operations, &codes_in, order)
             {
                 // A run whose line goes on cannot be lifted out — see
                 // `restack` — so it is not placed either.
@@ -9695,7 +10380,6 @@ fn font_to_unicode(
 
         let runs = self.text_runs(page_index)?;
         if let Some(run) = runs.iter().find(|r| r.object == object) {
-            let height = self.page_size(page_index)?.height_pt;
             let fonts = self.page_fonts(file, page);
             let codes_in = |p: &content::Placed| -> usize {
                 let width = p
@@ -9714,7 +10398,7 @@ fn font_to_unicode(
                     .sum()
             };
             let order = self.text_order(page_index, object);
-            let (first, last, _) = run_operators(run, height, placed, operations, &codes_in, order)?;
+            let (first, last, _) = run_operators(run, placed, operations, &codes_in, order)?;
             return match frame_scope(operations, first..last + 1) {
                 Some((open, close)) => Ok(WrapSite { span: open..close + 1, own_scope: true, ctm: states[open].ctm }),
                 // **Worded to survive `Unsupported`'s own template.** Its
@@ -9762,7 +10446,7 @@ fn font_to_unicode(
         let (stream, streams) = self.page_content(&file, &page)?;
         let operations = content::parse(&stream)?;
         let states = content::states(&operations);
-        let placed = content::placed(&operations);
+        let placed = self.placed_on_page(page_index, &operations)?;
 
         let site = self.object_wrap_site(page_index, object, &file, &page, &operations, &states, &placed)?;
         let back = inverse(site.ctm).ok_or(PdfError::Unsupported(
@@ -9882,7 +10566,6 @@ fn font_to_unicode(
         // show-text operators, if the stream bears that out — see below.
         let order = self.text_order(page_index, object);
         let previous = run.text.clone();
-        let height = self.page_size(page_index)?.height_pt;
         self.substituted = None;
 
         // Readable by *this* crate, which an encrypted document is not until
@@ -9898,16 +10581,17 @@ fn font_to_unicode(
         let fonts = self.page_fonts(&file, &page);
 
         let operations = content::parse(&stream)?;
-        let placed = content::placed(&operations);
-
+        // In run space, not the stream's own — see `placed_on_page`; the run
+        // origins this is matched against arrive crop-relative.
+        let placed = self.placed_on_page(page_index, &operations)?;
         // **The baseline origin, not the box's corner** — see `run_operators`'s
-        // own doc for the exact same fix, needed there first: the box's
-        // bottom sits a descender below the baseline, a gap that grows with
-        // the font's own size, so probing from `rect.bottom` missed the
-        // right operation entirely the moment a size change made that gap
-        // wide enough — reported from use as a size change coming back
-        // unable to be undone, on the run it had just resized.
-        let (want_x, want_y) = (run.origin.x, height - run.origin.y);
+        // own doc for the exact same fix, needed there first: the box's bottom
+        // sits a descender below the baseline, a gap that grows with the
+        // font's own size, so probing from `rect.bottom` missed the right
+        // operation entirely the moment a size change made that gap wide
+        // enough — reported from use as a size change coming back unable
+        // to be undone, on the run it had just resized.
+        let (want_x, want_y) = (run.origin.x, run.origin.y);
         // **By count first, where the stream bears the count out.** The *n*th
         // text object is the *n*th show-text operator — see `placed_by_order` —
         // which finds a piece that continues the one before it, and does not
@@ -9915,7 +10599,7 @@ fn font_to_unicode(
         // before it is narrow. The position match is for a page whose count the
         // stream does not confirm.
         let codes_in = |p: &content::Placed| codes_drawn(&file, fonts.as_ref(), &operations, p);
-        let found = match placed_by_order(&run, height, &placed, order, &codes_in)
+        let found = match placed_by_order(&run, &placed, order, &codes_in)
             .or_else(|| nearest_placed(&placed, want_x, want_y).map(|(at, _)| &placed[at]))
         {
             Some(found) => found,
@@ -9942,7 +10626,7 @@ fn font_to_unicode(
                     .iter()
                     .position(|r| r.object == object)
                     .ok_or(PdfError::Unsupported("that is not a text run"))?;
-                placed_in_order(&run_list, &placed, height, index).ok_or(PdfError::Unsupported(
+                placed_in_order(&run_list, &placed, index).ok_or(PdfError::Unsupported(
                     "that text is drawn in a way this cannot edit",
                 ))?
             }
@@ -10206,7 +10890,6 @@ fn font_to_unicode(
         let t = std::time::Instant::now();
 
         self.substituted = None;
-        let height = self.page_size(page_index)?.height_pt;
 
         let was_secured = self.already_secured;
         let plus = self.secure_plus;
@@ -10222,7 +10905,7 @@ fn font_to_unicode(
         let fonts = self.page_fonts(&file, &page);
 
         let operations = content::parse(&stream)?;
-        let placed = content::placed(&operations);
+        let placed = self.placed_on_page(page_index, &operations)?;
         // The state each operator draws in (horizontal scaling is read from it),
         // walked only when a line is to be stretched.
         let states = if stretch.is_empty() { Vec::new() } else { content::states(&operations) };
@@ -10283,7 +10966,7 @@ fn font_to_unicode(
             let previous = run.text.clone();
 
             let order = text_objects.binary_search(&object).ok().map(|which| (which, text_objects.len()));
-            let found = self.operator_of(page_index, &run, height, &placed, order, &codes_in, &mut run_list)?;
+            let found = self.operator_of(page_index, &run, &placed, order, &codes_in, &mut run_list)?;
             // **One operator, one edit.** Two edits spliced into the same
             // operator keep the first and drop the second without a word
             // (`content::splice` skips what overlaps), so a batch that said both
@@ -10459,7 +11142,7 @@ fn font_to_unicode(
                 .get(&object)
                 .ok_or_else(|| PdfError::InvalidArgument("that is not a text run".into()))?;
             let order = text_objects.binary_search(&object).ok().map(|which| (which, text_objects.len()));
-            let found = self.operator_of(page_index, run, height, &placed, order, &codes_in, &mut run_list)?;
+            let found = self.operator_of(page_index, run, &placed, order, &codes_in, &mut run_list)?;
             if !claimed.insert(found.origin.operation) {
                 return Err(PdfError::Unsupported("editing two runs that one operator draws"));
             }
@@ -10488,7 +11171,7 @@ fn font_to_unicode(
         // ordinary case, and those spaces draw nothing.
         if !carried.is_empty() {
             let judged: Vec<usize> = carried.iter().flat_map(|(_, after)| after.iter().copied()).collect();
-            let seen = self.draws_something(page_index, &operations, &placed, &text_objects, &resolved, height, &codes_in, &judged)?;
+            let seen = self.draws_something(page_index, &operations, &placed, &text_objects, &resolved, &codes_in, &judged)?;
             for (object, after) in &carried {
                 if after.iter().any(|op| seen.get(op).copied().unwrap_or(true)) {
                     return Err(PdfError::InvalidArgument(format!(
@@ -10652,7 +11335,6 @@ fn font_to_unicode(
         placed: &[crate::pdf::content::Placed],
         text_objects: &[usize],
         known: &HashMap<usize, crate::document::TextRun>,
-        height: f32,
         codes_in: &dyn Fn(&crate::pdf::content::Placed) -> usize,
         wanted: &[usize],
     ) -> Result<HashMap<usize, bool>> {
@@ -10680,7 +11362,7 @@ fn font_to_unicode(
         };
         for (op, k, object) in judged {
             let Some(run) = known.get(&object).or_else(|| fetched.get(&object)) else { continue };
-            let agreed = placed_by_order(run, height, placed, Some((k, text_objects.len())), codes_in)
+            let agreed = placed_by_order(run, placed, Some((k, text_objects.len())), codes_in)
                 .is_some_and(|p| p.origin.operation == op);
             if agreed {
                 out.insert(op, !draws_nothing(run, render_mode_before(operations, op)));
@@ -10698,14 +11380,13 @@ fn font_to_unicode(
         &self,
         page_index: usize,
         run: &crate::document::TextRun,
-        height: f32,
         placed: &'a [crate::pdf::content::Placed],
         order: Option<(usize, usize)>,
         codes_in: &dyn Fn(&crate::pdf::content::Placed) -> usize,
         run_list: &mut Option<Vec<crate::document::TextRun>>,
     ) -> Result<&'a crate::pdf::content::Placed> {
-        let (want_x, want_y) = (run.origin.x, height - run.origin.y);
-        if let Some(found) = placed_by_order(run, height, placed, order, codes_in)
+        let (want_x, want_y) = (run.origin.x, run.origin.y);
+        if let Some(found) = placed_by_order(run, placed, order, codes_in)
             .or_else(|| nearest_placed(placed, want_x, want_y).map(|(at, _)| &placed[at]))
         {
             return Ok(found);
@@ -10724,7 +11405,7 @@ fn font_to_unicode(
             .iter()
             .position(|r| r.object == run.object)
             .ok_or(PdfError::Unsupported("that is not a text run"))?;
-        placed_in_order(run_list, placed, height, index)
+        placed_in_order(run_list, placed, index)
             .ok_or(PdfError::Unsupported("that text is drawn in a way this cannot edit"))
     }
 
@@ -10759,7 +11440,6 @@ fn font_to_unicode(
             .cloned()
             .ok_or_else(|| PdfError::InvalidArgument("that is not a text run".into()))?;
         let previous = run.color;
-        let height = self.page_size(page_index)?.height_pt;
 
         let was_secured = self.already_secured;
         let plus = self.secure_plus;
@@ -10771,16 +11451,17 @@ fn font_to_unicode(
         let (stream, streams) = self.page_content(&file, &page)?;
 
         let operations = content::parse(&stream)?;
-        let placed = content::placed(&operations);
+        // In run space, not the stream's own — see `placed_on_page`.
+        let placed = self.placed_on_page(page_index, &operations)?;
 
         // The same lookup `set_run_in_stream` uses — by count where the stream
         // bears it out, then by position, then by counting against every run —
         // see its own doc for why each is needed.
-        let (want_x, want_y) = (run.origin.x, height - run.origin.y);
+        let (want_x, want_y) = (run.origin.x, run.origin.y);
         let fonts = self.page_fonts(&file, &page);
         let order = self.text_order(page_index, object);
         let codes_in = |p: &content::Placed| codes_drawn(&file, fonts.as_ref(), &operations, p);
-        let found = match placed_by_order(&run, height, &placed, order, &codes_in)
+        let found = match placed_by_order(&run, &placed, order, &codes_in)
             .or_else(|| nearest_placed(&placed, want_x, want_y).map(|(at, _)| &placed[at]))
         {
             Some(found) => found,
@@ -10789,7 +11470,7 @@ fn font_to_unicode(
                     .iter()
                     .position(|r| r.object == object)
                     .ok_or(PdfError::Unsupported("that is not a text run"))?;
-                placed_in_order(&run_list, &placed, height, index).ok_or(PdfError::Unsupported(
+                placed_in_order(&run_list, &placed, index).ok_or(PdfError::Unsupported(
                     "that text is drawn in a way this cannot edit",
                 ))?
             }
@@ -11793,18 +12474,40 @@ fn align_codes(spellings: &[Option<String>], text: &str) -> Option<Vec<usize>> {
         // characters stop adding up, which is refused there.
         let Some(spelling) = spelling else { continue };
         let wanted: Vec<char> = spelling.chars().collect();
-        if wanted.is_empty() || at + wanted.len() > chars.len() {
+        if wanted.is_empty() {
             continue;
         }
-        if chars[at..at + wanted.len()] == wanted[..] {
+        // **A space PDFium reports that no code drew.** A `TJ` array can make
+        // its word gaps by moving the pen — `[(Colour) -250 (Temperature)] TJ`
+        // draws no space glyph at all — and PDFium's extraction reports the
+        // gap as a space all the same: measured, a run reading
+        // `"Colour Temperature"` where the codes spell `"ColourTemperature"`.
+        // Such a character is owned by nothing — the same treatment the
+        // trailing space below already gets — rather than failing the whole
+        // alignment, which used to refuse every run of this shape with "that
+        // run's codes cannot be lined up with its text", and with it retyping,
+        // on a construct ordinary in kerning-heavy documents.
+        //
+        // Consumed only where the code at hand does not spell what is there:
+        // a real space code still matches its own space first, and a code
+        // whose spelling PDFium dropped from the text still owns nothing,
+        // exactly as before.
+        let matches = |at: usize| {
+            at + wanted.len() <= chars.len() && chars[at..at + wanted.len()] == wanted[..]
+        };
+        while at < chars.len() && chars[at].is_whitespace() && !matches(at) {
+            owner.push(usize::MAX);
+            at += 1;
+        }
+        if matches(at) {
             owner.extend(std::iter::repeat_n(index, wanted.len()));
             at += wanted.len();
         }
         // Otherwise this code left nothing in the extracted text — a soft
         // hyphen, or anything else PDFium drops — and owns no characters.
     }
-    // Every character has to be accounted for — except trailing whitespace,
-    // which PDFium adds on its own.
+    // Every character has to be accounted for — except whitespace, wherever it
+    // sits, which PDFium adds on its own.
     //
     // Measured on a real catalogue: the font's table spells
     // `"Color Temperature        6500 k"` where PDFium reports
@@ -11856,10 +12559,11 @@ fn nearest_placed(
 /// Fail any of those and this returns `None`, which the caller reports as a run
 /// it cannot edit — the same answer it gave before, for the same reason: a
 /// guess here rewrites the wrong words.
+///
+/// `placed` must be in run space — see [`PdfiumDocument::placed_on_page`].
 fn placed_in_order<'a>(
     runs: &[crate::document::TextRun],
     placed: &'a [crate::pdf::content::Placed],
-    height: f32,
     wanted: usize,
 ) -> Option<&'a crate::pdf::content::Placed> {
     if runs.len() != placed.len() || wanted >= placed.len() {
@@ -11867,7 +12571,7 @@ fn placed_in_order<'a>(
     }
     let mut confirmed = 0usize;
     for (index, run) in runs.iter().enumerate() {
-        match nearest_placed(placed, run.rect.left, height - run.rect.bottom) {
+        match nearest_placed(placed, run.rect.left, run.rect.bottom) {
             Some((at, _)) if at == index => confirmed += 1,
             // One run placed somewhere other than its own index and the order
             // is not the order. Nothing here is worth a wrong edit.
@@ -12739,9 +13443,10 @@ fn image_operators(
 ///
 /// - another run drawn between them;
 /// - a `BT` or `ET` inside, which means they are not one text object.
+///
+/// `placed` must be in run space — see [`PdfiumDocument::placed_on_page`].
 fn run_operators(
     run: &crate::document::TextRun,
-    page_height: f32,
     placed: &[crate::pdf::content::Placed],
     operations: &[crate::pdf::content::Operation],
     codes_in: &dyn Fn(&crate::pdf::content::Placed) -> usize,
@@ -12753,7 +13458,7 @@ fn run_operators(
     // and for large type either is more than four points — measured, a 30pt
     // line matched nothing. `TextRun::origin` is read from the text object's
     // own matrix and is exactly what `content::placed` computes.
-    let (want_x, want_y) = (run.origin.x, page_height - run.origin.y);
+    let (want_x, want_y) = (run.origin.x, run.origin.y);
 
     // **By count first, where the page proves it can be — as a picture and a
     // shape already are.** Reported from use: Edit Object refusing to delete a
@@ -12779,7 +13484,7 @@ fn run_operators(
     //
     // Anything that does not check out falls through to the position match
     // below, exactly as before.
-    let by_order = placed_by_order(run, page_height, placed, order, codes_in);
+    let by_order = placed_by_order(run, placed, order, codes_in);
     if let Some(start) = by_order {
         // One text object is one operator: there is nothing after it to collect.
         let at = start.origin.operation;
@@ -12919,14 +13624,17 @@ fn order_agrees(
 /// position match left to try. `order` is `(which text object this is, how many
 /// the page has)`, counting **every** text object, whatever it draws: a lone thin
 /// letter has a place in the order like any other.
+///
+/// `placed` must be in run space — see [`PdfiumDocument::placed_on_page`], or
+/// "that text is drawn in a way this cannot edit" on any page whose crop box is
+/// inset.
 fn placed_by_order<'a>(
     run: &crate::document::TextRun,
-    page_height: f32,
     placed: &'a [crate::pdf::content::Placed],
     order: Option<(usize, usize)>,
     codes_in: &dyn Fn(&crate::pdf::content::Placed) -> usize,
 ) -> Option<&'a crate::pdf::content::Placed> {
-    let (want_x, want_y) = (run.origin.x, page_height - run.origin.y);
+    let (want_x, want_y) = (run.origin.x, run.origin.y);
     order
         .filter(|&(_, total)| total == placed.len())
         .and_then(|(which, _)| placed.get(which))
@@ -13186,6 +13894,295 @@ fn bounds_through(l: f32, b: f32, r: f32, t: f32, m: [f32; 6]) -> (f32, f32, f32
         hi_y = hi_y.max(y);
     }
     (lo_x, lo_y, hi_x, hi_y)
+}
+
+/// One path object as a renderer would draw it — see
+/// [`crate::document::PagePaint`] — or `None` when it draws nothing at all.
+///
+/// **A path that neither fills nor strokes is not drawn, and is not one.**
+/// A clip path is a path object in every PDF, and half of what a design
+/// program writes is clip paths; listing them would put invisible shapes in
+/// the export for every clip on the page.
+///
+/// `total` is the path's own matrix composed with every form matrix between
+/// it and the page — what `FPDFPathSegment_GetPoint`'s own-space points need
+/// to become page points. `space` then takes PDF user space (y up) to the
+/// page's top-left points (y down), the same conversion every other read in
+/// this file makes.
+fn path_paint(
+    bindings: &dyn PdfiumLibraryBindings,
+    handle: FPDF_PAGEOBJECT,
+    total: [f32; 6],
+    object: usize,
+    space: &PageSpace,
+) -> Option<crate::document::PagePaint> {
+    use crate::document::{Color, PaintSegment, Point, Rect};
+    // **The public enums' own discriminants, not the raw `FPDF_*` constants**:
+    // pdfium-render keeps the constants to itself (they are version-gated in
+    // its private bindgen), but its public enums carry the same values and
+    // say in a type what each number means.
+    use pdfium_render::prelude::PdfPathFillMode;
+
+    // How the path is painted: filled (and by which rule), stroked, or both.
+    let (mut fill_mode, mut stroked) = (0i32, 0i32);
+    let mode_known =
+        unsafe { bindings.FPDFPath_GetDrawMode(handle, &mut fill_mode, &mut stroked) } != 0;
+    let fill_mode = fill_mode as isize;
+    let filled = mode_known && fill_mode != PdfPathFillMode::None as isize;
+    let even_odd = fill_mode == PdfPathFillMode::EvenOdd as isize;
+    let stroked = mode_known && stroked != 0;
+    if !filled && !stroked {
+        return None;
+    }
+
+    let point_through = |x: f32, y: f32| {
+        let (x, y) =
+            (x * total[0] + y * total[2] + total[4], x * total[1] + y * total[3] + total[5]);
+        let (x, y) = space.to_top_left(x, y);
+        Point { x, y }
+    };
+    let segments = outline_segments(bindings, handle, point_through);
+    if segments.is_empty() {
+        return None;
+    }
+
+    let fill = filled.then(|| {
+        let (mut r, mut g, mut b, mut a) = (0u32, 0u32, 0u32, 255u32);
+        unsafe { bindings.FPDFPageObj_GetFillColor(handle, &mut r, &mut g, &mut b, &mut a) };
+        Color { r: r as u8, g: g as u8, b: b as u8, a: a as u8 }
+    });
+    let stroke = stroked.then(|| {
+        let (mut r, mut g, mut b, mut a) = (0u32, 0u32, 0u32, 255u32);
+        unsafe { bindings.FPDFPageObj_GetStrokeColor(handle, &mut r, &mut g, &mut b, &mut a) };
+        Color { r: r as u8, g: g as u8, b: b as u8, a: a as u8 }
+    });
+    let (stroke_width, dash) = stroke_details(bindings, handle, total, stroked);
+
+    let cap = match unsafe { bindings.FPDFPageObj_GetLineCap(handle) } {
+        1 => crate::document::LineCap::Round,
+        2 => crate::document::LineCap::Square,
+        _ => crate::document::LineCap::Butt,
+    };
+    let join = match unsafe { bindings.FPDFPageObj_GetLineJoin(handle) } {
+        1 => crate::document::LineJoin::Round,
+        2 => crate::document::LineJoin::Bevel,
+        _ => crate::document::LineJoin::Miter,
+    };
+
+    // The box round what was just walked — the same rectangle the list's own
+    // entry for this path carries, in the same space.
+    let (mut left, mut top, mut right, mut bottom) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    let mut reached = |point: Point| {
+        left = left.min(point.x);
+        top = top.min(point.y);
+        right = right.max(point.x);
+        bottom = bottom.max(point.y);
+    };
+    for segment in &segments {
+        match *segment {
+            PaintSegment::Move(to) | PaintSegment::Line { to, .. } => reached(to),
+            PaintSegment::Curve { control1, control2, to } => {
+                reached(control1);
+                reached(control2);
+                reached(to);
+            }
+        }
+    }
+
+    Some(crate::document::PagePaint {
+        object,
+        segments,
+        rect: Rect { left, top, right, bottom },
+        fill,
+        even_odd,
+        stroke,
+        stroke_width,
+        dash,
+        line_cap: cap,
+        line_join: join,
+    })
+}
+
+/// A path's outline, in order, through `point_through` — which takes one of
+/// the path's own points to the page's.
+///
+/// PDFium reports a cubic Bézier as **three** `BEZIERTO` segments running —
+/// two control points and the point it ends at — so every third one becomes
+/// a curve and a run that stops short of three (a malformed path) degrades
+/// to lines through the points it did report, rather than dropping them.
+fn outline_segments(
+    bindings: &dyn PdfiumLibraryBindings,
+    handle: FPDF_PAGEOBJECT,
+    point_through: impl Fn(f32, f32) -> crate::document::Point,
+) -> Vec<crate::document::PaintSegment> {
+    use crate::document::{PaintSegment, Point};
+    use pdfium_render::prelude::PdfPathSegmentType;
+
+    let flush = |pending: &mut Vec<Point>, segments: &mut Vec<PaintSegment>| {
+        while pending.len() >= 3 {
+            let first: Vec<Point> = pending.drain(..3).collect();
+            segments.push(PaintSegment::Curve {
+                control1: first[0],
+                control2: first[1],
+                to: first[2],
+            });
+        }
+        // A stray one or two with no third: lines to them, honestly placed.
+        for point in pending.drain(..) {
+            segments.push(PaintSegment::Line { to: point, close: false });
+        }
+    };
+
+    let count = unsafe { bindings.FPDFPath_CountSegments(handle) };
+    let mut segments: Vec<PaintSegment> = Vec::new();
+    let mut pending: Vec<Point> = Vec::new();
+    for index in 0..count.max(0) {
+        let segment = unsafe { bindings.FPDFPath_GetPathSegment(handle, index) };
+        if segment.is_null() {
+            continue;
+        }
+        let (mut x, mut y) = (0.0f32, 0.0f32);
+        if unsafe { bindings.FPDFPathSegment_GetPoint(segment, &mut x, &mut y) } == 0 {
+            continue;
+        }
+        let to = point_through(x, y);
+        let kind = unsafe { bindings.FPDFPathSegment_GetType(segment) } as isize;
+        if kind == PdfPathSegmentType::MoveTo as isize {
+            flush(&mut pending, &mut segments);
+            segments.push(PaintSegment::Move(to));
+        } else if kind == PdfPathSegmentType::LineTo as isize {
+            flush(&mut pending, &mut segments);
+            let close = unsafe { bindings.FPDFPathSegment_GetClose(segment) } != 0;
+            segments.push(PaintSegment::Line { to, close });
+        } else if kind == PdfPathSegmentType::BezierTo as isize {
+            pending.push(to);
+        }
+        // Anything else is a segment type this cannot draw; it is left out.
+    }
+    flush(&mut pending, &mut segments);
+    segments
+}
+
+/// The stroke's width and dash pattern — in page points, not the path's own:
+/// **the scale of the matrices that placed it is in them.** A rule drawn one
+/// point wide inside a form the page draws at half size is half a point wide
+/// on the page, and a dash pattern has to come through the same matrices its
+/// points do. `total` is that chain, and the average of its two axis scales
+/// is what the lengths multiply by.
+fn stroke_details(
+    bindings: &dyn PdfiumLibraryBindings,
+    handle: FPDF_PAGEOBJECT,
+    total: [f32; 6],
+    stroked: bool,
+) -> (f32, Vec<f32>) {
+    if !stroked {
+        return (0.0, Vec::new());
+    }
+    let scale = ((total[0] * total[0] + total[1] * total[1]).sqrt()
+        + (total[2] * total[2] + total[3] * total[3]).sqrt())
+        / 2.0;
+
+    // PDF's own default width is one unit; the call fills nothing when the
+    // path has no width of its own to report.
+    let mut width = 1.0f32;
+    if unsafe { bindings.FPDFPageObj_GetStrokeWidth(handle, &mut width) } == 0 || width <= 0.0 {
+        width = 1.0;
+    }
+
+    let mut dash: Vec<f32> = Vec::new();
+    let dash_count = unsafe { bindings.FPDFPageObj_GetDashCount(handle) };
+    if dash_count > 0 {
+        dash = vec![0.0f32; dash_count as usize];
+        if unsafe { bindings.FPDFPageObj_GetDashArray(handle, dash.as_mut_ptr(), dash.len()) } == 0 {
+            dash.clear();
+        } else {
+            for length in &mut dash {
+                *length *= scale;
+            }
+        }
+    }
+    (width * scale, dash)
+}
+
+/// The PDF's own name for a font — `FPDFFont_GetBaseFontName`, whose
+/// NUL-terminated UTF-16-ish bytes are read the way the engine writes them.
+fn font_base_name(bindings: &dyn PdfiumLibraryBindings, font: FPDF_FONT) -> Option<String> {
+    let needed = unsafe { bindings.FPDFFont_GetBaseFontName(font, std::ptr::null_mut(), 0) };
+    if needed == 0 {
+        return None;
+    }
+    let mut buffer = vec![0u8; needed as usize];
+    let written = unsafe {
+        bindings.FPDFFont_GetBaseFontName(font, buffer.as_mut_ptr() as *mut c_char, needed)
+    };
+    if written == 0 {
+        return None;
+    }
+    buffer.truncate(written as usize);
+    if buffer.last() == Some(&0) {
+        buffer.pop();
+    }
+    let name = String::from_utf8_lossy(&buffer).into_owned();
+    (!name.is_empty()).then_some(name)
+}
+
+/// A base font name with any subset tag dropped — the `"ABCDEF+"` a
+/// subsetter writes in front (`"ABCDEF+Montserrat-SemiBold"`), which is
+/// bookkeeping about *this file's* copy and not part of the face's name: a
+/// browser asked for a family called `ABCDEF+Montserrat-SemiBold` matches
+/// nothing.
+fn drop_subset_tag(name: &str) -> String {
+    match name.split_once('+') {
+        Some((tag, rest)) if tag.len() == 6 && tag.chars().all(|c| c.is_ascii_uppercase()) => {
+            rest.to_string()
+        }
+        _ => name.to_string(),
+    }
+}
+
+/// The document's own embedded program for a font, or `None` — including for
+/// a font the file does *not* embed, where PDFium would answer with its own
+/// substitute: that is not this document's font to pass on (`PageFont::program`
+/// has the reasoning). The stream's filters are already undone: this is the
+/// program itself, the bytes of a `.ttf` or `.otf`.
+fn font_program(bindings: &dyn PdfiumLibraryBindings, font: FPDF_FONT) -> Option<Vec<u8>> {
+    if unsafe { bindings.FPDFFont_GetIsEmbedded(font) } == 0 {
+        return None;
+    }
+    let mut length = 0usize;
+    let ok = unsafe { bindings.FPDFFont_GetFontData(font, std::ptr::null_mut(), 0, &mut length) };
+    if ok == 0 || length == 0 {
+        return None;
+    }
+    let mut buffer = vec![0u8; length];
+    let mut written = 0usize;
+    let ok = unsafe {
+        bindings.FPDFFont_GetFontData(font, buffer.as_mut_ptr(), length, &mut written)
+    };
+    if ok == 0 || written == 0 {
+        return None;
+    }
+    buffer.truncate(written.min(length));
+    Some(buffer)
+}
+
+/// The face's own weight, 100 to 900 as CSS spells them; `0` when the font
+/// states nothing (the caller then has its own evidence — see the run's
+/// measured stem).
+fn font_weight(bindings: &dyn PdfiumLibraryBindings, font: FPDF_FONT) -> u32 {
+    let weight = unsafe { bindings.FPDFFont_GetWeight(font) };
+    if (100..=900).contains(&weight) {
+        weight as u32
+    } else {
+        0
+    }
+}
+
+/// Whether the face is drawn at an angle — its italic angle is not zero.
+fn font_italic(bindings: &dyn PdfiumLibraryBindings, font: FPDF_FONT) -> bool {
+    let mut angle = 0i32;
+    let read = unsafe { bindings.FPDFFont_GetItalicAngle(font, &mut angle) };
+    read != 0 && angle != 0
 }
 
 /// The inverse of a PDF matrix, or `None` where there is none.
@@ -15166,7 +16163,6 @@ struct SpanTables<'a> {
     drawn: Vec<usize>,
     /// The operations that paint each shape, and whether each also sets a clip.
     painted: Vec<(std::ops::Range<usize>, bool)>,
-    height: f32,
     /// For each object that is a shape: which shape it is, in the order the page
     /// paints them. **Read once.** [`PdfiumDocument::path_ordinal`] walks every
     /// object on the page to answer for one, which for the hundreds a large
@@ -17834,6 +18830,35 @@ mod owned_code_tests {
         let range = owned_codes(&owner).expect("a range");
         assert_eq!(range, 0..codes, "the replacement would have missed a code");
     }
+
+    /// **The gap a `TJ` makes by moving the pen, with no space glyph drawn.**
+    ///
+    /// `[(Colour) -250 (Temperature)] TJ` spells `"ColourTemperature"` in its
+    /// codes while PDFium reports the run as `"Colour Temperature"`. Before
+    /// the mid-text skip this failed the whole alignment, and with it every
+    /// retype of such a run.
+    #[test]
+    fn a_gap_no_code_drew_is_owned_by_nothing_and_the_alignment_survives() {
+        let spellings: Vec<Option<String>> =
+            "ColourTemperature".chars().map(|c| Some(c.to_string())).collect();
+
+        let owner = align_codes(&spellings, "Colour Temperature")
+            .expect("a space no code drew must not break the alignment");
+        assert_eq!(owner.len(), 18, "one owner per character");
+        assert_eq!(owner[6], usize::MAX, "the pen-made gap is owned by nothing");
+        assert_eq!(
+            owned_codes(&owner),
+            Some(0..17),
+            "every code is still replaced, the gap included"
+        );
+    }
+
+    /// A space a code really spelled is not mistaken for a pen-made gap.
+    #[test]
+    fn a_space_a_code_actually_spelled_belongs_to_that_code() {
+        let spellings: Vec<Option<String>> = "a b".chars().map(|c| Some(c.to_string())).collect();
+        assert_eq!(align_codes(&spellings, "a b"), Some(vec![0, 1, 2]));
+    }
 }
 
 #[cfg(test)]
@@ -17841,8 +18866,6 @@ mod order_tests {
     use super::{nearest_placed, placed_in_order};
     use crate::document::{Color, Point, Rect, TextRun};
     use crate::pdf::content::{Origin, Placed};
-
-    const HEIGHT: f32 = 800.0;
 
     /// A run whose box sits at `(x, y)` in top-left coordinates.
     fn run(object: usize, x: f32, y: f32) -> TextRun {
@@ -17857,10 +18880,11 @@ mod order_tests {
     }
 
     /// An operator drawing at `(x, y)` in top-left coordinates, so it lines up
-    /// with the run above.
+    /// with the run above — `placed_on_page` has already moved the walk's own
+    /// origins into that space by the time a lookup sees them.
     fn placed(at: usize, x: f32, y: f32) -> Placed {
         Placed {
-            origin: Origin { operation: at, x, y: HEIGHT - y },
+            origin: Origin { operation: at, x, y },
             font: Some(b"F1".to_vec()),
             size: 10.0,
             line: at,
@@ -17881,8 +18905,8 @@ mod order_tests {
         // is what an unadvanced text matrix looks like.
         let ops = vec![placed(0, 100.0, 100.0), placed(1, 100.0, 100.0), placed(2, 100.0, 200.0)];
 
-        assert!(nearest_placed(&ops, 200.0, HEIGHT - 100.0).is_none(), "control");
-        let found = placed_in_order(&runs, &ops, HEIGHT, 1).expect("counted");
+        assert!(nearest_placed(&ops, 200.0, 100.0).is_none(), "control");
+        let found = placed_in_order(&runs, &ops, 1).expect("counted");
         assert_eq!(found.origin.operation, 1, "it counted to the wrong operator");
     }
 
@@ -17893,14 +18917,14 @@ mod order_tests {
         // The first run's operator is the second one: the orders differ, so
         // counting would edit the wrong words.
         let ops = vec![placed(0, 100.0, 200.0), placed(1, 100.0, 100.0), placed(2, 900.0, 900.0)];
-        assert!(placed_in_order(&runs, &ops, HEIGHT, 2).is_none());
+        assert!(placed_in_order(&runs, &ops, 2).is_none());
     }
 
     #[test]
     fn counting_is_refused_when_the_counts_do_not_match() {
         let runs = vec![run(0, 100.0, 100.0), run(1, 200.0, 100.0)];
         let ops = vec![placed(0, 100.0, 100.0)];
-        assert!(placed_in_order(&runs, &ops, HEIGHT, 1).is_none());
+        assert!(placed_in_order(&runs, &ops, 1).is_none());
     }
 
     /// **Nothing placed is not evidence of anything.** A page where the walk
@@ -17909,29 +18933,29 @@ mod order_tests {
     fn counting_is_refused_without_enough_confirmations() {
         let runs = vec![run(0, 100.0, 100.0), run(1, 200.0, 100.0), run(2, 100.0, 200.0)];
         let ops = vec![placed(0, 500.0, 500.0), placed(1, 600.0, 500.0), placed(2, 700.0, 500.0)];
-        assert!(placed_in_order(&runs, &ops, HEIGHT, 0).is_none());
+        assert!(placed_in_order(&runs, &ops, 0).is_none());
 
         // And one confirmation out of three is still not half.
         let ops = vec![placed(0, 100.0, 100.0), placed(1, 600.0, 500.0), placed(2, 700.0, 500.0)];
-        assert!(placed_in_order(&runs, &ops, HEIGHT, 2).is_none());
+        assert!(placed_in_order(&runs, &ops, 2).is_none());
     }
 
     #[test]
     fn an_index_past_the_end_is_not_a_match() {
         let runs = vec![run(0, 100.0, 100.0)];
         let ops = vec![placed(0, 100.0, 100.0)];
-        assert!(placed_in_order(&runs, &ops, HEIGHT, 7).is_none());
+        assert!(placed_in_order(&runs, &ops, 7).is_none());
     }
 
     // -- the operator found by count is checked against the stream -------------
 
-    /// A run's origin is `(x, y - 1)` in these tests, in top-left coordinates —
-    /// `HEIGHT - that` in the stream's own — and its text is `words` (five
-    /// characters).
+    /// A run's origin is `(x, y - 1)` in these tests, in the same top-left
+    /// coordinates the operators above are built in, and its text is `words`
+    /// (five characters).
     fn agrees(operator: &Placed, run_x: f32, run_y: f32, codes: usize) -> bool {
         let mut r = run(0, run_x, run_y);
         r.text = "words".into();
-        super::order_agrees(&r, operator, r.origin.x, HEIGHT - r.origin.y, &|_| codes)
+        super::order_agrees(&r, operator, r.origin.x, r.origin.y, &|_| codes)
     }
 
     /// The run starts where the operator's own positioning put the pen.
@@ -17974,16 +18998,16 @@ mod order_tests {
         let at = placed(0, 100.0, 100.0);
         let mut r = run(0, 100.0, 100.0);
         r.text = String::new();
-        assert!(super::order_agrees(&r, &at, r.origin.x, HEIGHT - r.origin.y, &|_| 9));
+        assert!(super::order_agrees(&r, &at, r.origin.x, r.origin.y, &|_| 9));
     }
 
     /// Text set at an angle runs along its own axis, not the page's.
     #[test]
     fn along_is_along_the_way_the_text_runs() {
         let mut up = placed(0, 100.0, 100.0);
-        up.axis = (0.0, 1.0);
-        // Text running up the page: a continuation is further up (larger y in
-        // the stream's own coordinates, smaller in the run's top-left ones).
+        // Upward text, in the run's own top-left space where y grows downwards.
+        up.axis = (0.0, -1.0);
+        // A continuation is further up the page — smaller y here.
         assert!(agrees(&up, 100.0, 40.0, 5), "50 points along");
         assert!(!agrees(&up, 160.0, 100.0, 5), "across the way it runs");
     }
@@ -17993,7 +19017,7 @@ mod order_tests {
     /// The operation the `which`th of `total` objects is found at by count, for
     /// operators that all draw `codes` codes.
     fn by_count(run: &TextRun, ops: &[Placed], order: Option<(usize, usize)>, codes: usize) -> Option<usize> {
-        super::placed_by_order(run, HEIGHT, ops, order, &|_| codes).map(|p| p.origin.operation)
+        super::placed_by_order(run, ops, order, &|_| codes).map(|p| p.origin.operation)
     }
 
     /// **The case position cannot do.** The second piece of a line is drawn after
@@ -18003,7 +19027,7 @@ mod order_tests {
     fn a_continuation_is_found_by_count_where_position_finds_nothing() {
         let ops = vec![placed(0, 100.0, 100.0), placed(1, 100.0, 100.0)];
         let second = run(1, 160.0, 100.0);
-        assert!(nearest_placed(&ops, second.origin.x, HEIGHT - second.origin.y).is_none(), "control");
+        assert!(nearest_placed(&ops, second.origin.x, second.origin.y).is_none(), "control");
         assert_eq!(by_count(&second, &ops, Some((1, 2)), 5), Some(1));
     }
 

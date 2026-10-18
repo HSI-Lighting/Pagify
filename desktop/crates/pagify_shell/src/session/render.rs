@@ -41,20 +41,38 @@ impl Session {
         self.render_page_rotated(index, scale, Rotation::None)
     }
 
+    /// Every path a page draws, with the geometry and paint it is drawn with
+    /// — the HTML export's rules and boxes, laid out in page points with a
+    /// top-left origin. See [`pdf_core::document::Document::page_paints`].
+    pub fn page_paints(&self, page: usize) -> Result<Vec<pdf_core::document::PagePaint>> {
+        registry::with_session(self.handle, |s| s.document.page_paints(page))
+    }
+
+    /// The bytes the PDF itself holds for one of a page's images, **when a
+    /// browser can show them as they are** — a plain RGB or grey JPEG, which
+    /// the export embeds whole instead of re-encoding. `None` means "read the
+    /// pixels and encode them": see [`Self::export_image_png`] and
+    /// [`pdf_core::document::Document::image_raw`].
+    pub fn image_raw(&self, page: usize, object: usize) -> Result<Option<(Vec<u8>, &'static str)>> {
+        registry::with_session(self.handle, |s| s.document.image_raw(page, object))
+    }
+
+    /// Every font a page draws with, program bytes and all, in
+    /// [`pdf_core::document::RunStyle::font`]'s own numbering — the HTML
+    /// export embeds the document's own programs as `@font-face`, which is
+    /// what keeps a substituted face's different widths from overlapping the
+    /// pieces of a kerned word. See
+    /// [`pdf_core::document::Document::page_fonts`].
+    pub fn page_fonts(&self, page: usize) -> Result<Vec<pdf_core::document::PageFont>> {
+        registry::with_session(self.handle, |s| s.document.page_fonts(page))
+    }
+
     /// Rasterise a page and encode it as a PNG — the engine's own encoder,
     /// behind the Conversion tab's `toimage`. Kept here so the app writes
     /// files and never touches pixel formats: a render is RGBA with a
     /// top-left origin, which is also what a PNG is.
     pub fn export_page_png(&self, index: usize, scale: f32) -> Result<Vec<u8>> {
-        let raster = self.render_page(index, scale)?;
-        let bitmap = pdf_core::render::Bitmap {
-            width: raster.width,
-            height: raster.height,
-            stride: raster.width as usize * pdf_core::render::BYTES_PER_PIXEL,
-            order: pdf_core::render::PixelOrder::Rgba,
-            data: raster.pixels,
-        };
-        pdf_core::render::export::encode(&bitmap, pdf_core::render::ImageFormat::Png)
+        self.render_page(index, scale)?.to_png()
     }
 
     /// One embedded image's pixels re-encoded as a PNG — the Conversion

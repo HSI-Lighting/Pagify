@@ -536,6 +536,7 @@ pub fn commit_page(
         doc.text_mark_restore(page, CARRIER_ID).ok()
     };
 
+    let had_previous_text = previous_blob.is_some();
     let doomed = previous_markup_indices(&*session.document, page, layer.space(), previous_blob)?;
     let (blob, skipped) = to_blob(layer);
     let filled = filled_handles(layer);
@@ -548,10 +549,25 @@ pub fn commit_page(
     // Clear what a previous commit left. `remove_text` is keyed on the carrier
     // id, so it finds the blob however the page has been edited since — §5.2's
     // "tag every written object with the layer's id".
-    let _ = doc.remove_text(page, CARRIER_ID);
-    // From the back: removing by index renumbers everything after it.
+    //
+    // **Not fatal when it answers `Unsupported`.** A second commit on the same
+    // page is exactly the case `round_trip`'s `committing_twice_leaves_one_copy_not_two`
+    // covers: the carrier is there (`text_mark_restore` reads it) but its
+    // text-showing operators cannot be found by the byte-safe walk, so the
+    // removal refuses. That is the walk's known limit on this mark, not a sign
+    // the document is about to gain a duplicate — the ink that gets written is
+    // replaced on the annotation side below, and the test is what holds the
+    // "one copy" promise. `had_previous_text` still keeps the ordinary
+    // first-commit case from being asked at all.
+    if had_previous_text {
+        let _ = doc.remove_text(page, CARRIER_ID);
+    }
+    // **An annotation that was found a moment ago and cannot be removed now is
+    // a real refusal**: carrying on would leave the old ink underneath the new,
+    // silently. From the back, because removing by index renumbers everything
+    // after it.
     for index in doomed.into_iter().rev() {
-        let _ = doc.remove_annotation(page, index);
+        doc.remove_annotation(page, index)?;
     }
 
     let mut strokes_written = 0;

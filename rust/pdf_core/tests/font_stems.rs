@@ -27,7 +27,7 @@ use harness::{serial, skip_without_pdfium};
 use std::collections::{BTreeMap, BTreeSet};
 
 use pdf_core::document::pdfium_doc::{pdfium, PdfiumDocument};
-use pdf_core::document::Document;
+use pdf_core::document::{Document, DocumentMut};
 use pdfium_render::prelude::*;
 
 // ======================================================================= pages ==
@@ -672,4 +672,90 @@ fn what_every_font_says() {
             unsafe { bindings.FPDF_ClosePage(raw) };
         }
     }
+}
+
+// =========================================================== font programs ==
+
+/// **The document's own programs come back whole**, in `RunStyle::font`'s own
+/// numbering — which is what lets a caller give a run the very face the page
+/// draws it with. Retyping with the app's Montserrat embeds that program, so
+/// the reopened document must answer with it.
+#[test]
+fn a_program_the_document_embeds_comes_back_whole() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+    let Some(font) = montserrat("Montserrat-Regular.ttf") else { return };
+
+    let mut doc =
+        PdfiumDocument::open_bytes(harness::fixture_bytes("text-lines.pdf"), None).expect("open");
+    let runs = doc.text_runs(0).expect("runs");
+    let target = runs
+        .iter()
+        .find(|r| r.text.trim().chars().count() > 4)
+        .cloned()
+        .expect("a run");
+
+    doc.set_typing_fonts(vec![font]);
+    if doc.try_set_run_in_stream(0, target.object, "Zwölf Ünique").is_err() {
+        return;
+    }
+    let mut bytes = Vec::new();
+    doc.save_full_copy(&mut bytes).expect("save");
+    let reopened = PdfiumDocument::open_bytes(bytes, None).expect("reopen");
+
+    let fonts = reopened.page_fonts(0).expect("fonts");
+    let embedded: Vec<_> = fonts.iter().filter(|font| font.program.is_some()).collect();
+    assert!(!embedded.is_empty(), "the retyped face was to be embedded: {fonts:?}");
+    for font in &embedded {
+        let program = font.program.as_ref().expect("a program");
+        assert!(program.len() > 1000, "a program of {} bytes is not one", program.len());
+        assert!(
+            matches!(&program[..4.min(program.len())], [0x00, 0x01, 0x00, 0x00] | b"true" | b"OTTO"),
+            "the program does not start like a font: {:?}",
+            &program[..4.min(program.len())]
+        );
+        assert!(
+            !font.name.contains('+'),
+            "a browser cannot match a family named with its subset tag: {:?}",
+            font.name
+        );
+    }
+
+    // **The id contract**: every run's own style indexes straight into the
+    // list — that is the whole reason the two reads are numbered this way.
+    let styles = reopened.run_styles(0).expect("styles");
+    for run in &reopened.text_runs(0).expect("runs") {
+        let style = styles.get(&run.object).expect("a style");
+        assert!(
+            (style.font as usize) < fonts.len(),
+            "run {} names font {} of {}",
+            run.object,
+            style.font,
+            fonts.len()
+        );
+    }
+}
+
+/// **A font the file does not embed gets no program.** PDFium would answer
+/// with the substitute it draws that face with, and a stand-in shipped with
+/// the engine is not this document's to pass on — the empty answer is the
+/// honest one, and the name (and weight, and angle) still come back for the
+/// reader to match on.
+#[test]
+fn a_font_the_file_does_not_embed_has_no_program() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let doc = PdfiumDocument::open_bytes(harness::fixture_bytes("text-lines.pdf"), None).expect("open");
+    let fonts = doc.page_fonts(0).expect("fonts");
+
+    assert!(!fonts.is_empty(), "the page has words and words have fonts");
+    assert!(
+        fonts.iter().all(|font| font.program.is_none()),
+        "a document that embeds nothing gave a program anyway: {fonts:?}"
+    );
+    assert!(
+        fonts.iter().any(|font| !font.name.is_empty()),
+        "no face was named at all: {fonts:?}"
+    );
 }

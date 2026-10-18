@@ -9,18 +9,73 @@ use cad_kernel::{Geom, Vec2};
 use egui::{Color32, Painter, Pos2, Stroke};
 use pagify_shell::markup::Layer;
 use pagify_shell::page_space::AppPoint;
+use pdf_core::Rotation;
 
-/// Maps page points to screen position for one page.
+/// Maps page points to screen position for one page — **turned views
+/// included.**
+///
+/// A page laid out turned on screen (`rotate_view`, the strip's own retarget)
+/// still reports everything about itself in the page's own upright points:
+/// character boxes, runs, marks, signatures. The turn is the last step, and
+/// it belongs here, in the one conversion every marking and every click goes
+/// through — it was missing, and the report is exactly what that looks like:
+/// "when i rotate, extract text and the similar tools behave as if the page
+/// is still vertical, the highlights are wrong". Clicking a word selected
+/// whatever sat at its *upright* position, and the boxes drawn over the words
+/// were the upright ones.
 #[derive(Debug, Clone, Copy)]
 pub struct PageView {
-    /// Where the page's top-left corner sits on screen.
+    /// Where the **turned page's** top-left corner sits on screen.
     pub origin: Pos2,
     /// Screen points per page point.
     pub scale: f32,
+    /// How the page is turned on screen.
+    pub rotation: Rotation,
+    /// The page's frame **as drawn**: `(w, h)` in points, already turned —
+    /// the strip lays a rotated page out by its turned size, and the turn
+    /// below needs to know which way that size runs.
+    pub frame: (f32, f32),
 }
 
 impl PageView {
+    /// A view of an upright page — what every caller with no turn to make
+    /// wants, which is all of them but the canvas itself. The canvas builds
+    /// its own literal (it has the turn and the frame to put in); this is
+    /// what everything else, tests included, builds a view with.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn upright(origin: Pos2, scale: f32) -> Self {
+        PageView { origin, scale, rotation: Rotation::None, frame: (0.0, 0.0) }
+    }
+
+    /// The same point in the **turned page's** own top-left coordinates:
+    /// page points in, page points out, only turned.
+    ///
+    /// Each quarter turn is its own mapping, corners pinned: a clockwise
+    /// quarter takes the page's top edge to the drawn image's right edge, so
+    /// its top-left corner lands at the drawn top-right.
+    fn turned(&self, p: AppPoint) -> AppPoint {
+        let (w, h) = (f64::from(self.frame.0), f64::from(self.frame.1));
+        match self.rotation {
+            Rotation::None => p,
+            Rotation::Clockwise90 => AppPoint::new(w - p.y, p.x),
+            Rotation::Clockwise180 => AppPoint::new(w - p.x, h - p.y),
+            Rotation::Clockwise270 => AppPoint::new(p.y, h - p.x),
+        }
+    }
+
+    /// [`Self::turned`]'s own inverse.
+    fn unturned(&self, p: AppPoint) -> AppPoint {
+        let (w, h) = (f64::from(self.frame.0), f64::from(self.frame.1));
+        match self.rotation {
+            Rotation::None => p,
+            Rotation::Clockwise90 => AppPoint::new(p.y, w - p.x),
+            Rotation::Clockwise180 => AppPoint::new(w - p.x, h - p.y),
+            Rotation::Clockwise270 => AppPoint::new(h - p.y, p.x),
+        }
+    }
+
     pub fn to_screen(&self, p: AppPoint) -> Pos2 {
+        let p = self.turned(p);
         Pos2::new(
             self.origin.x + p.x as f32 * self.scale,
             self.origin.y + p.y as f32 * self.scale,
@@ -28,9 +83,34 @@ impl PageView {
     }
 
     pub fn to_page(&self, p: Pos2) -> AppPoint {
-        AppPoint::new(
+        let at = AppPoint::new(
             ((p.x - self.origin.x) / self.scale) as f64,
             ((p.y - self.origin.y) / self.scale) as f64,
+        );
+        self.unturned(at)
+    }
+
+    /// A page-space rectangle's own box on screen — **normalised**, because a
+    /// quarter turn swaps which of its two corners is the screen's top-left.
+    ///
+    /// The two mapped corners are opposite corners of an axis-aligned rect in
+    /// both spaces, but at 90°/270° the page's top-left corner lands at the
+    /// screen's bottom-left or top-right, so feeding both to
+    /// `Rect::from_min_max` gives an inverted (negative-size) box. Every
+    /// overlay drawn from a page rect — selection outlines, highlight washes,
+    /// editors, previews — goes through this, not straight to `to_screen`.
+    pub fn screen_rect(&self, rect: &pdf_core::document::Rect) -> egui::Rect {
+        self.screen_rect_of(rect.left, rect.top, rect.right, rect.bottom)
+    }
+
+    /// [`Self::screen_rect`] for a box that is not a `pdf_core` rect — the
+    /// reader's own character-line boxes ([`pagify_shell::reader::Rect`]) are
+    /// the same four f32 fields in a different type, and the highlight washes
+    /// are built from them.
+    pub fn screen_rect_of(&self, left: f32, top: f32, right: f32, bottom: f32) -> egui::Rect {
+        egui::Rect::from_two_pos(
+            self.to_screen(AppPoint::new(f64::from(left), f64::from(top))),
+            self.to_screen(AppPoint::new(f64::from(right), f64::from(bottom))),
         )
     }
 }
@@ -268,11 +348,110 @@ pub fn draw_snap(painter: &Painter, at: Pos2, kind: cad_kernel::SnapKind, colour
 
 #[cfg(test)]
 mod tests {
+    use pdf_core::Rotation;
+
+    /// **The turn is the map's own last step**, corners pinned: a clockwise
+    /// quarter takes the page's top edge to the drawn image's right edge, so
+    /// its top-left corner lands at the drawn top-right. This is the mapping
+    /// every click and every highlight goes through — see [`PageView`]'s own
+    /// doc for the report that came of missing it.
+    #[test]
+    fn a_turned_view_maps_page_points_through_the_turn() {
+        // A portrait page drawn turned: the frame is the page's size with
+        // its sides swapped.
+        let turned_view = |rotation| PageView {
+            origin: Pos2::new(10.0, 20.0),
+            scale: 2.0,
+            rotation,
+            frame: (792.0, 612.0),
+        };
+        let upright = PageView::upright(Pos2::new(10.0, 20.0), 2.0);
+
+        let corner = AppPoint::new(0.0, 0.0);
+        assert_eq!(upright.to_screen(corner), Pos2::new(10.0, 20.0));
+        assert_eq!(
+            turned_view(Rotation::Clockwise90).to_screen(corner),
+            Pos2::new(10.0 + 792.0 * 2.0, 20.0),
+            "the page's top-left lands at the drawn top-right"
+        );
+        assert_eq!(
+            turned_view(Rotation::Clockwise180).to_screen(corner),
+            Pos2::new(10.0 + 792.0 * 2.0, 20.0 + 612.0 * 2.0)
+        );
+        assert_eq!(
+            turned_view(Rotation::Clockwise270).to_screen(corner),
+            Pos2::new(10.0, 20.0 + 612.0 * 2.0),
+            "the page's top-left lands at the drawn bottom-left"
+        );
+
+        // And every turn is its own inverse, exactly — a click has to come
+        // back as the point the drawing put under it.
+        for rotation in [
+            Rotation::None,
+            Rotation::Clockwise90,
+            Rotation::Clockwise180,
+            Rotation::Clockwise270,
+        ] {
+            let view = turned_view(rotation);
+            for at in [
+                AppPoint::new(0.0, 0.0),
+                AppPoint::new(100.0, 300.0),
+                AppPoint::new(612.0, 792.0),
+            ] {
+                let back = view.to_page(view.to_screen(at));
+                assert!(
+                    (back.x - at.x).abs() < 0.01 && (back.y - at.y).abs() < 0.01,
+                    "{rotation:?}: {at:?} came back as {back:?}"
+                );
+            }
+        }
+    }
+
     use super::*;
+
+    /// **A page rect's screen box stays right-side-up through a turn.** At
+    /// 90°/270° the page's top-left corner lands at the screen's bottom-left or
+    /// top-right, so building the box from the two mapped corners with
+    /// `from_min_max` gave an inverted (negative-size) rect — the reported
+    /// "highlights are wrong" after rotating the view.
+    #[test]
+    fn a_turned_view_normalises_a_page_rect_instead_of_inverting_it() {
+        let view = |rotation| PageView {
+            origin: Pos2::new(10.0, 20.0),
+            scale: 1.0,
+            rotation,
+            frame: (792.0, 612.0),
+        };
+        let rect = pdf_core::document::Rect { left: 0.0, top: 0.0, right: 100.0, bottom: 50.0 };
+        for rotation in [
+            Rotation::None,
+            Rotation::Clockwise90,
+            Rotation::Clockwise180,
+            Rotation::Clockwise270,
+        ] {
+            let screen = view(rotation).screen_rect(&rect);
+            assert!(
+                screen.width() > 0.0 && screen.height() > 0.0,
+                "{rotation:?}: an inverted box: {screen:?}"
+            );
+            // A quarter turn swaps the box's sides on screen; a half turn
+            // keeps them. Either way the box is right-side-up, which is the
+            // point.
+            let (want_w, want_h) = match rotation {
+                Rotation::Clockwise90 | Rotation::Clockwise270 => (50.0, 100.0),
+                _ => (100.0, 50.0),
+            };
+            assert!(
+                (screen.width() - want_w).abs() < 0.01
+                    && (screen.height() - want_h).abs() < 0.01,
+                "{rotation:?}: a turned box is not its turned size, got {screen:?}"
+            );
+        }
+    }
 
     #[test]
     fn the_page_view_round_trips_a_point() {
-        let view = PageView { origin: Pos2::new(37.0, 91.0), scale: 1.75 };
+        let view = PageView::upright(Pos2::new(37.0, 91.0), 1.75);
         let start = AppPoint::new(123.0, 456.0);
         let back = view.to_page(view.to_screen(start));
 
@@ -304,7 +483,7 @@ mod tests {
         let ctx = egui::Context::default();
         let layer_id = egui::LayerId::new(egui::Order::Middle, egui::Id::new("fill-test"));
         let painter = Painter::new(ctx.clone(), layer_id, egui::Rect::EVERYTHING);
-        let view = PageView { origin: Pos2::ZERO, scale: 1.0 };
+        let view = PageView::upright(Pos2::ZERO, 1.0);
         let colour = Color32::from_rgb(200, 40, 90);
 
         draw_layer(&painter, &layer, view, colour, colour);
@@ -341,7 +520,7 @@ mod tests {
         let ctx = egui::Context::default();
         let layer_id = egui::LayerId::new(egui::Order::Middle, egui::Id::new("fill-test-rect"));
         let painter = Painter::new(ctx.clone(), layer_id, egui::Rect::EVERYTHING);
-        let view = PageView { origin: Pos2::ZERO, scale: 1.0 };
+        let view = PageView::upright(Pos2::ZERO, 1.0);
         let colour = Color32::from_rgb(40, 160, 90);
 
         draw_layer(&painter, &layer, view, colour, colour);
@@ -370,7 +549,7 @@ mod tests {
         let ctx = egui::Context::default();
         let layer_id = egui::LayerId::new(egui::Order::Middle, egui::Id::new("own-colour-test"));
         let painter = Painter::new(ctx.clone(), layer_id, egui::Rect::EVERYTHING);
-        let view = PageView { origin: Pos2::ZERO, scale: 1.0 };
+        let view = PageView::upright(Pos2::ZERO, 1.0);
         // Deliberately different from the shape's own colour, so drawing in
         // the page's pen instead would be caught rather than coincide.
         let pen = Color32::from_rgb(200, 40, 90);
@@ -400,7 +579,7 @@ mod tests {
         let ctx = egui::Context::default();
         let layer_id = egui::LayerId::new(egui::Order::Middle, egui::Id::new("hollow-test"));
         let painter = Painter::new(ctx.clone(), layer_id, egui::Rect::EVERYTHING);
-        let view = PageView { origin: Pos2::ZERO, scale: 1.0 };
+        let view = PageView::upright(Pos2::ZERO, 1.0);
         let colour = Color32::from_rgb(200, 40, 90);
 
         draw_layer(&painter, &layer, view, colour, colour);

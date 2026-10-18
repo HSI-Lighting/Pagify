@@ -54,15 +54,15 @@ fn fields_set_read_back_and_reach_the_file() {
     assert!(session.set_form_checkbox("agree", false).expect("uncheck"));
     assert!(!session.set_form_text("no-such-field", "x").expect("missing field"));
     assert!(
-        !session.set_form_radio("speed", "fast").expect("radio"),
-        "this build must answer `false` for radios rather than write a wrong state"
+        session.set_form_radio("speed", "fast").expect("radio"),
+        "a radio is set by clicking its widgets — see `Document::set_form_radio`"
     );
 
     let fields = session.form_fields().expect("reread");
     assert_eq!(fields[0].value.as_deref(), Some("Grace Hopper"));
     assert_eq!(fields[2].value, None, "the checkbox did not uncheck");
-    assert_eq!(fields[3].value.as_deref(), Some("slow"), "a refused radio change must not touch the file");
-    assert_eq!(fields[4].value, None);
+    assert_eq!(fields[3].value, None, "the group moved off `slow`");
+    assert_eq!(fields[4].value.as_deref(), Some("fast"), "the clicked widget is the checked one");
 
     // Written out and read back: the values are in the file, not just in
     // this process's copy of it.
@@ -72,7 +72,7 @@ fn fields_set_read_back_and_reach_the_file() {
     let again = reopened.form_fields().expect("reread");
     assert_eq!(again[0].value.as_deref(), Some("Grace Hopper"));
     assert_eq!(again[2].value, None);
-    assert_eq!(again[3].value.as_deref(), Some("slow"), "the radio must survive the save unchanged");
+    assert_eq!(again[4].value.as_deref(), Some("fast"), "the radio choice must survive the save");
     std::fs::remove_file(&path).ok();
 }
 
@@ -96,13 +96,13 @@ fn the_json_carries_every_field_and_applies_back() {
 
     assert_eq!(
         (applied, not_applied),
-        (2, 1),
-        "combos are not settable in this build and must count as not applied"
+        (3, 0),
+        "a combo entry applies by selecting its option — see `Document::set_form_choice`"
     );
     let fields = session.form_fields().expect("reread");
     assert_eq!(fields[0].value.as_deref(), Some("Alan Turing"));
     assert_eq!(fields[2].value, None, "the checkbox did not clear from JSON");
-    assert_eq!(fields[5].value.as_deref(), Some("Green"), "the combo must be untouched");
+    assert_eq!(fields[5].value.as_deref(), Some("Blue"), "the combo did not take its option");
 }
 
 #[test]

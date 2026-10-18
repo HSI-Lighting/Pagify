@@ -117,11 +117,12 @@ the vendored Pagify tree (development). `PAGIFY_PDFIUM_LIB` overrides both.
 a wrong PDFium presents as "some pages render oddly", so it is worth being able
 to read the answer.
 
-**Only `pdfium-mac-arm64` is vendored today**, alongside the two iOS slices.
-Windows, Linux and mac-x86-64 have never been fetched, and `tools/fetch_pdfium.ps1`
-in the Pagify repo fetches the Apple slices only. Building for those targets
-fails at compile time with a message naming the missing slice — deliberately, so
-it fails while it is a chore rather than in month seven.
+**All four desktop PDFium slices are vendored** — `pdfium-mac-arm64`,
+`pdfium-mac-x64`, `pdfium-linux-x64` and `pdfium-win-x64` — pinned to
+chromium/7881 to match `pdfium-render`. `tools/fetch_pdfium.sh` fetches and
+checks a slice, and `tools/verify_third_party.sh` checks the whole tree against
+`third_party/CHECKSUMS.sha256`; a target with no slice mapped in
+`pagify_shell::pdfium` still fails at compile time with a message naming it.
 
 ## Checks
 
@@ -129,8 +130,8 @@ From `desktop\` (Windows):
 
 ```
 $env:PAGIFY_PDFIUM_LIB = "third_party\pdfium\pdfium-win-x64\bin\pdfium.dll"
-cargo test -p pagify_app --release --bin pagify_app     # ~970 tests, ~35s once built
-cargo test -p pagify_shell --release                     # ~640 tests
+cargo test -p pagify_app --release --bin pagify_app     # ~990 tests, ~35s once built
+cargo test -p pagify_shell --release                     # ~800 tests
 cargo test -p pdf_core --release --manifest-path ..\rust\pdf_core\Cargo.toml --no-fail-fast
 ```
 
@@ -165,8 +166,9 @@ file — if they differ, it is this.
 
 ## Status
 
-Phases 0 through 12 of the build plan are implemented. **150 tests, none of
-which need a window.**
+Phases 0 through 12 of the build plan are implemented. **About 990 app tests
+and 800 shell tests, none of which need a window** — 12 environment-specific
+tests are red on Linux (see `docs/REMAINING_WORK.md`); the rest pass.
 
 | Phase | | |
 |---|---|---|
@@ -175,7 +177,7 @@ which need a window.**
 | 2 | Reader | continuous scroll, viewport-driven cache with neighbour prefetch, thumbnail rail, text selection |
 | 3 | Shell chrome | dark violet theme, ribbon tabs, thumbnail panel |
 | 4 | The markup layer | live `cad_kernel` object table per page, per-shape hit testing, window/crossing selection |
-| 5 | The Draw rail | typed coordinates for every kernel shape; interactive line and circle |
+| 5 | The Draw rail | typed coordinates for every kernel shape; interactive line, circle, rectangle, polyline, arrow and spline |
 | 6 | The Modify rail | move, copy, rotate, scale, mirror, trim, extend, fillet, chamfer, offset, join, erase |
 | 7 | Snap and aids | object snap with badges, one-shot overrides, ortho, grid snap |
 | 8 | Commit and round-trip | markup written as real ink **and** as live geometry; reopened, rebuilt, still editable |
@@ -257,22 +259,34 @@ expanded the `~`.
 
 ### Not done, and honestly so
 
-- **The mockup's third Tool Wizard card says "Convert".** There is no conversion
-  engine and none is planned, so the slot holds Extract instead — real, and the
-  operation people reach for next to Merge.
-- **The AI Tools tab is present and empty**, per §10: it needs a decision about
-  what happens to a customer's document before it needs a feature.
-- **`redact`, `sign` and `comment`** are recognised words that name their phase
-  rather than doing anything. Redaction that only covers content is worse than
-  none, and neither it nor signing has an engine API yet.
+- **Forty verbs are named and not built** (`verbs::PLANNED`) — 38 of the 209
+  ribbon buttons across the tabs answer "planned for <phase>, and not built
+  yet". The whole Share tab (6/6), most of Form's authoring tools (17/22 that
+  build fields rather than fill them), five PagiSign, four Convert, three View
+  and one each on Home/Edit/Accessibility. Nothing is greyed out; the answer
+  appears under the command bar when the button is pressed.
+- **Form *authoring* is not built.** Filling works — click a widget to type,
+  tick or choose — but the Form tab's tools that *create* fields are planned.
+- **There is no AI tab.** The mockup's Assistant is a single planned button
+  (View tab), not an empty tab waiting for a feature.
+- **`comment` is still a no-op word.** `redact`, `certify`/`sign`, `note`,
+  `stamp`, `callout` and the Comments panel all work; `comment` itself is
+  reserved for *threaded* review comments and says it is planned.
 - **Notarization and code signing have not been run** — they need credentials.
   The scripts are written and the ordering is right; they have not been executed.
-- **Interactive drawing covers line and circle.** Every other shape draws from
-  typed coordinates (`l 0,0 100,100`, `ci 50,50 20`), which the kernel's parser
-  already supports in full.
-- **Ellipses, splines, hatches, dimensions and text** can be drawn but are not
-  yet carried by the save format. They are *reported* on save rather than
-  dropped silently — see `commit::Unstorable`.
+- **Printing is Windows-only.** It has no ribbon or File-tab button; ⌘P/Ctrl+P
+  is the route, and macOS/Linux answer "printing isn't available on this
+  platform yet."
+- **Check for Updates only knows one channel**: the publisher's Windows Dropbox
+  folder (`UPDATE_FOLDER`). A machine without it is told there is no update
+  channel; other platforms are told automatic updates are not available.
+- **Interactive drawing covers line, circle, rectangle, polyline, arrow and
+  spline.** Ellipses, hatches, dimensions and other kernel shapes still draw
+  from typed coordinates (`el …`, `l 0,0 100,100`, `ci 50,50 20`).
+- **The save format carries live geometry for lines, circles, arcs,
+  polylines, points and splines — but not ellipses, elliptical arcs, hatches,
+  text objects, dimensions, stamps (`BlockRef`) or walls.** Those are
+  *reported* on save rather than dropped silently — see `commit::Unstorable`.
 
 ## Commands
 

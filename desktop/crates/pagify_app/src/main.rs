@@ -63,6 +63,7 @@ use pagify_shell::paragraph_lines::{
     STRETCH_JUSTIFIED_LINES,
 };
 use pdf_core::document::Color;
+use pdf_core::document::FormFieldKind;
 use pdf_core::error::PdfError;
 use pdf_core::Rotation;
 // Re-exported, not just `use`d: `ribbon`'s own sibling modules (the test
@@ -344,6 +345,229 @@ enum ScanMessage {
     Finished { found: Vec<Misspelling>, skipped: Vec<usize>, chinese: bool },
 }
 
+/// A conversion writing files on its own thread.
+///
+/// **Reported from use: converting freezes the window.** To Image rendered
+/// every page and wrote it, To HTML built the whole file, To Other read every
+/// page's text and Split wrote one file per page — all on the thread that
+/// draws the window, so a long document simply stopped responding until it
+/// was done. They run beside the window now, as the spelling scan and the OCR
+/// reader do, and a modal says what is being written, how far it has got, and
+/// offers to put it down between steps.
+///
+/// One at a time, deliberately: two conversions writing into the same folder
+/// would race each other's files, and one Cancel that stopped both would be a
+/// lie about which. A second command while one runs is refused with that
+/// said.
+struct Conversion {
+    done: std::sync::mpsc::Receiver<ConversionMessage>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// What the dialog calls the work — "Writing page images".
+    label: &'static str,
+    /// The noun a step is counted in — "page", "part".
+    unit: &'static str,
+    /// Steps in total.
+    total: usize,
+    /// Steps finished so far.
+    progress: usize,
+    /// Cancel has been pressed; the worker puts itself down between steps,
+    /// and the dialog says so meanwhile.
+    cancelling: bool,
+    /// How many frames the dialog has been drawn for — see
+    /// [`PagifyApp::collect_conversion`] for why its result waits on this.
+    shown: u32,
+}
+
+impl Drop for Conversion {
+    /// Leaving a conversion behind puts it down: a tab closing, the app
+    /// quitting, or the `Option` being cleared must not leave a thread
+    /// writing files for a window that is gone.
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[derive(Debug)]
+enum ConversionMessage {
+    /// Steps finished so far.
+    Progress(usize),
+    /// Everything the conversion set out to write, written — the sentence
+    /// for the command log.
+    Wrote(String),
+    /// Put down by Cancel after this many steps.
+    Stopped(usize),
+    /// The first thing that went wrong, as a sentence.
+    Failed(String),
+}
+
+/// To Image's own loop, off the window: every page rendered at 2× (about
+/// 144 dpi) and written into `folder`. What the old synchronous method did,
+/// with the stop flag and the progress report the dialog needs.
+///
+/// **`marks` are the pages' drawn-on marks** — see [`PageMarks`] — painted
+/// into each page's raster before it is encoded, so an exported PNG is the
+/// page as it is being read, exactly as the Snapshot is. The copy is taken
+/// when the conversion starts; drawing more while it runs lands in the *next*
+/// export, which is the honest reading of "export what I have drawn".
+fn convert_images(
+    session: &Session,
+    stem: &str,
+    count: usize,
+    folder: &std::path::Path,
+    marks: &[(usize, pagify_shell::paint::PageMarks)],
+    stop: &std::sync::atomic::AtomicBool,
+    progress: &dyn Fn(usize, usize),
+) -> ConversionMessage {
+    let mut written = 0usize;
+    let mut failures: Vec<String> = Vec::new();
+    for page in 0..count {
+        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            return ConversionMessage::Stopped(written);
+        }
+        let bytes = session.render_page(page, 2.0).and_then(|mut raster| {
+            if let Some((_, marks)) = marks.iter().find(|(marked, _)| *marked == page) {
+                marks.paint(&mut raster, 2.0, MARKUP_INK, 1.5);
+            }
+            raster.to_png()
+        });
+        match bytes {
+            Ok(bytes) => {
+                let name = format!("{stem}-page-{:03}.png", page + 1);
+                match std::fs::write(folder.join(&name), bytes) {
+                    Ok(()) => written += 1,
+                    Err(e) => failures.push(format!("page {}: {e}", page + 1)),
+                }
+            }
+            Err(e) => failures.push(format!("page {}: {e}", page + 1)),
+        }
+        progress(page + 1, count);
+    }
+    if failures.is_empty() {
+        let mark_note = if marks.is_empty() { "" } else { ", marks drawn on them" };
+        ConversionMessage::Wrote(format!(
+            "wrote {written} PNG page(s) at 2×{mark_note} to {}.",
+            folder.display()
+        ))
+    } else {
+        ConversionMessage::Failed(format!(
+            "{written} of {count} page(s) written; {}",
+            failures.join("; ")
+        ))
+    }
+}
+
+/// The paint copies of every marked page of this tab's document — see
+/// [`convert_images`] and [`pagify_shell::paint::PageMarks`].
+fn marked_pages_of(tab: &DocTab) -> Vec<(usize, pagify_shell::paint::PageMarks)> {
+    tab.markup
+        .marked_pages()
+        .into_iter()
+        .filter_map(|page| {
+            tab.markup
+                .existing(page)
+                .map(|layer| (page, pagify_shell::paint::PageMarks::of(layer)))
+        })
+        .collect()
+}
+
+/// To HTML's loop: the file built by the shell's own export, watching its
+/// pages so the dialog can move and Cancel can land between them — see
+/// [`pagify_shell::export::document_html_watched`].
+fn convert_html(
+    session: &Session,
+    stem: &str,
+    dest: &std::path::Path,
+    stop: &std::sync::atomic::AtomicBool,
+    progress: &dyn Fn(usize, usize),
+) -> ConversionMessage {
+    let mut done = 0usize;
+    let built = pagify_shell::export::document_html_watched(session, stem, &mut |page, pages| {
+        done = page;
+        progress(page, pages);
+        !stop.load(std::sync::atomic::Ordering::Relaxed)
+    });
+    match built {
+        Ok(Some(html)) => match std::fs::write(dest, html) {
+            Ok(()) => ConversionMessage::Wrote(format!("wrote {}.", dest.display())),
+            Err(e) => ConversionMessage::Failed(format!("tohtml: {e}")),
+        },
+        Ok(None) => ConversionMessage::Stopped(done),
+        Err(e) => ConversionMessage::Failed(format!("tohtml: {e}")),
+    }
+}
+
+/// To Other's loop — the same shape as [`convert_html`].
+fn convert_other(
+    session: &Session,
+    extension: &str,
+    pages: usize,
+    dest: &std::path::Path,
+    stop: &std::sync::atomic::AtomicBool,
+    progress: &dyn Fn(usize, usize),
+) -> ConversionMessage {
+    let mut done = 0usize;
+    let built =
+        pagify_shell::export::document_other_watched(session, extension, &mut |page, total| {
+            done = page;
+            progress(page, total);
+            !stop.load(std::sync::atomic::Ordering::Relaxed)
+        });
+    match built {
+        Ok(Some(text)) => match std::fs::write(dest, text) {
+            Ok(()) => ConversionMessage::Wrote(format!(
+                "wrote {pages} page(s) as .{extension} to {}.",
+                dest.display()
+            )),
+            Err(e) => ConversionMessage::Failed(format!("toother: {e}")),
+        },
+        Ok(None) => ConversionMessage::Stopped(done),
+        Err(e) => ConversionMessage::Failed(format!("toother: {e}")),
+    }
+}
+
+/// Split's loop: one file per chunk of `every` pages, written into `folder` —
+/// the same shape as [`convert_images`], chunk by chunk instead of page by
+/// page.
+fn convert_split(
+    session: &Session,
+    stem: &str,
+    count: usize,
+    every: usize,
+    folder: &std::path::Path,
+    stop: &std::sync::atomic::AtomicBool,
+    progress: &dyn Fn(usize, usize),
+) -> ConversionMessage {
+    let every = every.max(1);
+    let chunks: Vec<Vec<usize>> = (0..count).collect::<Vec<_>>().chunks(every).map(<[usize]>::to_vec).collect();
+    let mut written = 0usize;
+    let mut failures: Vec<String> = Vec::new();
+    for (step, pages) in chunks.iter().enumerate() {
+        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            return ConversionMessage::Stopped(written);
+        }
+        let first = pages[0] + 1;
+        let last = pages[pages.len() - 1] + 1;
+        let name = if every == 1 {
+            format!("{stem}-page-{first:03}.pdf")
+        } else {
+            format!("{stem}-pages-{first:03}-{last:03}.pdf")
+        };
+        match session.extract_to(pages, &folder.join(&name)) {
+            Ok(_) => written += 1,
+            Err(e) => failures.push(format!("pages {first}-{last}: {e}")),
+        }
+        progress(step + 1, chunks.len());
+    }
+    if failures.is_empty() {
+        ConversionMessage::Wrote(format!(
+            "wrote {written} file(s) of up to {every} page(s) to {}.",
+            folder.display()
+        ))
+    } else {
+        ConversionMessage::Failed(format!("{written} file(s) written; {}", failures.join("; ")))
+    }
+}
+
 impl SpellCheck {
     /// The suggestions for `word`, searched for the first time it is asked.
     fn suggestions_for(&mut self, word: &str) -> &[String] {
@@ -514,6 +738,30 @@ struct EditState {
     editing_run: Option<EditingRun>,
     /// A brand new run being composed — see [`NewTextBox`].
     new_text_box: Option<NewTextBox>,
+    /// A form field open for filling on the page — see [`EditingField`].
+    editing_field: Option<EditingField>,
+}
+
+/// A form widget open for filling **where it is drawn**: a text field with
+/// its editor over it, a combo or list with its options to choose from. Set
+/// by a plain click on the widget with no tool in hand — see
+/// [`PagifyApp::fill_field_at`].
+struct EditingField {
+    page: usize,
+    /// The field's own name, what every setter addresses it by.
+    name: String,
+    /// Where the widget is drawn, in page points — the editor stands here.
+    rect: pdf_core::document::Rect,
+    kind: FormFieldKind,
+    /// A text field's words being typed, or a combo's free text.
+    buffer: String,
+    /// A combo or list's options, in the form's own order.
+    options: Vec<String>,
+    /// Focus is asked for once — see [`EditingRun::focused`].
+    focused: bool,
+    /// The click that opened it must not also be read as a click *outside*
+    /// it and put it away at once.
+    fresh: bool,
 }
 
 /// The modal and panel state a tab can have open: search, spelling and its
@@ -1019,7 +1267,7 @@ impl DocTab {
             calibration: Calibration::default(),
             tool: None,
             view_state: ViewState { page: 0, zoom: ZoomMode::Fit, rotation: Rotation::None, view: None, hover_view: None, viewport_rect: None, anchor_offset: None, last_view: None, scroll_offset: egui::Vec2::ZERO, scroll_pt: 0.0, pan_by: None, scroll_to_pt: None, canvas_pt: egui::vec2(800.0, 600.0), reveal: None, saved_revision: 0, copy_wanted: false, snapshot_wanted: false, autoscroll: false, ruler: false, paper_tint: pagify_shell::verbs::PaperTint::White, split: false, },
-            edit: EditState { editing_run: None, new_text_box: None },
+            edit: EditState { editing_run: None, new_text_box: None, editing_field: None },
             next_text_id: 0x0100_0000,
             panels: PanelsState { pending_link: None, extract_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, view_settings: false, calculator: None, comments: None, tags: None, },
             bookmarked_pages: std::collections::HashSet::new(),
@@ -1305,6 +1553,9 @@ struct PagifyApp {
     /// A file dialog running on its own thread, and its continuation —
     /// see [`PendingDialog`].
     pending_dialog: Option<PendingDialog>,
+    /// A conversion writing files on its own thread, and the progress dialog
+    /// that fronts it — see [`Conversion`]. One at a time.
+    conversion: Option<Conversion>,
     clipboard_state: ClipboardState,
     faces_state: FacesState,
     update_state: UpdateState,
@@ -1354,6 +1605,29 @@ fn read_update_manifest(dir: &std::path::Path) -> Option<String> {
     // `.trim()` alone leaves it sitting in front of the first digit.
     let version = text.trim().trim_start_matches('\u{FEFF}').trim();
     (!version.is_empty()).then(|| version.to_string())
+}
+
+/// Look in `dir` for a newer build than `current` — see [`UpdateOutcome`].
+///
+/// Pure over the filesystem, so the three answers are testable without
+/// spawning the app's thread: a missing/unreadable channel is
+/// [`UpdateOutcome::NoChannel`], a readable manifest that is not newer is
+/// [`UpdateOutcome::UpToDate`], and only a genuinely newer version is
+/// [`UpdateOutcome::Found`].
+fn update_outcome(dir: &std::path::Path, current: &str) -> UpdateOutcome {
+    if !dir.is_dir() {
+        return UpdateOutcome::NoChannel;
+    }
+    match read_update_manifest(dir) {
+        Some(version) if newer_version(current, &version) => {
+            UpdateOutcome::Found(version, dir.to_path_buf())
+        }
+        Some(_) => UpdateOutcome::UpToDate,
+        // The folder exists but holds no readable manifest (a Dropbox
+        // placeholder, or a publish that half finished) — the channel is not
+        // usable, which is the same thing to say as "not here".
+        None => UpdateOutcome::NoChannel,
+    }
 }
 
 /// What identifies a font program among the faces the app has been handed: a
@@ -1795,7 +2069,7 @@ fn area_between(a: AppPoint, b: AppPoint) -> Option<pdf_core::document::Rect> {
 /// interpreting it, so nothing in it is ever read as a command separator.
 fn open_in_browser(url: &str) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
-    {
+    let child = {
         // `rundll32`'s own command line syntax, not this program's choice:
         // `<dll>,<entry point>` first, then whatever that entry point takes
         // — here, the one URL to open. Older but steadier than shelling out
@@ -1803,17 +2077,23 @@ fn open_in_browser(url: &str) -> std::io::Result<()> {
         // unless it is quoted just so.
         std::process::Command::new("rundll32")
             .args(["url.dll,FileProtocolHandler", url])
-            .spawn()
-            .map(|_| ())
-    }
+            .spawn()?
+    };
     #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open").arg(url).spawn().map(|_| ())
-    }
+    let child = std::process::Command::new("open").arg(url).spawn()?;
     #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        std::process::Command::new("xdg-open").arg(url).spawn().map(|_| ())
-    }
+    let child = std::process::Command::new("xdg-open").arg(url).spawn()?;
+
+    // **Wait for the launcher — on a thread of its own.** `xdg-open`/`open`
+    // hand the address to the browser and exit in a moment; without a `wait`
+    // every clicked link leaves a zombie (`<defunct>`) for the life of the
+    // program. Waiting here in the frame would freeze the window for that
+    // moment instead, so the wait happens beside it.
+    std::thread::spawn(move || {
+        let mut child = child;
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 
@@ -2111,6 +2391,21 @@ struct PageResult {
     built_recogniser: Option<std::sync::Arc<pdf_core::ocr::engine::OcrsRecogniser>>,
 }
 
+/// What a look in [`UPDATE_FOLDER`] found — three answers, because "nothing
+/// newer" and "there is no update channel on this machine" are different
+/// facts and, when the user explicitly asked, only one of them is reassuring.
+#[derive(Debug)]
+enum UpdateOutcome {
+    /// A genuinely newer build, and the folder it lives in.
+    Found(String, std::path::PathBuf),
+    /// The folder is on this machine and holds nothing newer.
+    UpToDate,
+    /// There is no update channel here at all: the folder does not exist (or
+    /// holds no readable `version.txt`) — the case on every machine that did
+    /// not get the build from the publisher's Dropbox folder.
+    NoChannel,
+}
+
 /// A newer-build check running on its own thread — see
 /// [`PagifyApp::collect_update_check`]. Reading [`UPDATE_FOLDER`] is a
 /// filesystem call, on a folder that may be a Dropbox mount not currently
@@ -2118,11 +2413,11 @@ struct PageResult {
 /// so it gets the same "spawn a thread, poll a channel" treatment `Reading`
 /// above already uses for OCR.
 struct UpdateCheck {
-    /// `Some((newer version, the folder it lives in))` once a genuinely
-    /// newer build is found; `None` for "nothing newer" or "could not even
-    /// look" — the two are not told apart, since neither is ever worth
-    /// telling the user about.
-    done: std::sync::mpsc::Receiver<Option<(String, std::path::PathBuf)>>,
+    done: std::sync::mpsc::Receiver<UpdateOutcome>,
+    /// The check was asked for by the user (**Check for Updates**), not the
+    /// one at launch — so a plain "nothing newer" is worth answering, and the
+    /// launch-time check stays silent when it finds nothing.
+    asked: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2846,7 +3141,7 @@ impl PagifyApp {
                             ribbon_command = Some(command.text().to_string());
                         }
                     }
-                    let popup_id = egui::Id::new("ribbon_more_tools");
+                    let popup_id = self.window_id("ribbon_more_tools");
                     if overflow_from < buttons.len() {
                         let toggle = more_tools_button(ui, egui::Popup::is_id_open(ui.ctx(), popup_id));
                         // Anchored to the whole strip rather than to the small
@@ -2988,6 +3283,7 @@ impl PagifyApp {
         self.ask_about_redaction(&ctx);
         self.collect_reading(&ctx);
         self.collect_spell_scan(&ctx);
+        self.collect_conversion(&ctx);
         self.collect_update_check(&ctx);
         self.draw_update_prompt(&ctx);
     }
@@ -2999,6 +3295,17 @@ impl PagifyApp {
     fn handle_input(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame, command_id: egui::Id) {
         // The focus guard — §5.5. Read once, before any widget runs.
         let focus = Focus::capture(&ctx);
+
+        // **While a conversion writes, the keyboard belongs to its dialog.**
+        // The progress modal is drawn last in the frame, so the *pointer* is
+        // already blocked behind it from the next frame on — but shortcuts are
+        // read here, before any widget runs, and Ctrl+W would close the tab a
+        // worker is still reading while Ctrl+S/Ctrl+Z could change the document
+        // under it. The dialog's own Escape-cancels path reads raw input, so
+        // nothing it needs is lost by stopping before the rest.
+        if self.conversion.is_some() {
+            return;
+        }
 
         // **Space is a space.** It used to be a second Enter here — swallowed
         // from the box and the line run as it stood — on the strength of a
@@ -3734,12 +4041,34 @@ impl PagifyApp {
             // shows whichever tool is actually armed.
             self.tab_mut().tool_state.hand_shown_before_any_tool_is_picked = false;
             match ribbon_click(&command) {
-                // With nothing open a click that needs a document or its
-                // pages has nothing to work on: say so, once and calmly,
-                // rather than run it into a red usage error.
-                RibbonClick::PickFile | RibbonClick::Extract | RibbonClick::Fill(Some(_))
-                    if self.tab().doc.is_none() =>
-                {
+                // **Reported from use: "merge and extract buttons on the
+                // main window dont do anything".** Those are the start
+                // screen's own cards — *Merge* and *Extract* — and the start
+                // screen is where nothing is open: `import` had no document
+                // to bring pages into and `extract` none to pull them out of,
+                // so the click ended in one line of text in the command bar
+                // and the buttons read as dead. They ask for the document to
+                // work on first, and go on with what the card is for once it
+                // is open — a pick that is cancelled, or a file that will not
+                // open, says so and stops there.
+                RibbonClick::PickFile | RibbonClick::Extract if self.tab().doc.is_none() => {
+                    let (title, then): (&'static str, fn(&mut PagifyApp)) =
+                        match ribbon_click(&command) {
+                            RibbonClick::Extract => {
+                                ("Open the PDF to extract pages from", |app| {
+                                    app.open_extract_dialog()
+                                })
+                            }
+                            _ => {
+                                ("Open the PDF to add pages to", |app| app.import_pages_dialog())
+                            }
+                        };
+                    self.open_then(title, then);
+                }
+                // A page command with nothing open has no such second step;
+                // it says what is missing, once and calmly, rather than run
+                // into a red usage error.
+                RibbonClick::Fill(Some(_)) if self.tab().doc.is_none() => {
                     self.say_info("open a PDF first.");
                 }
                 RibbonClick::PickFile => self.import_pages_dialog(),
@@ -3840,6 +4169,23 @@ impl PagifyApp {
             move |app, answer| match answer {
                 DialogAnswer::File(path) => on_picked(app, path),
                 _ => app.say_info("nothing chosen."),
+            },
+        );
+    }
+
+    /// Ask for a PDF to open, and **go on with `then` once it is open** — the
+    /// start screen's own two-step shape: Merge and Extract there ask which
+    /// document to work on first, then do their own thing (see the click
+    /// handler). Cancelling the pick, or a file that will not open, says so
+    /// and stops; the continuation simply does not run.
+    fn open_then(&mut self, title: &'static str, then: fn(&mut PagifyApp)) {
+        self.pick_file_deferred(
+            move |dialog| dialog.set_title(title).add_filter("PDF", &["pdf"]),
+            move |app, path| {
+                app.open(&path.to_string_lossy());
+                if app.tab().doc.is_some() {
+                    then(app);
+                }
             },
         );
     }
@@ -4082,7 +4428,7 @@ impl PagifyApp {
             let mut open = true;
 
             egui::Window::new(format!("Layers — page {}", page + 1))
-                .id(egui::Id::new("layers-window"))
+                .id(self.window_id("layers-window"))
                 .open(&mut open)
                 .default_size(egui::vec2(300.0, 380.0))
                 .resizable(true)
@@ -4350,6 +4696,7 @@ impl PagifyApp {
             render_state: RenderState { renders: None, async_render: !cfg!(test), render_stats: RenderStats::default(), },
             ui_state: UiState { show_thumbs: true, show_contents: false, outline_open: std::collections::HashSet::new(), outline_active: None, organize_open: false, show_layers: false, command_open: false, errors_said: 0, },
             pending_dialog: None,
+            conversion: None,
             clipboard_state: ClipboardState { object_clipboard: None, paste_count: 0, page_clipboard: None, paste_ghost: None, clipboard_dir: if cfg!(test) {
                 static APPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 std::env::temp_dir().join(format!(
@@ -4401,7 +4748,9 @@ impl PagifyApp {
         // filesystem check of a real Dropbox folder. Nor in a second window:
         // the update is offered once, by the first.
         if !quiet {
-            app.spawn_update_check();
+            // The launch-time peek, not the button: silence when nothing is
+            // newer is the point (see `spawn_update_check`).
+            app.spawn_update_check(false);
         }
         // Same reasoning as `recent`/`session_log` above: a test run must not
         // read the real, developer-machine appearance preference, or every
@@ -4462,7 +4811,7 @@ impl PagifyApp {
             return;
         }
         let mut decision: Option<Decision> = None;
-        egui::Modal::new(egui::Id::new("unsaved")).show(ctx, |ui| {
+        egui::Modal::new(self.window_id("unsaved")).show(ctx, |ui| {
             ui.set_width(380.0);
             ui.heading(match intent {
                 Closing::Document | Closing::Tab(_) => "Close this document?",
@@ -4970,31 +5319,63 @@ impl PagifyApp {
     /// stall (a network drive gone quiet) or fail, and neither is allowed to
     /// delay the window appearing. Same shape as `extract_text` above: a
     /// thread, a channel, a per-frame poll.
-    fn spawn_update_check(&mut self) {
+    ///
+    /// **`asked` is the user's Check for Updates, not the launch-time peek.**
+    /// A launch-time check that finds nothing stays silent; the button has to
+    /// answer, or it reads as broken — which, off Windows, is exactly what it
+    /// was: there is no update channel for this build on macOS/Linux, so the
+    /// honest answer is said instead of leaving the last line at "checking…".
+    fn spawn_update_check(&mut self, asked: bool) {
+        if !cfg!(target_os = "windows") {
+            if asked {
+                self.say_info(
+                    "automatic updates are not available on this platform yet — this build \
+                     has no update channel here.",
+                );
+            }
+            return;
+        }
         let current = pagify_shell::VERSION.to_string();
         let (tx, done) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let found = read_update_manifest(std::path::Path::new(UPDATE_FOLDER))
-                .filter(|candidate| newer_version(&current, candidate))
-                .map(|version| (version, std::path::PathBuf::from(UPDATE_FOLDER)));
-            let _ = tx.send(found);
+            let outcome = update_outcome(std::path::Path::new(UPDATE_FOLDER), &current);
+            let _ = tx.send(outcome);
         });
-        self.update_state.update_check = Some(UpdateCheck { done });
+        self.update_state.update_check = Some(UpdateCheck { done, asked });
     }
 
-    /// Collect the update check, if it has answered.
+    /// Collect the update check, if it has answered — the modal for a newer
+    /// build, or, when the user asked and there is none, the sentence that
+    /// says so.
     fn collect_update_check(&mut self, ctx: &egui::Context) {
         let Some(check) = &self.update_state.update_check else { return };
+        let asked = check.asked;
         match check.done.try_recv() {
-            Ok(found) => {
+            Ok(outcome) => {
                 self.update_state.update_check = None;
-                self.update_state.update_available = found;
+                match outcome {
+                    UpdateOutcome::Found(version, folder) => {
+                        self.update_state.update_available = Some((version, folder));
+                    }
+                    UpdateOutcome::UpToDate if asked => self.say_info(format!(
+                        "you're up to date — this is build {}.",
+                        pagify_shell::VERSION
+                    )),
+                    UpdateOutcome::NoChannel if asked => self.say_info(
+                        "no update channel on this machine — this build is updated by \
+                         copying it over the old one, not by Check for Updates.",
+                    ),
+                    _ => {}
+                }
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
                 ctx.request_repaint_after(std::time::Duration::from_millis(200));
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.update_state.update_check = None;
+                if asked {
+                    self.say_info("the update check stopped before it answered.");
+                }
             }
         }
     }
@@ -6935,12 +7316,7 @@ impl PagifyApp {
     /// [`Self::draw_object_selection`] gives a single object, just built
     /// from [`Self::group_bounds`] instead of one object's own rect.
     fn draw_group_selection(&mut self, ui: &mut egui::Ui, page: usize, view: PageView) {
-        let to_screen = |r: &pdf_core::document::Rect| {
-            egui::Rect::from_min_max(
-                view.to_screen(AppPoint::new(r.left as f64, r.top as f64)),
-                view.to_screen(AppPoint::new(r.right as f64, r.bottom as f64)),
-            )
-        };
+        let to_screen = |r: &pdf_core::document::Rect| view.screen_rect(r);
         let painter = ui.painter();
 
         if let Some((start, current)) = self.tab_mut().selection.marquee {
@@ -7029,12 +7405,7 @@ impl PagifyApp {
     /// the one place that quietly assumed otherwise.
     fn draw_signature_selection(&mut self, ui: &mut egui::Ui, page: usize, view: PageView) {
         let Some(sel) = self.tab_mut().selection.signature_selected.clone().filter(|s| s.page == page) else { return };
-        let to_screen = |r: &pdf_core::document::Rect| {
-            egui::Rect::from_min_max(
-                view.to_screen(AppPoint::new(r.left as f64, r.top as f64)),
-                view.to_screen(AppPoint::new(r.right as f64, r.bottom as f64)),
-            )
-        };
+        let to_screen = |r: &pdf_core::document::Rect| view.screen_rect(r);
         let painter = ui.painter();
         let outline = to_screen(&sel.rect);
 
@@ -7129,12 +7500,7 @@ impl PagifyApp {
     /// [`Self::placed_image_selected`] and [`Self::placed_image_grab`].
     fn draw_placed_image_selection(&mut self, ui: &mut egui::Ui, page: usize, view: PageView) {
         let Some(sel) = self.tab_mut().selection.placed_image_selected.clone().filter(|s| s.page == page) else { return };
-        let to_screen = |r: &pdf_core::document::Rect| {
-            egui::Rect::from_min_max(
-                view.to_screen(AppPoint::new(r.left as f64, r.top as f64)),
-                view.to_screen(AppPoint::new(r.right as f64, r.bottom as f64)),
-            )
-        };
+        let to_screen = |r: &pdf_core::document::Rect| view.screen_rect(r);
         let painter = ui.painter();
         let outline = to_screen(&sel.rect);
 
@@ -8000,6 +8366,150 @@ impl PagifyApp {
             Some(SpellCheck { scanning: Some((0, page_count)), ..SpellCheck::default() });
     }
 
+    /// Start `work` on its own thread, behind the progress dialog — see
+    /// [`Conversion`]. Refused while another conversion runs, with that said
+    /// rather than queued: see [`Conversion`]'s own note.
+    fn start_conversion(
+        &mut self,
+        label: &'static str,
+        unit: &'static str,
+        total: usize,
+        work: impl FnOnce(
+                &std::sync::atomic::AtomicBool,
+                &std::sync::mpsc::Sender<ConversionMessage>,
+            ) -> ConversionMessage
+            + Send
+            + 'static,
+    ) {
+        if self.conversion.is_some() {
+            self.say_error(
+                "a conversion is already running — cancel it, or wait for it to finish.",
+            );
+            return;
+        }
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (tx, done) = std::sync::mpsc::channel();
+        let worker_stop = stop.clone();
+        std::thread::spawn(move || {
+            let outcome = work(&worker_stop, &tx);
+            let _ = tx.send(outcome);
+        });
+        self.conversion = Some(Conversion {
+            done,
+            stop,
+            label,
+            unit,
+            total,
+            progress: 0,
+            cancelling: false,
+            shown: 0,
+        });
+    }
+
+    /// Take what the conversion has reported since the last frame — **but
+    /// only after its dialog has been drawn at least once.**
+    ///
+    /// A conversion small enough to finish before the first frame is painted
+    /// would otherwise be taken before ever being shown: the window would
+    /// look like it swallowed the command, and the progress dialog people
+    /// were promised would never appear. Gating the result on the dialog
+    /// having been seen makes the promise hold for every conversion, however
+    /// quick. While there is nothing to take the frames are kept coming, or
+    /// the bar would stand still until the mouse moved.
+    fn collect_conversion(&mut self, ctx: &egui::Context) {
+        let Some(conversion) = self.conversion.as_mut() else { return };
+        if conversion.shown == 0 {
+            ctx.request_repaint();
+            return;
+        }
+        let mut progress = None;
+        let mut outcome = None;
+        loop {
+            match conversion.done.try_recv() {
+                Ok(ConversionMessage::Progress(done)) => progress = Some(done),
+                Ok(other) => {
+                    outcome = Some(other);
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(50));
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // The thread went away without an answer and nobody asked
+                    // it to — the same case the spelling scan reports.
+                    outcome = Some(ConversionMessage::Failed(
+                        "the conversion stopped before it finished.".into(),
+                    ));
+                    break;
+                }
+            }
+        }
+        if let Some(done) = progress {
+            if let Some(conversion) = self.conversion.as_mut() {
+                conversion.progress = done;
+            }
+        }
+        let Some(outcome) = outcome else { return };
+        let conversion = self.conversion.take().expect("just checked");
+        match outcome {
+            ConversionMessage::Progress(_) => {}
+            ConversionMessage::Wrote(line) => self.say_info(line),
+            ConversionMessage::Stopped(done) => self.say_info(format!(
+                "cancelled after {done} of {} {}(s).",
+                conversion.total, conversion.unit
+            )),
+            ConversionMessage::Failed(reason) => self.say_error(reason),
+        }
+    }
+
+    /// The modal that fronts a running conversion — see [`Conversion`].
+    fn draw_conversion_dialog(&mut self, ctx: &egui::Context) {
+        // The id is read before the conversion is borrowed mutably, and salted
+        // by window so two windows can each have their own progress dialog.
+        let dialog_id = self.window_id("conversion_progress");
+        let Some(conversion) = self.conversion.as_mut() else { return };
+        conversion.shown += 1;
+        let fraction = if conversion.total == 0 {
+            1.0
+        } else {
+            (conversion.progress as f32 / conversion.total as f32).clamp(0.0, 1.0)
+        };
+        let (label, unit, done, total, cancelling) = (
+            conversion.label,
+            conversion.unit,
+            conversion.progress,
+            conversion.total,
+            conversion.cancelling,
+        );
+        let mut cancel = false;
+        egui::Modal::new(dialog_id).show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.heading(label);
+            ui.add_space(8.0);
+            ui.add(egui::ProgressBar::new(fraction).show_percentage().animate(true));
+            ui.add_space(2.0);
+            ui.label(format!("{done} of {total} {unit}(s)…"));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if cancelling {
+                    ui.small("cancelling — the work is put down between steps…");
+                } else if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+        if !cancelling && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            cancel = true;
+        }
+        if cancel {
+            if let Some(conversion) = self.conversion.as_mut() {
+                conversion.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                conversion.cancelling = true;
+            }
+        }
+    }
+
     /// Take what the scan has reported since the last frame: its progress, and
     /// at the end the words, which turn the panel from "checking" into the
     /// first word to review.
@@ -8510,6 +9020,10 @@ impl PagifyApp {
         let Some(doc) = &self.tab_mut().doc else { return 0 };
 
         let mut coloured = 0usize;
+        // A run that could not even be underlined is reported after the loop:
+        // the `doc` borrow forbids `say_error` inside it, and swallowing it
+        // left a link that silently said nothing on the page.
+        let mut link_failures = 0usize;
         for run in &runs {
             let recoloured = doc.session.execute(pdf_core::command::Command::SetTextRun {
                 page_index: page,
@@ -8533,15 +9047,24 @@ impl PagifyApp {
                 // link" without touching a single byte of the page's own
                 // text.
                 Err(_) => {
-                    let _ = doc.session.execute(pdf_core::command::Command::AddAnnotation {
+                    let underlined = doc.session.execute(pdf_core::command::Command::AddAnnotation {
                         page_index: page,
                         annotation: pdf_core::document::Annotation::Underline {
                             rects: vec![run.rect],
                             color: LINK_BLUE,
                         },
                     });
+                    if underlined.is_err() {
+                        link_failures += 1;
+                    }
                 }
             }
+        }
+        if link_failures > 0 {
+            self.say_error(format!(
+                "the link was made, but {link_failures} run(s) could not be coloured or \
+                 underlined — the annotation itself refused the edit."
+            ));
         }
         // Unconditional: a run that could not be recoloured may still have
         // gained an underline, which needs the same re-render the colour
@@ -8793,24 +9316,51 @@ impl PagifyApp {
     /// into something else, and the page as it is being read is what was
     /// asked for. The 4× ceiling keeps a 1600% pinch from asking PDFium for
     /// a gigapixel a 5,000pt drawing would need.
+    ///
+    /// **With the marks drawn on it.** The render is the *file's* page; the
+    /// shapes drawn on top live in this app's own layer until a save commits
+    /// them, and a snapshot that quietly lost them is exactly what was
+    /// reported — "if i have drawn 2d shapes on the page, they do not show
+    /// up in the snapshot". They are painted into the copy with the same
+    /// geometry, pen and widths the save writes — see
+    /// [`pagify_shell::paint::paint_layer`] — so the image is the page as it
+    /// is being read, marks and all. What is *not* on it, deliberately: the
+    /// selection chrome, editor boxes and hovering rulers — those are the
+    /// window's, not the page's.
     fn copy_snapshot(&mut self, ctx: &egui::Context) {
-        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
-            self.say_error("nothing open.");
-            return;
-        };
         let page = self.tab().view_state.page;
         let scale = (self.resolved_zoom() * Self::DISPLAY_DPI_SCALE).clamp(1.0, 4.0);
-        match session.render_page(page, scale) {
+        let marked = self
+            .tab()
+            .markup
+            .existing(page)
+            .is_some_and(|layer| !layer.is_empty());
+        match self.snapshot_raster(page, scale) {
             Ok(raster) => {
                 let (width, height) = (raster.width, raster.height);
                 ctx.copy_image(page_to_image(&raster));
+                let marks = if marked { " — with the marks drawn on it" } else { "" };
                 self.say_info(format!(
-                    "page {} copied as an image ({width}×{height}) — paste it into another program.",
+                    "page {} copied as an image ({width}×{height}){marks} — paste it into another program.",
                     page + 1
                 ));
             }
             Err(e) => self.say_error(format!("snapshot: {e}")),
         }
+    }
+
+    /// The snapshot's own raster: the page at `scale`, **with this tab's own
+    /// marks painted on** — see [`Self::copy_snapshot`]. Its own method so a
+    /// test can hold the image without a clipboard.
+    fn snapshot_raster(&self, page: usize, scale: f32) -> Result<pagify_shell::session::PageRaster, String> {
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            return Err("nothing open.".into());
+        };
+        let mut raster = session.render_page(page, scale).map_err(|e| format!("{e}"))?;
+        if let Some(layer) = self.tab().markup.existing(page).filter(|layer| !layer.is_empty()) {
+            pagify_shell::paint::PageMarks::of(layer).paint(&mut raster, scale, MARKUP_INK, 1.5);
+        }
+        Ok(raster)
     }
 
     /// Toggle AutoScroll — the View tab's button. The scrolling itself is the
@@ -10978,7 +11528,7 @@ impl PagifyApp {
         let Some(asking) = self.tab_mut().secure_state.asking_to_redact.clone() else { return };
         let mut decision: Option<bool> = None;
 
-        egui::Modal::new(egui::Id::new("redact")).show(ctx, |ui| {
+        egui::Modal::new(self.window_id("redact")).show(ctx, |ui| {
             ui.set_width(440.0);
             ui.heading("Part of this area cannot be destroyed");
             ui.add_space(6.0);
@@ -11559,7 +12109,7 @@ impl PagifyApp {
             Cancel,
         }
         let mut choice: Option<Choice> = None;
-        egui::Modal::new(egui::Id::new("securing")).show(ctx, |ui| {
+        egui::Modal::new(self.window_id("securing")).show(ctx, |ui| {
             ui.set_width(420.0);
             ui.heading("Put a password on this file?");
             ui.add_space(6.0);
@@ -11915,6 +12465,107 @@ impl PagifyApp {
         }
         let page = self.tab_mut().view_state.page;
         self.arm_tool(Tool::PickText, page);
+    }
+
+    /// **A plain click on a form widget fills it** — the way every reader
+    /// does it, and the reason the page's own field rectangles are reported
+    /// with page and place.
+    ///
+    /// A text field opens its editor over the widget; a combo or list opens
+    /// its options to choose from; a checkbox or radio takes the click
+    /// through the form environment itself (PDFium's own control decides
+    /// what clicking it means — see `Document::click_form_field`). `true`
+    /// when the point was on a widget this can fill.
+    pub(crate) fn fill_field_at(&mut self, page: usize, at: AppPoint) -> bool {
+        let Some(doc) = self.tab().doc.as_ref() else { return false };
+        let session = doc.session.clone();
+        let (x, y) = (at.x as f32, at.y as f32);
+        let Ok(fields) = session.form_fields() else { return false };
+        let Some(field) = fields.into_iter().find(|field| {
+            field.page == page
+                && x >= field.rect.left
+                && x <= field.rect.right
+                && y >= field.rect.top
+                && y <= field.rect.bottom
+        }) else {
+            return false;
+        };
+        match field.kind {
+            FormFieldKind::Text | FormFieldKind::Combo | FormFieldKind::List => {
+                self.tab_mut().edit.editing_field = Some(EditingField {
+                    page,
+                    name: field.name.clone(),
+                    rect: field.rect,
+                    kind: field.kind,
+                    buffer: field.value.clone().unwrap_or_default(),
+                    options: field.options.clone(),
+                    focused: false,
+                    fresh: true,
+                });
+                true
+            }
+            FormFieldKind::Checkbox | FormFieldKind::Radio | FormFieldKind::Button => {
+                match session.click_form_field(page, (x, y)) {
+                    Ok(true) => {
+                        self.after_field_fill(&field.name);
+                        true
+                    }
+                    Ok(false) => {
+                        self.say_info("that field did not take the click.");
+                        false
+                    }
+                    Err(e) => {
+                        self.say_error(format!("form: {e}"));
+                        false
+                    }
+                }
+            }
+            // Nothing here is fillable: a signature wants signing, and an
+            // unknown widget wants a reader that knows it.
+            FormFieldKind::Signature | FormFieldKind::Unknown => false,
+        }
+    }
+
+    /// What a text field's editor hands back: the words typed, if any went
+    /// in. `false` — the editor stays open — when the engine refused.
+    pub(crate) fn apply_editing_field(&mut self) {
+        let Some(field) = self.tab_mut().edit.editing_field.take() else { return };
+        let Some(doc) = self.tab().doc.as_ref() else { return };
+        let session = doc.session.clone();
+        let typed = field.buffer.clone();
+        let result = match field.kind {
+            FormFieldKind::Text => session.set_form_text(&field.name, &typed).map(|_| ()),
+            _ => session.set_form_choice(&field.name, &typed).map(|_| ()),
+        };
+        match result {
+            Ok(()) => self.after_field_fill(&field.name),
+            Err(e) => {
+                self.say_error(format!("form: {e}"));
+                // Stay open, the words kept — the same courtesy the run
+                // editor gives a refusal.
+                self.tab_mut().edit.editing_field = Some(field);
+            }
+        }
+    }
+
+    /// Choose one of a combo or list's own options.
+    pub(crate) fn choose_editing_field_option(&mut self, option: &str) {
+        let Some(field) = self.tab_mut().edit.editing_field.take() else { return };
+        let Some(doc) = self.tab().doc.as_ref() else { return };
+        let session = doc.session.clone();
+        match session.set_form_choice(&field.name, option) {
+            Ok(_) => self.after_field_fill(&field.name),
+            Err(e) => self.say_error(format!("form: {e}")),
+        }
+    }
+
+    /// A field's value changed: its appearance was regenerated inside the
+    /// engine, so the page has to be rendered again — the same marking the
+    /// Form tab's import makes.
+    fn after_field_fill(&mut self, _name: &str) {
+        if let Some(doc) = &mut self.tab_mut().doc {
+            doc.rendered_is_stale();
+        }
     }
 
     /// The run of text under a point, offered for retyping — and, when the
@@ -12571,6 +13222,11 @@ impl PagifyApp {
         let mut names = self.tab_mut().doc.as_ref().and_then(|d| d.session.run_font_names(page).ok()).unwrap_or_default();
 
         let mut faced = 0usize;
+        // Failed property writes are reported with the summary, not dropped:
+        // inside the loop the document borrow forbids saying anything, and a
+        // silent refusal looked like the property had been matched.
+        let mut failed = 0usize;
+        let mut first_failure: Option<String> = None;
         for target in &targets {
             let Some(mut current) = self.run_at_origin(page, target.origin) else { continue };
 
@@ -12645,21 +13301,29 @@ impl PagifyApp {
             // actually changed.
             if current.size != sample.size {
                 let Some(doc) = &self.tab_mut().doc else { break };
-                let _ = doc.session.execute(pdf_core::command::Command::SetTextRun {
+                let changed = doc.session.execute(pdf_core::command::Command::SetTextRun {
                     page_index: page,
                     object: current.object,
                     text: current.text.clone(),
                     style: pdf_core::document::TextStyle { size: Some(sample.size), ..Default::default() },
                 });
+                if let Err(e) = changed {
+                    failed += 1;
+                    first_failure.get_or_insert_with(|| format!("{e}"));
+                }
             }
             if current.color != sample.color {
                 let Some(doc) = &self.tab_mut().doc else { break };
-                let _ = doc.session.execute(pdf_core::command::Command::SetTextRun {
+                let changed = doc.session.execute(pdf_core::command::Command::SetTextRun {
                     page_index: page,
                     object: current.object,
                     text: current.text.clone(),
                     style: pdf_core::document::TextStyle { color: Some(sample.color), ..Default::default() },
                 });
+                if let Err(e) = changed {
+                    failed += 1;
+                    first_failure.get_or_insert_with(|| format!("{e}"));
+                }
             }
         }
         if let Some(doc) = &mut self.tab_mut().doc {
@@ -12669,7 +13333,7 @@ impl PagifyApp {
 
         let count = targets.len();
         let plural = if count == 1 { "" } else { "s" };
-        Ok(if sample.face.is_some() && faced == count {
+        let summary = if sample.face.is_some() && faced == count {
             format!("matched the font on {count} run{plural}.")
         } else if sample.face.is_some() {
             format!(
@@ -12682,6 +13346,13 @@ impl PagifyApp {
                 "matched size and colour on {count} run{plural} — the sample's own typeface \
                  has no embedded copy to give them, so only its size and colour carried over."
             )
+        };
+        Ok(match first_failure {
+            None => summary,
+            Some(reason) => format!(
+                "{summary} {failed} property change{} could not be written ({reason}).",
+                if failed == 1 { "" } else { "s" }
+            ),
         })
     }
 
@@ -14219,38 +14890,27 @@ impl PagifyApp {
             self.say_error("nothing open.");
             return;
         };
-        let session = doc.session.clone();
-        let count = doc.page_count;
         if !folder.is_dir() {
             self.say_error(format!("toimage: {} is not a folder.", folder.display()));
             return;
         }
-        let stem = self.document_stem();
-        let mut written = 0usize;
-        let mut failures: Vec<String> = Vec::new();
-        for page in 0..count {
-            match session.export_page_png(page, 2.0) {
-                Ok(bytes) => {
-                    let name = format!("{stem}-page-{:03}.png", page + 1);
-                    match std::fs::write(folder.join(&name), bytes) {
-                        Ok(()) => written += 1,
-                        Err(e) => failures.push(format!("page {}: {e}", page + 1)),
-                    }
+        let (session, count, stem) = (doc.session.clone(), doc.page_count, self.document_stem());
+        let folder = folder.to_path_buf();
+        // The drawn-on marks, copied for the worker — an exported PNG is the
+        // page as it is being read, marks and all; see `convert_images`.
+        let marks = marked_pages_of(self.tab());
+        // On the worker, behind the progress dialog — see [`Conversion`]:
+        // rendering and writing every page on the frame thread is exactly the
+        // freeze this was reported for.
+        self.start_conversion("Writing page images", "page", count, move |stop, tx| {
+            let progress = {
+                let tx = tx.clone();
+                move |done: usize, _total: usize| {
+                    let _ = tx.send(ConversionMessage::Progress(done));
                 }
-                Err(e) => failures.push(format!("page {}: {e}", page + 1)),
-            }
-        }
-        if failures.is_empty() {
-            self.say_info(format!(
-                "wrote {written} PNG page(s) at 2× to {}.",
-                folder.display()
-            ));
-        } else {
-            self.say_error(format!(
-                "{written} of {count} page(s) written; {}",
-                failures.join("; ")
-            ));
-        }
+            };
+            convert_images(&session, &stem, count, &folder, &marks, stop, &progress)
+        });
     }
 
     /// Write the document's text as one HTML file — the Conversion tab's To
@@ -14261,15 +14921,17 @@ impl PagifyApp {
             self.say_error("nothing open.");
             return;
         };
-        let session = doc.session.clone();
-        let stem = self.document_stem();
-        match pagify_shell::export::document_html(&session, &stem) {
-            Ok(html) => match std::fs::write(dest, html) {
-                Ok(()) => self.say_info(format!("wrote {}.", dest.display())),
-                Err(e) => self.say_error(format!("tohtml: {e}")),
-            },
-            Err(e) => self.say_error(format!("tohtml: {e}")),
-        }
+        let (session, count, stem) = (doc.session.clone(), doc.page_count, self.document_stem());
+        let dest = dest.to_path_buf();
+        self.start_conversion("Writing HTML", "page", count, move |stop, tx| {
+            let progress = {
+                let tx = tx.clone();
+                move |done: usize, _total: usize| {
+                    let _ = tx.send(ConversionMessage::Progress(done));
+                }
+            };
+            convert_html(&session, &stem, &dest, stop, &progress)
+        });
     }
 
     /// The Conversion tab's To Image, bare: choose the folder, then write
@@ -14292,22 +14954,21 @@ impl PagifyApp {
             self.say_error("nothing open.");
             return;
         };
-        let session = doc.session.clone();
+        let (session, pages) = (doc.session.clone(), doc.page_count);
         let extension = dest
             .extension()
             .map(|e| e.to_string_lossy().to_ascii_lowercase())
             .unwrap_or_default();
-        let pages = doc.page_count;
-        match pagify_shell::export::document_other(&session, &extension) {
-            Ok(text) => match std::fs::write(dest, text) {
-                Ok(()) => self.say_info(format!(
-                    "wrote {pages} page(s) as .{extension} to {}.",
-                    dest.display()
-                )),
-                Err(e) => self.say_error(format!("toother: {e}")),
-            },
-            Err(e) => self.say_error(format!("toother: {e}")),
-        }
+        let dest = dest.to_path_buf();
+        self.start_conversion("Writing the document's text", "page", pages, move |stop, tx| {
+            let progress = {
+                let tx = tx.clone();
+                move |done: usize, _total: usize| {
+                    let _ = tx.send(ConversionMessage::Progress(done));
+                }
+            };
+            convert_other(&session, &extension, pages, &dest, stop, &progress)
+        });
     }
 
     /// The Conversion tab's To Other button, bare: choose the file, then
@@ -14359,37 +15020,23 @@ impl PagifyApp {
             self.say_error("nothing open.");
             return;
         };
-        let session = doc.session.clone();
-        let count = doc.page_count;
         if !folder.is_dir() {
             self.say_error(format!("split: {} is not a folder.", folder.display()));
             return;
         }
         let every = every.max(1);
-        let stem = self.document_stem();
-        let mut written = 0usize;
-        let mut failures: Vec<String> = Vec::new();
-        for pages in (0..count).collect::<Vec<_>>().chunks(every) {
-            let first = pages[0] + 1;
-            let last = pages[pages.len() - 1] + 1;
-            let name = if every == 1 {
-                format!("{stem}-page-{first:03}.pdf")
-            } else {
-                format!("{stem}-pages-{first:03}-{last:03}.pdf")
+        let (session, count, stem) = (doc.session.clone(), doc.page_count, self.document_stem());
+        let folder = folder.to_path_buf();
+        let chunks = count.div_ceil(every);
+        self.start_conversion("Splitting the document", "part", chunks, move |stop, tx| {
+            let progress = {
+                let tx = tx.clone();
+                move |done: usize, _total: usize| {
+                    let _ = tx.send(ConversionMessage::Progress(done));
+                }
             };
-            match session.extract_to(pages, &folder.join(&name)) {
-                Ok(_) => written += 1,
-                Err(e) => failures.push(format!("pages {first}-{last}: {e}")),
-            }
-        }
-        if failures.is_empty() {
-            self.say_info(format!(
-                "wrote {written} file(s) of up to {every} page(s) to {}.",
-                folder.display()
-            ));
-        } else {
-            self.say_error(format!("{written} file(s) written; {}", failures.join("; ")));
-        }
+            convert_split(&session, &stem, count, every, &folder, stop, &progress)
+        });
     }
 
     /// The Organize tab's Split button, bare: choose the folder, then write
@@ -14699,9 +15346,9 @@ impl PagifyApp {
         );
     }
 
-    /// Read form JSON and apply what this build can set — the Form tab's
-    /// Import. Text and checkbox entries apply; radio and choice entries
-    /// are counted and said, not guessed at.
+    /// Read form JSON and apply it — the Form tab's Import. Text, checkbox,
+    /// radio and choice entries each take their own kind's route; anything
+    /// else is counted and said, not guessed at.
     fn import_form_data(&mut self, source: &std::path::Path) {
         let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
             self.say_error("nothing open.");
@@ -14723,9 +15370,8 @@ impl PagifyApp {
                     self.say_info(format!("applied {applied} field value(s)."));
                 } else {
                     self.say_info(format!(
-                        "{applied} field value(s) applied; {not_applied} not — this build \
-                         can set text and checkbox fields. Radios and choices are read \
-                         but not settable; see the form notes."
+                        "{applied} field value(s) applied; {not_applied} not — a value no \
+                         field of that kind would take, or a kind this build cannot set."
                     ));
                 }
             }
@@ -16803,6 +17449,11 @@ impl eframe::App for PagifyApp {
         let ribbon_command = self.draw_ribbon(ui);
         self.draw_command_bar(ui, command_id, &mut submitted);
         self.draw_main_area(&ctx, ui, command_id, ribbon_command, &mut submitted);
+        // **Last, so it is on top of everything.** A conversion's progress
+        // dialog is the one thing that must not be lost under a panel, and
+        // while one runs nothing else should be interactable anyway — see
+        // [`Conversion`].
+        self.draw_conversion_dialog(&ctx);
     }
 
 }
@@ -16821,10 +17472,7 @@ impl PagifyApp {
     fn draw_signature_preview(&mut self, ui: &mut egui::Ui, view: PageView, at: AppPoint) {
         let Some(signature) = self.library_state.signatures.current().cloned() else { return };
         let rect = signature.placed_rect(at.x as f32, at.y as f32, SIGNATURE_WIDTH_PT);
-        let area = egui::Rect::from_min_max(
-            view.to_screen(AppPoint::new(rect.left as f64, rect.top as f64)),
-            view.to_screen(AppPoint::new(rect.right as f64, rect.bottom as f64)),
-        );
+        let area = view.screen_rect(&rect);
 
         if let Some(image) = signature.image.clone() {
             let texture = self
@@ -16887,14 +17535,13 @@ impl PagifyApp {
             return;
         }
 
-        let top_left = view.to_screen(AppPoint {
-            x: edit.rect.left.min(edit.rect.right) as f64,
-            y: edit.rect.top.min(edit.rect.bottom) as f64,
-        });
-        let bottom_right = view.to_screen(AppPoint {
-            x: edit.rect.left.max(edit.rect.right) as f64,
-            y: edit.rect.top.max(edit.rect.bottom) as f64,
-        });
+        // **The run's own box, normalised through the turn.** The editor is an
+        // axis-aligned egui widget, so it stands in the run's turned box on
+        // screen; `screen_rect` maps both corners and takes min/max, where
+        // building the rect from two independently turned corners left an
+        // inverted (negative-size) box at 90°/270°.
+        let area = view.screen_rect(&edit.rect);
+        let (top_left, bottom_right) = (area.min, area.max);
 
         // **Exactly the run's own size, not padded to leave room to grow.**
         //
@@ -17345,21 +17992,100 @@ fn wrap_typed_last_line(
     /// does here on screen is reproduced exactly in
     /// [`Self::apply_new_text_box`], from the same width and font size, so
     /// what gets written matches what was typed.
+    /// The form widget open for filling, drawn over it where it sits — see
+    /// [`EditingField`]: a text field's editor, or a combo's options listed
+    /// under the widget, one button each.
+    fn draw_field_editor(&mut self, ui: &mut egui::Ui, page: usize, view: PageView) {
+        let mut want_commit = false;
+        let mut want_close = false;
+        let mut chosen: Option<String> = None;
+        {
+            let Some(field) = self.tab_mut().edit.editing_field.as_mut() else { return };
+            if field.page != page {
+                return;
+            }
+            let fresh = std::mem::take(&mut field.fresh);
+            // Normalised through the turn — see `PageView::screen_rect`.
+            let rect = view.screen_rect(&field.rect);
+            let paper = egui::Color32::from_rgb(250, 250, 248);
+            ui.painter().rect_filled(rect.expand(1.0), 0.0, paper);
+            ui.painter().rect_stroke(
+                rect,
+                0.0,
+                egui::Stroke::new(1.0, theme::violet_bright()),
+                egui::StrokeKind::Outside,
+            );
+
+            match field.kind {
+                FormFieldKind::Text => {
+                    let size_px = ((field.rect.bottom - field.rect.top) * 0.72 * view.scale)
+                        .clamp(6.0, 200.0);
+                    let id = egui::Id::new(("field-editor", page, field.name.clone()));
+                    let response = ui.put(
+                        rect,
+                        egui::TextEdit::singleline(&mut field.buffer)
+                            .id(id)
+                            .background_color(paper)
+                            .margin(egui::Margin::same(2))
+                            .font(egui::FontId::proportional(size_px)),
+                    );
+                    if !field.focused {
+                        field.focused = true;
+                        response.request_focus();
+                    } else if response.lost_focus() {
+                        // Enter or a click away — either way the words go in;
+                        // Escape puts them back.
+                        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            want_close = true;
+                        } else {
+                            want_commit = true;
+                        }
+                    }
+                }
+                _ => {
+                    // The field's own options, listed under the widget.
+                    let width = rect.width().max(140.0);
+                    let mut top = rect.bottom() + 3.0;
+                    for option in field.options.clone() {
+                        let spot = egui::Rect::from_min_size(
+                            egui::pos2(rect.left(), top),
+                            egui::vec2(width, 22.0),
+                        );
+                        if ui.put(spot, egui::Button::new(option.clone())).clicked() {
+                            chosen = Some(option);
+                            break;
+                        }
+                        top += 24.0;
+                    }
+                    // A click anywhere else puts the list away — but not the
+                    // click that just opened it.
+                    if chosen.is_none()
+                        && !fresh
+                        && ui.input(|i| i.pointer.any_click())
+                        && !ui.rect_contains_pointer(rect)
+                    {
+                        want_close = true;
+                    }
+                }
+            }
+        }
+        if let Some(option) = chosen {
+            self.choose_editing_field_option(&option);
+        } else if want_close {
+            self.tab_mut().edit.editing_field = None;
+        } else if want_commit {
+            self.apply_editing_field();
+        }
+    }
+
     fn draw_new_text_box(&mut self, ui: &mut egui::Ui, page: usize, view: PageView) {
         let Some(new_text) = &mut self.tab_mut().edit.new_text_box else { return };
         if new_text.page != page {
             return;
         }
 
-        let top_left = view.to_screen(AppPoint {
-            x: new_text.rect.left as f64,
-            y: new_text.rect.top as f64,
-        });
-        let bottom_right = view.to_screen(AppPoint {
-            x: new_text.rect.right as f64,
-            y: new_text.rect.bottom as f64,
-        });
-        let rect = egui::Rect::from_min_max(top_left, bottom_right);
+        // Normalised through the turn — see `PageView::screen_rect`.
+        let rect = view.screen_rect(&new_text.rect);
         let paper = egui::Color32::from_rgb(250, 250, 248);
 
         ui.painter().rect_filled(rect.expand(1.0), 0.0, paper);
@@ -17697,7 +18423,7 @@ fn wrap_typed_last_line(
     }
 
 
-    /// The run editor's font picker: every font Windows has installed,
+    /// The run editor's font picker: every font this machine has installed,
     /// filtered as you type, chosen to write the run in.
     ///
     /// A plain list rather than an `egui::ComboBox` — a system can easily
@@ -17737,6 +18463,22 @@ fn wrap_typed_last_line(
                 egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
                     if ui.selectable_label(false, "(automatic)").clicked() {
                         chosen = Some(None);
+                    }
+                    if self
+                        .faces_state
+                        .system_fonts
+                        .as_ref()
+                        .is_some_and(|fonts| fonts.is_empty())
+                    {
+                        // The scan found nothing — say so rather than showing
+                        // a list with only "(automatic)" in it and no reason.
+                        ui.label(
+                            egui::RichText::new(
+                                "no installed fonts found on this machine — a font file can \
+                                 still be added explicitly",
+                            )
+                            .weak(),
+                        );
                     }
                     let filter = self.faces_state.font_picker_filter.to_ascii_lowercase();
                     for font in self.faces_state.system_fonts.iter().flatten() {
@@ -17818,10 +18560,7 @@ fn wrap_typed_last_line(
         let Some(at) = self.tab_mut().selection.picked_layer else { return };
         let Some(entry) = self.layers_on(page).get(at).cloned() else { return };
 
-        let outline = egui::Rect::from_min_max(
-            view.to_screen(AppPoint::new(entry.rect.left as f64, entry.rect.top as f64)),
-            view.to_screen(AppPoint::new(entry.rect.right as f64, entry.rect.bottom as f64)),
-        );
+        let outline = view.screen_rect(&entry.rect);
         let painter = ui.painter();
         painter.rect_stroke(
             outline.expand(1.5),
@@ -17864,10 +18603,12 @@ fn wrap_typed_last_line(
 
         let wash = |range: std::ops::Range<usize>, colour: egui::Color32| {
             for rect in chars.line_rects(range) {
-                let min = view.to_screen(AppPoint::new(rect.left as f64, rect.top as f64));
-                let max = view.to_screen(AppPoint::new(rect.right as f64, rect.bottom as f64));
+                // Normalised through the turn: at 90°/270° the two mapped
+                // corners swap, and `from_min_max` on them would paint an
+                // inverted box — the reported "highlights are wrong" after a
+                // view rotation, one layer below the annotation itself.
                 painter.rect_filled(
-                    egui::Rect::from_min_max(min, max),
+                    view.screen_rect_of(rect.left, rect.top, rect.right, rect.bottom),
                     egui::CornerRadius::ZERO,
                     colour,
                 );

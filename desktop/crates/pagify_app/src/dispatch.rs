@@ -299,7 +299,7 @@ impl crate::PagifyApp {
             Effect::SetPaperTint(tint) => self.set_paper_tint(tint),
             Effect::Say(text) => self.say_info(text),
             Effect::SayError(text) => self.say_error(text),
-            Effect::CheckUpdate => self.spawn_update_check(),
+            Effect::CheckUpdate => self.spawn_update_check(true),
             other => unreachable!("apply_document was handed {other:?}"),
         }
     }

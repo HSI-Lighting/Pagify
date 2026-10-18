@@ -766,3 +766,105 @@ fn visiting_the_file_tab_does_not_put_the_view_back_at_the_top() {
         "going to the File tab and back moved the document"
     );
 }
+
+/// **A turned view still knows which words are under the pointer.**
+/// Reported from use: "when i rotate, extract text and the similar tools
+/// behave as if the page is still vertical, the highlights are wrong" — the
+/// click mapped through an upright page while the page was drawn turned.
+/// This drags the Highlight tool across a word's *screen* rectangle — placed
+/// by the display's own rule, hand-derived here — and holds the mark that
+/// comes out to the word's own page-space box.
+#[test]
+fn a_turned_view_highlights_the_words_under_the_pointer() {
+    use super::ui_tests::drag;
+
+    let mut h = harness("two-column.pdf");
+    h.state_mut().submit("rotate 90");
+    h.run_steps(4);
+    assert!(
+        matches!(h.state().tab().view_state.rotation, Rotation::Clockwise90),
+        "the view did not turn"
+    );
+
+    // **Wait for the view to settle before reading it.** A rotation retargets
+    // the strip and re-fits the zoom over the next frames, and a screen point
+    // computed against a half-settled view presses on the wrong character.
+    let mut view = h.state().tab().view_state.last_view.expect("the drawn view");
+    for _ in 0..20 {
+        h.run_steps(1);
+        let now = h.state().tab().view_state.last_view.expect("the drawn view");
+        let steady = now.origin == view.origin && now.scale == view.scale && now.frame == view.frame;
+        view = now;
+        if steady {
+            break;
+        }
+    }
+    assert_eq!(view.rotation, Rotation::Clockwise90, "the view did not carry the turn");
+
+    // **The word by its own character boxes**, which is what the click and
+    // the selection are made of — a run's rectangle can start left of its
+    // first character (indentation, a split line), and a test built on that
+    // would be testing its own assumption rather than the mapping.
+    let chars = h.state_mut().characters(0).expect("the page's characters");
+    let word = chars.text().find("housing").expect("the word `housing`");
+    let word = word..(word + "housing".len());
+    let rects = chars.line_rects(word);
+    assert_eq!(rects.len(), 1, "the word sits on one line");
+    let rect = rects[0];
+
+    // A clockwise quarter takes the page's top edge to the drawn image's
+    // right edge: a page point (x, y) lands at (page height - y, x) in the
+    // drawn frame, then through origin and zoom. Written out here rather
+    // than called, because this is the specification the map is held to.
+    let screen = |x: f64, y: f64| {
+        let turned = (f64::from(view.frame.0) - y, x);
+        egui::pos2(
+            view.origin.x + turned.0 as f32 * view.scale,
+            view.origin.y + turned.1 as f32 * view.scale,
+        )
+    };
+
+    // Arm the highlighter — it marks whatever the drag selects.
+    h.state_mut().submit("highlight");
+    h.run_steps(1);
+    assert!(h.state().tab().tool.is_some(), "the highlighter did not arm");
+
+    // Press just inside the word's first character and let go just inside
+    // its last: through the turn, that is a drag across the word whichever
+    // way the screen runs. Points *inside* the ends rather than on the
+    // corners, so which character a boundary belongs to cannot decide the
+    // test.
+    let mid = (rect.top + rect.bottom) / 2.0;
+    drag(
+        &mut h,
+        screen((rect.left + 1.0) as f64, mid as f64),
+        screen((rect.right - 1.0) as f64, mid as f64),
+    );
+    h.run_steps(3);
+
+    // **The mark must be the word's own span, not merely near it.** The same
+    // screen points read as an *upright* drag cross a column of the page
+    // instead and select the tails of the lines they pass, which still
+    // overlaps this word's box — only the span's own ends tell the two
+    // apart.
+    let session = h.state().tab().doc.as_ref().expect("open").session.clone();
+    let mut covered = false;
+    for annotation in session.annotations(0).expect("annotations") {
+        let pdf_core::document::Annotation::Highlight { rects, .. } = &annotation.annotation else {
+            continue;
+        };
+        if rects.iter().any(|r| {
+            r.left <= rect.left + 3.0
+                && r.right >= rect.right - 3.0
+                && r.bottom > rect.top
+                && r.top < rect.bottom
+        }) {
+            covered = true;
+        }
+    }
+    assert!(
+        covered,
+        "no highlight covers the word ({:.1}, {:.1})-({:.1}, {:.1})",
+        rect.left, rect.top, rect.right, rect.bottom
+    );
+}

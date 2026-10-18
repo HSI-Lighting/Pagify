@@ -27,10 +27,25 @@ impl Session {
     }
 
     /// Check the radio widget carrying `state` in the group `name`; `false`
-    /// when no widget matches — and always `false` in this build, which
-    /// cannot set radios (see `Document::set_form_radio`).
+    /// when no widget's click produced that state — see
+    /// [`pdf_core::document::Document::set_form_radio`], which drives the
+    /// widgets' own clicks rather than writing the state behind them.
     pub fn set_form_radio(&self, name: &str, state: &str) -> Result<bool> {
         registry::with_session(self.handle, |s| s.document.set_form_radio(name, state))
+    }
+
+    /// Set the value of the first combo or list field named `name` — the
+    /// option route for a choice whose label is one of the field's own.
+    /// See [`pdf_core::document::Document::set_form_choice`].
+    pub fn set_form_choice(&self, name: &str, value: &str) -> Result<bool> {
+        registry::with_session(self.handle, |s| s.document.set_form_choice(name, value))
+    }
+
+    /// Click the form widget at `(x, y)` — page points, top-left origin —
+    /// through the form environment, so PDFium's own control decides what
+    /// the click means. See [`pdf_core::document::Document::click_form_field`].
+    pub fn click_form_field(&self, page: usize, at: (f32, f32)) -> Result<bool> {
+        registry::with_session(self.handle, |s| s.document.click_form_field(page, at))
     }
 
     /// Set a field's tooltip (`/TU`); `false` when the document holds no
@@ -113,12 +128,13 @@ impl Session {
 
     /// Apply the JSON `formexport` writes.
     ///
-    /// Text values and checkbox states are settable in this build; radios
-    /// and choices are not (see `Document::set_form_radio`), and anything
-    /// else is counted as not applied rather than guessed at. A checkbox
-    /// entry is checked when its value is present and unchecked when it is
-    /// `null`; a `null` radio entry is left alone, because a radio group is
-    /// a choice, not a switch.
+    /// Text values, checkbox states, radio states and choice values are all
+    /// settable, each by the route its own kind takes (see
+    /// `Document::set_form_text`, `set_form_checkbox`, `set_form_radio` and
+    /// `set_form_choice`); anything else is counted as not applied rather
+    /// than guessed at. A checkbox entry is checked when its value is
+    /// present and unchecked when it is `null`; a `null` radio entry is left
+    /// alone, because a radio group is a choice, not a switch.
     ///
     /// Returns `(applied, not_applied)`.
     pub fn apply_form_data_json(&self, json: &str) -> Result<(usize, usize)> {
@@ -141,6 +157,10 @@ impl Session {
                     "checkbox" => self.set_form_checkbox(name, value.is_some())?,
                     "radio" => match value {
                         Some(state) => self.set_form_radio(name, state)?,
+                        None => true,
+                    },
+                    "combo" | "list" => match value {
+                        Some(option) => self.set_form_choice(name, option)?,
                         None => true,
                     },
                     _ => false,

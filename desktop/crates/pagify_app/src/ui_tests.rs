@@ -1,5 +1,6 @@
 use super::*;
 use eframe::App as _;
+use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 
 pub(crate) fn fixture(name: &str) -> String {
@@ -4869,10 +4870,39 @@ fn snapshot_renders_the_page_and_says_so() {
     );
 }
 
+/// The command bar's own record of what was said — the same helper the
+/// spelling tests keep, for asserting a conversion's closing line.
+fn said(h: &Harness<'static, PagifyApp>) -> String {
+    h.state().cmd.history().iter().map(|e| e.text.as_str()).collect::<Vec<_>>().join("\n")
+}
+
+/// Run frames until `ready`, up to a few seconds — **a conversion runs on
+/// its own thread now**, so a test waits for the file (and for the dialog to
+/// close) rather than assuming a single frame was enough.
+fn run_until(
+    h: &mut Harness<'static, PagifyApp>,
+    what: &str,
+    mut ready: impl FnMut(&Harness<'static, PagifyApp>) -> bool,
+) {
+    for _ in 0..600 {
+        if ready(h) {
+            return;
+        }
+        h.run_steps(1);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("{what} did not finish in time");
+}
+
 /// **The Conversion tab's pair, through the real dispatch.** `toimage` writes
 /// one PNG per page into a folder; `tohtml` writes the document's text as one
 /// file. Both go through real files in a scratch folder, since writing them
 /// is the feature.
+///
+/// **And both show their progress dialog first.** Reported from use:
+/// converting froze the window, and nothing said why. The dialog is asserted
+/// here before the work can be assumed done — it is drawn at least once even
+/// for a conversion that finishes before the first frame.
 #[test]
 fn to_image_writes_pngs_and_to_html_writes_the_text() {
     let mut h = harness("quadrants.pdf");
@@ -4881,19 +4911,123 @@ fn to_image_writes_pngs_and_to_html_writes_the_text() {
 
     h.state_mut().submit(&format!("toimage {}", dir.display()));
     h.run_steps(1);
+    assert!(
+        h.query_by_label_contains("Cancel").is_some(),
+        "no progress dialog while converting"
+    );
+    assert!(
+        h.query_by_label_contains("Writing page images").is_some(),
+        "the dialog does not say what is being written"
+    );
+    run_until(&mut h, "the page PNGs", |_| dir.join("quadrants-page-001.png").exists());
+    run_until(&mut h, "the dialog to close", |h| h.query_by_label_contains("Cancel").is_none());
     let png = std::fs::read(dir.join("quadrants-page-001.png")).expect("a PNG per page");
     assert!(
         png.starts_with(&[0x89, b'P', b'N', b'G']),
         "the written file is not a PNG"
     );
+    assert!(said(&h).contains("wrote 1 PNG page(s)"), "the closing line: {}", said(&h));
 
     let book = dir.join("book.html");
     h.state_mut().submit(&format!("tohtml {}", book.display()));
     h.run_steps(1);
+    assert!(
+        h.query_by_label_contains("Writing HTML").is_some(),
+        "no progress dialog for the HTML write"
+    );
+    run_until(&mut h, "the HTML file", |_| book.exists());
+    run_until(&mut h, "the dialog to close", |h| h.query_by_label_contains("Cancel").is_none());
     let html = std::fs::read_to_string(&book).expect("the HTML file");
     assert!(html.contains("<title>quadrants</title>"), "no title: {html}");
     assert!(html.contains("<h2>Page 1</h2>"), "no page heading: {html}");
+    assert!(html.contains("<style>"), "the file came out unstyled: {html}");
 
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// **A second conversion while one runs is refused, with that said.** Two at
+/// once would race each other's files, and one Cancel would be a lie about
+/// which it stopped — see [`Conversion`].
+#[test]
+fn a_second_conversion_while_one_runs_is_refused() {
+    let mut h = harness("quadrants.pdf");
+    let dir = std::env::temp_dir().join(format!("pagify-two-conversions-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch folder");
+
+    // Both submitted before a frame runs: the first is still in flight as far
+    // as the window is concerned, whatever the worker has done.
+    h.state_mut().submit(&format!("toimage {}", dir.display()));
+    h.state_mut().submit(&format!("toimage {}", dir.display()));
+
+    assert!(
+        said(&h).contains("a conversion is already running"),
+        "the second was not refused: {}",
+        said(&h)
+    );
+    run_until(&mut h, "the dialog to close", |h| h.query_by_label_contains("Cancel").is_none());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// **While a conversion writes, the keyboard belongs to its dialog.** The
+/// progress modal blocks the pointer, but shortcuts are read before any
+/// modal is drawn — Ctrl+W used to close the tab the worker was still reading,
+/// and Ctrl+S/Ctrl+Z could change the document under it.
+#[test]
+fn a_conversion_blocks_the_documents_shortcuts() {
+    let mut h = harness("quadrants.pdf");
+    // A conversion that stays in flight for the length of the test: its
+    // receiver has a live (never used) sender, so `collect_conversion` sees
+    // "nothing yet" rather than a finished worker. `_keep` must outlive every
+    // `run_steps` here.
+    let (_keep, done) = std::sync::mpsc::channel::<ConversionMessage>();
+    h.state_mut().conversion = Some(Conversion {
+        done,
+        stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        label: "Writing page images",
+        unit: "page",
+        total: 1,
+        progress: 0,
+        cancelling: false,
+        shown: 0,
+    });
+
+    for pressed in [true, false] {
+        h.input_mut().events.push(egui::Event::Key {
+            key: egui::Key::W,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        });
+    }
+    h.run_steps(2);
+    assert!(
+        h.state().tab().doc.is_some(),
+        "Ctrl+W closed the tab while a conversion was writing files for it"
+    );
+}
+
+/// **Cancel's flag stops the work between steps**: a conversion started with
+/// the flag already up writes nothing at all and answers `Stopped`. Clicking
+/// Cancel sets this same flag — the button cannot be clicked deterministically
+/// from a test watching a fast fixture, so the loop's side of it is held here.
+#[test]
+fn a_stopped_conversion_writes_nothing() {
+    let session = Session::open(fixture("quadrants.pdf")).expect("open");
+    let dir = std::env::temp_dir().join(format!("pagify-stopped-conversion-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch folder");
+
+    let stop = std::sync::atomic::AtomicBool::new(true);
+    let outcome = convert_images(&session, "quadrants", 4, &dir, &[], &stop, &|_, _| {});
+    assert!(
+        matches!(outcome, ConversionMessage::Stopped(0)),
+        "a stopped conversion did not answer Stopped: {outcome:?}"
+    );
+    assert_eq!(
+        std::fs::read_dir(&dir).expect("listed").count(),
+        0,
+        "a stopped conversion wrote files"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -4909,6 +5043,16 @@ fn split_writes_chunk_files_and_wordcount_counts_the_pages() {
 
     h.state_mut().submit(&format!("split 2 {}", dir.display()));
     h.run_steps(1);
+    assert!(
+        h.query_by_label_contains("Splitting the document").is_some(),
+        "no progress dialog while splitting"
+    );
+    // The split runs on its own thread; wait for its last file (the ladder is
+    // five pages, so `split 2` writes three chunks).
+    run_until(&mut h, "the last chunk", |_| {
+        dir.join("pages-ladder-pages-005-005.pdf").exists()
+    });
+    run_until(&mut h, "the dialog to close", |h| h.query_by_label_contains("Cancel").is_none());
 
     let mut names: Vec<String> = std::fs::read_dir(&dir)
         .expect("listed")
@@ -4938,10 +5082,10 @@ fn split_writes_chunk_files_and_wordcount_counts_the_pages() {
     let mut h = harness("two-column.pdf");
     h.state_mut().submit("wordcount");
     h.run_steps(1);
-    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    let lines: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
     assert!(
-        said.iter().any(|l| l.contains("word(s),") && !l.starts_with("0 word")),
-        "wordcount did not count the page: {said:?}"
+        lines.iter().any(|l| l.contains("word(s),") && !l.starts_with("0 word")),
+        "wordcount did not count the page: {lines:?}"
     );
 }
 
@@ -5711,11 +5855,13 @@ fn formexport_and_formimport_round_trip_through_a_file() {
     let json = std::fs::read_to_string(&data).expect("the export file");
     assert!(json.contains("Ada Lovelace"), "{json}");
 
-    // Change the text, uncheck the box, and attempt the radio.
+    // Change the text, uncheck the box, move the radio and the combo — every
+    // kind a form is made of, since every kind now applies.
     let edited = json
         .replace("Ada Lovelace", "Grace Hopper")
         .replace("\"value\":\"Yes\"", "\"value\":null")
-        .replace("\"value\":\"slow\"", "\"value\":\"fast\"");
+        .replace("\"value\":\"slow\"", "\"value\":\"fast\"")
+        .replace("\"value\":\"Green\"", "\"value\":\"Blue\"");
     let edited_path = dir.join("edited.json");
     std::fs::write(&edited_path, edited).expect("write the edit");
 
@@ -5726,12 +5872,13 @@ fn formexport_and_formimport_round_trip_through_a_file() {
     let fields = session.form_fields().expect("reread");
     assert_eq!(fields[0].value.as_deref(), Some("Grace Hopper"), "the text did not apply");
     assert_eq!(fields[2].value, None, "the checkbox did not clear");
-    assert_eq!(fields[3].value.as_deref(), Some("slow"), "the refused radio change touched the file");
+    assert_eq!(fields[4].value.as_deref(), Some("fast"), "the radio did not move");
+    assert_eq!(fields[5].value.as_deref(), Some("Blue"), "the combo did not take its option");
 
     let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
     assert!(
-        said.iter().any(|l| l.contains("not settable")),
-        "the not-applied radio must be said, not silent: {said:?}"
+        said.iter().any(|l| l.contains("applied")),
+        "the import did not say what it applied: {said:?}"
     );
 
     std::fs::remove_dir_all(&dir).ok();
@@ -6047,6 +6194,168 @@ fn markredact_marks_then_destroys_on_the_second_press() {
     );
 }
 
+/// **Clicking a form field fills it** — the reported ask: "the app can
+/// render pdf forms and allows user to fill them". The widget rectangles come
+/// from `form_fields`, so a click lands where the page draws the field; each
+/// kind is filled the way its own control takes it, and the value is read
+/// back from the engine.
+#[test]
+fn clicking_a_form_field_fills_it() {
+    let mut h = harness("form-fields.pdf");
+    let session = h.state().tab().doc.as_ref().expect("open").session.clone();
+
+    // A text field opens its editor over itself; the words typed go in.
+    assert!(
+        h.state_mut().fill_field_at(0, AppPoint { x: 200.0, y: 116.0 }),
+        "the click on the name field was not taken"
+    );
+    {
+        let field = h
+            .state_mut()
+            .tab_mut()
+            .edit
+            .editing_field
+            .as_mut()
+            .expect("the name field is open for filling");
+        assert_eq!(field.name, "name");
+        assert_eq!(field.buffer, "Ada Lovelace", "the editor opened with the value it holds");
+        field.buffer = "Grace Hopper".into();
+    }
+    h.state_mut().apply_editing_field();
+    assert!(h.state().tab().edit.editing_field.is_none(), "the editor stayed open");
+    let fields = session.form_fields().expect("reread");
+    assert_eq!(fields[0].value.as_deref(), Some("Grace Hopper"), "the text did not land");
+
+    // A checkbox takes the click itself: it was ticked, so it comes off.
+    assert!(
+        h.state_mut().fill_field_at(0, AppPoint { x: 147.0, y: 201.0 }),
+        "the click on the checkbox was not taken"
+    );
+    let fields = session.form_fields().expect("reread");
+    assert_eq!(fields[2].value, None, "the checkbox did not toggle");
+
+    // A radio joins its group.
+    assert!(
+        h.state_mut().fill_field_at(0, AppPoint { x: 187.0, y: 241.0 }),
+        "the click on the second radio was not taken"
+    );
+    let fields = session.form_fields().expect("reread");
+    assert_eq!(fields[3].value, None, "the first radio is still checked");
+    assert_eq!(fields[4].value.as_deref(), Some("fast"), "the clicked radio is not checked");
+
+    // A combo opens its own options, and choosing one lands.
+    assert!(
+        h.state_mut().fill_field_at(0, AppPoint { x: 200.0, y: 276.0 }),
+        "the click on the combo was not taken"
+    );
+    let options = h
+        .state()
+        .tab()
+        .edit
+        .editing_field
+        .as_ref()
+        .expect("the combo is open for choosing")
+        .options
+        .clone();
+    assert_eq!(options, vec!["Red", "Green", "Blue"], "the options are the field's own");
+    h.state_mut().choose_editing_field_option("Red");
+    let fields = session.form_fields().expect("reread");
+    assert_eq!(fields[5].value.as_deref(), Some("Red"), "the chosen option did not land");
+
+    // And a click on bare paper is not a fill.
+    assert!(
+        !h.state_mut().fill_field_at(0, AppPoint { x: 500.0, y: 500.0 }),
+        "a click on nothing filled something"
+    );
+}
+
+/// **To Image carries the shapes drawn on a page too** — the same report as
+/// the Snapshot's ("if i have drawn 2d shapes on the page, they do not show
+/// up"), for the exported PNGs: the marks are painted into each page's
+/// raster before it is encoded, so the file is the page as it is being read.
+#[test]
+fn to_image_carries_the_shapes_drawn_on_the_page() {
+    use egui_kittest::kittest::Queryable;
+
+    let dir = std::env::temp_dir().join(format!("pagify-marked-export-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch folder");
+
+    let mut h = harness("single-page.pdf");
+    // The fixture is a small page — 200×400 points — so the line stays on it.
+    h.state_mut().submit("line");
+    h.state_mut().take_pick(AppPoint { x: 50.0, y: 50.0 });
+    h.state_mut().take_pick(AppPoint { x: 150.0, y: 50.0 });
+
+    h.state_mut().submit(&format!("toimage {}", dir.display()));
+    h.run_steps(1);
+    let png = dir.join("single-page-page-001.png");
+    run_until(&mut h, "the PNG", |_| png.exists());
+    run_until(&mut h, "the dialog to close", |h| h.query_by_label_contains("Cancel").is_none());
+
+    let bytes = std::fs::read(&png).expect("the written PNG");
+    let image = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
+        .expect("a PNG")
+        .to_rgba8();
+    // The line runs from (50, 50) to (150, 50) in page points at scale 2.0:
+    // columns 100..300, rows 96..104, with the pen's own width and feather.
+    // The band is blank on the page itself — the snapshot test holds that at
+    // scale 1.
+    let mut ink = 0;
+    for y in 94..110 {
+        for x in 100..300 {
+            if image.get_pixel(x, y).0[..3] != [255, 255, 255] {
+                ink += 1;
+            }
+        }
+    }
+    assert!(ink > 150, "the drawn line is not on the exported PNG: {ink} pixels of ink");
+    // And the line did not leak above itself.
+    let mut above = 0;
+    for y in 40..90 {
+        for x in 100..300 {
+            if image.get_pixel(x, y).0[..3] != [255, 255, 255] {
+                above += 1;
+            }
+        }
+    }
+    assert_eq!(above, 0, "something was drawn above the line");
+
+    let said: String =
+        h.state().cmd.history().iter().map(|e| e.text.clone()).collect::<Vec<_>>().join("\n");
+    assert!(
+        said.contains("marks drawn on them"),
+        "the export did not say the marks are on the pages: {said}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// **The snapshot's own message says when the marks are on the copy** — so
+/// nobody pastes it somewhere and wonders where their shapes went, and the
+/// dispatch path (which is where the painting happens) is exercised with
+/// marks actually drawn.
+#[test]
+fn snapshot_says_when_the_marks_are_on_the_copy() {
+    let mut h = harness("single-page.pdf");
+    h.state_mut().submit("line");
+    h.state_mut().take_pick(AppPoint { x: 100.0, y: 100.0 });
+    h.state_mut().take_pick(AppPoint { x: 300.0, y: 100.0 });
+
+    h.state_mut().submit("snapshot");
+    h.run_steps(2);
+
+    let said: String =
+        h.state().cmd.history().iter().map(|e| e.text.clone()).collect::<Vec<_>>().join("\n");
+    assert!(
+        said.contains("with the marks drawn on it"),
+        "the snapshot did not say the marks are on the copy: {said}"
+    );
+    assert!(
+        !said.contains("snapshot: "),
+        "the snapshot failed: {said}"
+    );
+}
+
 /// The Conversion tab's To Other, through the real dispatch: the extension
 /// picks the format, and each file really lands.
 #[test]
@@ -6059,7 +6368,16 @@ fn toother_writes_txt_rtf_and_xml() {
         let out = dir.join(format!("book.{extension}"));
         h.state_mut().submit(&format!("toother {}", out.display()));
         h.run_steps(1);
-        assert!(out.exists(), ".{extension} was not written");
+        assert!(
+            h.query_by_label_contains("Writing the document's text").is_some(),
+            "no progress dialog while writing .{extension}"
+        );
+        run_until(&mut h, &format!("the .{extension} file"), |_| out.exists());
+        // The dialog closes on the frame the result is taken; the next
+        // submission would be refused while it stands.
+        run_until(&mut h, "the dialog to close", |h| {
+            h.query_by_label_contains("Cancel").is_none()
+        });
     }
     let rtf = std::fs::read_to_string(dir.join("book.rtf")).expect("read");
     assert!(rtf.starts_with("{\\rtf1"), "{rtf}");
@@ -6126,6 +6444,60 @@ fn contents_opens_the_files_table_of_contents_in_the_rail() {
     h.state_mut().submit("contents");
     h.run_steps(2);
     assert!(!h.state().ui_state.show_contents, "the panel did not close");
+}
+
+/// **Reported from use: the contents rail "cannot be reduced smaller than the
+/// longest text".** Every row was a selectable label sized to its whole
+/// title, and the resizable panel grows to fit its content's minimum — so
+/// the longest title set a floor the drag could not pass, and narrowing past
+/// it was impossible rather than truncating. Titles now truncate with an
+/// ellipsis, so the panel keeps whatever width it is dragged to.
+#[test]
+fn contents_rows_truncate_instead_of_holding_the_panel_wide() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness("tagged.pdf");
+    h.state_mut().submit("contents");
+    h.run_steps(3);
+
+    // Drag the panel to its own minimum, as far narrow as a person can.
+    let id = egui::Id::new("contents_panel");
+    h.ctx.data_mut(|d| {
+        d.insert_persisted(
+            id,
+            egui::containers::panel::PanelState {
+                outer_rect: egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(160.0, 800.0),
+                ),
+            },
+        )
+    });
+    h.run_steps(2);
+
+    let state = h
+        .ctx
+        .data_mut(|d| d.get_persisted::<egui::containers::panel::PanelState>(id))
+        .expect("the contents panel has a stored size");
+    let panel = state.outer_rect;
+    assert!(
+        panel.width() <= 160.5,
+        "the panel refused the width it was dragged to and widened to {} — \
+         a row's own text is setting its floor",
+        panel.width()
+    );
+
+    // And no row reaches past the panel: what fits is drawn, the rest is cut
+    // with the ellipsis (the whole title stays reachable as a hover).
+    for title in ["A Tagged Heading", "The figures"] {
+        let node = h
+            .query_by_label_contains(title)
+            .unwrap_or_else(|| panic!("no row labelled {title:?}"));
+        assert!(
+            node.rect().right() <= panel.right() - 4.0,
+            "the row for {title:?} reaches past the panel: {:?} vs {panel:?}",
+            node.rect()
+        );
+    }
 }
 
 /// **File dialogs run on their own thread.** `open` used to run the OS

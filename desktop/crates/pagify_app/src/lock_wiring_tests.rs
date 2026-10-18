@@ -145,7 +145,7 @@ fn a_non_standard_size_falls_back_to_millimetres() {
 
 #[test]
 fn a_screen_rect_converts_to_page_points_through_the_view() {
-    let view = PageView { origin: egui::pos2(100.0, 50.0), scale: 2.0 };
+    let view = PageView::upright(egui::pos2(100.0, 50.0), 2.0);
     // 2x zoom: 20 screen px either side of the origin is 10 page points.
     let screen = egui::Rect::from_min_max(egui::pos2(100.0, 50.0), egui::pos2(140.0, 90.0));
     let page_rect = PagifyApp::page_rect_from_screen(view, screen, 1000.0, 1000.0);
@@ -154,7 +154,7 @@ fn a_screen_rect_converts_to_page_points_through_the_view() {
 
 #[test]
 fn a_screen_rect_past_the_page_edge_is_clamped_to_it() {
-    let view = PageView { origin: egui::pos2(0.0, 0.0), scale: 1.0 };
+    let view = PageView::upright(egui::pos2(0.0, 0.0), 1.0);
     // Asking for -50..150 on a 100x100 page — half of it is off the page
     // on every side.
     let screen = egui::Rect::from_min_max(egui::pos2(-50.0, -50.0), egui::pos2(150.0, 150.0));
@@ -2194,7 +2194,7 @@ fn signature_handle_at_finds_the_rotate_handle() {
         Some(SignatureSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation });
 
     // A simple 1:1 view with the page's own origin at the screen origin.
-    let view = PageView { origin: egui::Pos2::new(0.0, 0.0), scale: 1.0 };
+    let view = PageView::upright(egui::Pos2::new(0.0, 0.0), 1.0);
     let handle_screen = PagifyApp::rotate_handle_screen_pos(&mark.rect, view);
     let at_handle = view.to_page(handle_screen);
     assert_eq!(app.signature_handle_at(at_handle, view), Some(Handle::Rotate));

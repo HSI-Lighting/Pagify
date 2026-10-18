@@ -596,3 +596,119 @@ fn what_a_page_costs() {
         );
     }
 }
+
+// =================================================================== paints ==
+
+/// **`page_paints` answers a renderer's questions**: the outline itself, the
+/// fill and stroke colours, the width, the dash — with every point already on
+/// the page, through the path's own matrix and the form matrices in between.
+///
+/// The page holds one of everything that changes an answer: a filled box, a
+/// thick red rule, a dashed blue rule, an even-odd donut (only a hole under
+/// the even-odd rule), a path inside a form the page draws at double size and
+/// offset (its points, its width and its dash all have to come through the
+/// form's matrix), a picture (not a path — its entry belongs to the images
+/// read), and a clip-only path (a path object that draws nothing: `W n`).
+#[test]
+fn a_page_s_paints_are_its_paths_with_their_geometry_and_their_paint() {
+    use pdf_core::document::{LineCap, PaintSegment};
+
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+    // A form of this page's own, so the matrix story is exact: a green rule
+    // 100 long and one point wide, dashed 2-on 1-off.
+    let form = "0 1 0 RG 1 w [2 1] 0 d 10 10 m 110 10 l S";
+    let content = "\
+        72 600 100 20 re f \n\
+        1 0 0 RG 2 w 72 560 m 172 560 l S \n\
+        0 0 1 RG 1 w [3 2] 0 d 72 520 m 172 520 l S \n\
+        0 g 72 400 60 60 re 82 410 40 40 re f* \n\
+        q 0 0 200 200 re W n Q \n\
+        q 2 0 0 2 300 100 cm /Fm1 Do Q";
+    let doc = PdfiumDocument::open_bytes(
+        pdf_of_bytes(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R \
+              /Resources << /XObject << /Fm1 5 0 R >> >> >>"
+                .to_vec(),
+            stream_of("", content.as_bytes()),
+            stream_of("/Type /XObject /Subtype /Form /BBox [0 0 200 100]", form.as_bytes()),
+        ]),
+        None,
+    )
+    .expect("open");
+
+    let paints = doc.page_paints(0).expect("paints");
+
+    // The clip draws nothing and is not here; every entry is a drawn path.
+    assert_eq!(paints.len(), 5, "one entry per drawn path: {paints:?}");
+    assert!(paints.iter().all(|p| !p.segments.is_empty()), "an empty outline got in");
+
+    let near = |a: f32, b: f32| (a - b).abs() < 0.5;
+    let point = |p: &PaintSegment| match *p {
+        PaintSegment::Move(to) | PaintSegment::Line { to, .. } => (to.x, to.y),
+        PaintSegment::Curve { to, .. } => (to.x, to.y),
+    };
+
+    // The filled box, top-left points: y = 792 - 600 .. 792 - 620.
+    let box_ = paints
+        .iter()
+        .find(|p| p.fill.is_some() && near(p.rect.left, 72.0) && near(p.rect.top, 172.0))
+        .expect("the filled box");
+    assert_eq!(box_.fill.expect("filled").a, 255);
+    assert!(!box_.even_odd, "a plain rectangle is not even-odd");
+    assert!(box_.segments.len() >= 4, "a rectangle has four sides: {:?}", box_.segments);
+    assert!(
+        box_.segments.iter().any(|s| matches!(s, PaintSegment::Line { close: true, .. })),
+        "the closing side must say it closes: {:?}",
+        box_.segments
+    );
+
+    // The thick red rule at y 560, its own two points and its own width.
+    let red = paints.iter().find(|p| p.stroke.is_some() && near(p.rect.top, 232.0)).expect("the red rule");
+    let red_colour = red.stroke.expect("stroked");
+    assert!((red_colour.r, red_colour.g, red_colour.b) == (255, 0, 0), "{red_colour:?}");
+    assert!(near(red.stroke_width, 2.0), "width {} is not the page's 2", red.stroke_width);
+    assert!(red.dash.is_empty(), "a solid rule has no dash: {:?}", red.dash);
+    assert_eq!(red.segments.len(), 2, "a rule is a move and a line: {:?}", red.segments);
+    assert!(near(point(&red.segments[0]).0, 72.0) && near(point(&red.segments[0]).1, 232.0), "{:?}", red.segments);
+    assert!(near(point(&red.segments[1]).0, 172.0) && near(point(&red.segments[1]).1, 232.0), "{:?}", red.segments);
+
+    // The dashed blue rule: the dash pattern as the page has it.
+    let dashed = paints.iter().find(|p| !p.dash.is_empty()).expect("the dashed rule");
+    assert!(near(dashed.dash[0], 3.0) && near(dashed.dash[1], 2.0), "dash {:?}", dashed.dash);
+    let dashed_colour = dashed.stroke.expect("stroked");
+    assert!((dashed_colour.r, dashed_colour.g, dashed_colour.b) == (0, 0, 255), "{dashed_colour:?}");
+
+    // The donut: two rectangles, one outline, filled even-odd.
+    let donut = paints.iter().find(|p| p.even_odd).expect("the donut");
+    assert!(donut.segments.len() >= 8, "two rectangles are two sub-paths: {:?}", donut.segments);
+    assert!(
+        near(donut.rect.left, 72.0) && near(donut.rect.top, 332.0) && near(donut.rect.bottom, 392.0),
+        "the donut's own box, top-left: {:?}",
+        donut.rect
+    );
+
+    // **The path inside the double-size form: its points, its width and its
+    // dash all come through the form's matrix.** Its own points at (10,10)
+    // and (110,10), doubled and moved by the page's `cm`, are (320,120) and
+    // (520,120) in PDF space — (320,672) and (520,672) top-left; its 1-point
+    // width is 2 on the page and its 2-on 1-off dash is 4 and 2.
+    let in_form = paints
+        .iter()
+        .find(|p| near(p.rect.top, 672.0))
+        .expect("the path inside the form");
+    assert_eq!(in_form.segments.len(), 2, "{:?}", in_form.segments);
+    assert!(near(point(&in_form.segments[0]).0, 320.0) && near(point(&in_form.segments[1]).0, 520.0), "{:?}", in_form.segments);
+    assert!(near(in_form.stroke_width, 2.0), "the form doubles the width: {}", in_form.stroke_width);
+    assert!(
+        near(in_form.dash.first().copied().unwrap_or(0.0), 4.0)
+            && near(in_form.dash.get(1).copied().unwrap_or(0.0), 2.0),
+        "the form doubles the dash too: {:?}",
+        in_form.dash
+    );
+    let green = in_form.stroke.expect("stroked");
+    assert!((green.r, green.g, green.b) == (0, 255, 0), "{green:?}");
+    assert_eq!(in_form.line_cap, LineCap::Butt, "PDF's own default cap");
+}
