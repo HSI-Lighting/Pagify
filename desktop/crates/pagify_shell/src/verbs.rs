@@ -484,6 +484,30 @@ pub enum Verb {
     /// has none — the Accessibility tab's Reading Order, which in this
     /// build reads rather than edits.
     ReadingOrder { pages: String },
+    /// The internal links this document already carries — the Edit tab's
+    /// Cross Reference.
+    ///
+    /// **Read only.** A cross-reference here is a link annotation whose
+    /// destination is another page of the same file. Creating one needs a
+    /// destination-writing primitive: PDFium's public API here puts a web
+    /// address on a link (`FPDFAnnot_SetURI`) but not a page destination, so
+    /// this reports and the answer says so. `weblinks` makes the address kind.
+    Crossref,
+    /// Each page's transition, as the file on disk stores it — the View tab's
+    /// Page Transitions.
+    ///
+    /// **Read only.** A `/Trans` entry is a raw page-dictionary entry, not
+    /// something the engine's annotation API makes; writing one is a
+    /// raw-dictionary edit and is not built.
+    Transitions,
+    /// The form's calculation order, from `/AcroForm`'s `/CO` array — the
+    /// Form tab's Calculation Order.
+    ///
+    /// **Read only.** The order is in the file's bytes, not in the engine's
+    /// form model, so this reads the file the document was opened from and
+    /// says that unsaved edits are not in it. Reordering is form authoring,
+    /// which is out of scope for this build.
+    CalcOrder,
     /// The View tab's Split: a second, read-only pane over the same strip,
     /// with its own scroll.
     ViewSplit,
@@ -1018,10 +1042,8 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("add3d", "the editing phase", "the Add 3D tool"),
     ("assistant", "the viewing phase", "the Assistant tool"),
     ("autotag", "the accessibility phase", "the Autotag Document tool"),
-    ("calcorder", "the forms phase", "the Calculation Order tool"),
     ("combfield", "the forms phase", "the Comb Field tool"),
     ("createform", "the forms phase", "the Form tool"),
-    ("crossref", "the editing phase", "the Cross Reference tool"),
     ("editxfa", "the forms phase", "the Edit Static XFA Form tool"),
     ("emailattach", "the sharing phase", "the Attach to Email tool"),
     ("fieldbarcode", "the forms phase", "the Barcode tool"),
@@ -1046,7 +1068,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("signbranding", "the signing phase", "the Add E-Sign Branding tool"),
     ("tooffice", "the conversion phase", "the To MS Office tool"),
     ("toolsettings", "the forms phase", "the Tool Settings tool"),
-    ("transitions", "the viewing phase", "the Page Transitions tool"),
 ];
 
 /// Parse a line as a Pagify verb.
@@ -1170,6 +1191,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "articlebox", "weblinks", "jointext", "reflow",
         "record", "stop", "endrecord", "replay", "pick", "textlayer", "whytext", "snapshot",
         "autoscroll", "ruler", "accesscheck", "accessreport", "autobookmarks", "preflight",
+        "crossref", "transitions", "calcorder",
         "exportimages", "fromfiles", "viewsetting", "calculator", "managecomments",
         "pagemarks", "fromclipboard", "pencil", "rearrange", "fromtemplate", "addshape",
         "drawing", "keeptool", "formexport", "formimport", "formtosheet", "tooltip",
@@ -1218,6 +1240,34 @@ pub fn help_text(topic: Option<&str>) -> Vec<String> {
             "shortcuts" => {
                 return vec!["shortcuts — the window's key bindings, said as lines in the box.".into()]
             }
+            // The three read-only reports of what the file already stores.
+            // Each says what it reads and what is not built, so `help` on a
+            // report word is never just "no help".
+            "crossref" => {
+                return vec![
+                    "crossref — the internal links this document already has: one line per \
+                     link, the point it can be clicked and the page it goes to. Read only; \
+                     creating one is not built — this engine can put a web address on a link, \
+                     not a page destination."
+                        .into(),
+                ]
+            }
+            "transitions" => {
+                return vec![
+                    "transitions — each page's /Trans effect and /Dur display time, read from \
+                     the file on disk (an unsaved edit is not in it). Read only; writing one \
+                     is not built."
+                        .into(),
+                ]
+            }
+            "calcorder" => {
+                return vec![
+                    "calcorder — the form fields in /AcroForm's /CO calculation order, read \
+                     from the file on disk. Read only; reordering the calculations is form \
+                     authoring and is not built."
+                        .into(),
+                ]
+            }
             _ => {}
         }
         return vec![format!("no help for '{topic}'.")];
@@ -1237,6 +1287,8 @@ pub fn help_text(topic: Option<&str>) -> Vec<String> {
         "view       readaloud [stop] — reads the page in view aloud with the OS voice".into(),
         "automate   record [name]   stop   replay <script.json>".into(),
         "edit       undo redo".into(),
+        "inspect    crossref   transitions   calcorder — what the file already stores: its".into(),
+        "           internal page links, each page's transition, the form calculation order".into(),
         "text       textlayer   — what kind of text this page has, and why selection".into(),
         "           may be doing nothing".into(),
         "picking    pick <x,y>   — supplies a click to a waiting tool, so fillet and".into(),
@@ -1964,7 +2016,7 @@ fn parse_conversion(head: &str, _rest: &[&str], tail: &str) -> Option<Result<Ver
     })
 }
 
-/// One domain of [`parse`]: the 35 commands below.
+/// One domain of [`parse`]: the 38 commands below.
 fn parse_marks_and_misc(head: &str, rest: &[&str], tail: &str) -> Option<Result<Verb, String>> {
     Some(match head {
         "highlight" | "hl" => Ok(Verb::MarkText(Markup::Highlight)),
@@ -2067,6 +2119,11 @@ fn parse_marks_and_misc(head: &str, rest: &[&str], tail: &str) -> Option<Result<
         }),
         "autobookmarks" => Ok(Verb::AutoBookmarks),
         "preflight" => Ok(Verb::Preflight),
+        // The three read-only reports of what the file already stores. None
+        // takes an argument: there is nothing to choose.
+        "crossref" => Ok(Verb::Crossref),
+        "transitions" => Ok(Verb::Transitions),
+        "calcorder" => Ok(Verb::CalcOrder),
         "exportimages" => Ok(Verb::ExportAllImages {
             dest: (!tail.is_empty()).then(|| resolve_path(tail)),
         }),
@@ -2291,6 +2348,42 @@ mod capture_phase_tests {
             PLANNED.iter().all(|(v, _, _)| *v != "snapshot"),
             "`snapshot` is still in the planned table"
         );
+    }
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::*;
+
+    /// The three read-only reports parse to their verbs and none is still a
+    /// placeholder. Removing a word from `PLANNED` without teaching `parse` it
+    /// is exactly what this catches.
+    #[test]
+    fn the_report_words_parse_and_are_not_planned() {
+        assert_eq!(parse("crossref"), Some(Ok(Verb::Crossref)));
+        assert_eq!(parse("transitions"), Some(Ok(Verb::Transitions)));
+        assert_eq!(parse("calcorder"), Some(Ok(Verb::CalcOrder)));
+        for word in ["crossref", "transitions", "calcorder"] {
+            assert!(
+                PLANNED.iter().all(|(v, _, _)| *v != word),
+                "`{word}` is still in the planned table"
+            );
+        }
+    }
+
+    /// Each report word has a help topic that says what it reads and what is
+    /// not built — a command the box accepts must not answer "no help".
+    #[test]
+    fn the_report_words_have_help_that_says_what_is_not_built() {
+        let crossref = help_text(Some("crossref")).join("\n");
+        assert!(crossref.contains("internal links"), "{crossref}");
+        assert!(crossref.contains("not built"), "{crossref}");
+        let transitions = help_text(Some("transitions")).join("\n");
+        assert!(transitions.contains("/Trans"), "{transitions}");
+        assert!(transitions.contains("file on disk"), "{transitions}");
+        let calcorder = help_text(Some("calcorder")).join("\n");
+        assert!(calcorder.contains("/CO"), "{calcorder}");
+        assert!(calcorder.contains("not built"), "{calcorder}");
     }
 }
 

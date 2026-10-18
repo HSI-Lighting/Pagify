@@ -962,3 +962,54 @@ fn the_portfolio_word_needs_an_open_document() {
     assert!(said(&app).contains("nothing open."), "{}", said(&app));
     assert!(app.tab().panels.portfolio.is_none());
 }
+
+/// An app over one named fixture, asserting it opened.
+fn app_on(name: &str) -> PagifyApp {
+    let app = PagifyApp::new(Some(&fixture(name)));
+    assert!(app.tab().doc.is_some(), "{name} did not open");
+    app
+}
+
+/// **The three read-only report words, through the real dispatch.** Each says
+/// what the file already stores, in words that name what was read and what is
+/// not built.
+///
+/// None of the shipped fixtures has an internal link, a page transition or a
+/// `/CO` array, so the "none" answer is the deterministic one to assert here;
+/// the positive paths run against small documents written for them in
+/// `pagify_shell/tests/reports.rs` (and the linked fixture in
+/// `internal_link_tests.rs` for cross-references).
+#[test]
+fn the_report_words_answer_with_what_the_file_stores() {
+    let mut app = app_on("spread.pdf");
+    app.submit("crossref");
+    assert!(said(&app).contains("no cross-references"), "{}", said(&app));
+    assert!(said(&app).contains("not built"), "{}", said(&app));
+
+    let mut app = app_on("spread.pdf");
+    app.submit("transitions");
+    assert!(said(&app).contains("no page transitions"), "{}", said(&app));
+    assert!(said(&app).contains("Read from the file on disk"), "{}", said(&app));
+
+    let mut app = app_on("form-fields.pdf");
+    app.submit("calcorder");
+    assert!(said(&app).contains("no calculation order"), "{}", said(&app));
+    assert!(said(&app).contains("no /CO entry"), "{}", said(&app));
+    assert!(said(&app).contains("Read from the file on disk"), "{}", said(&app));
+}
+
+/// A file whose raw cross-reference table cannot be read is an error the
+/// answer names — never a "none". `pages-ladder.pdf` carries a table moved off
+/// its own offset on purpose (one of the xref-repair fixtures), which PDFium
+/// mends on open and this build's raw reader, rightly, refuses.
+#[test]
+fn a_report_says_when_it_cannot_read_the_file() {
+    let mut app = app_on("pages-ladder.pdf");
+    app.submit("transitions");
+    assert!(
+        said(&app).contains("transitions: ") && said(&app).contains("cross-reference stream"),
+        "{}",
+        said(&app)
+    );
+    assert!(!said(&app).contains("no page transitions"), "{}", said(&app));
+}

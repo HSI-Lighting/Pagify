@@ -198,6 +198,9 @@ impl crate::PagifyApp {
             | Effect::ToggleContentsPanel
             | Effect::ReportAltText(_)
             | Effect::ReportReadingOrder(_)
+            | Effect::ReportCrossReferences
+            | Effect::ReportPageTransitions
+            | Effect::ReportCalcOrder
             | Effect::ToggleSplitView
             | Effect::ToggleReverseView
             | Effect::ShareLink
@@ -765,6 +768,9 @@ impl crate::PagifyApp {
             Effect::ToggleContentsPanel => self.toggle_contents_panel(),
             Effect::ReportAltText(pages) => self.report_alt_text(&pages),
             Effect::ReportReadingOrder(pages) => self.report_reading_order(&pages),
+            Effect::ReportCrossReferences => self.report_cross_references(),
+            Effect::ReportPageTransitions => self.report_page_transitions(),
+            Effect::ReportCalcOrder => self.report_calc_order(),
             Effect::ToggleSplitView => self.toggle_split_view(),
             Effect::ToggleReverseView => self.toggle_reverse_view(),
             Effect::ShareLink => self.share_link(),

@@ -15880,6 +15880,64 @@ impl PagifyApp {
         ));
     }
 
+    /// The Edit tab's Cross Reference — the internal page links the document
+    /// already has.
+    ///
+    /// Read only: creating one needs a page-destination writer this engine
+    /// does not have, and `pagify_shell::crossref` says so in the answer.
+    fn report_cross_references(&mut self) {
+        let Some(doc) = self.tab().doc.as_ref() else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let session = doc.session.clone();
+        match pagify_shell::crossref::report(&session) {
+            Ok(lines) => {
+                for line in lines {
+                    self.say_info(line);
+                }
+            }
+            Err(e) => self.say_error(format!("crossref: {e}")),
+        }
+    }
+
+    /// The View tab's Page Transitions — each page's `/Trans` entry and
+    /// display time, read from the file on disk. `pagify_shell::transitions`
+    /// says why the file, not the open document, is the source.
+    fn report_page_transitions(&mut self) {
+        let Some(doc) = self.tab().doc.as_ref() else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let session = doc.session.clone();
+        match pagify_shell::transitions::report(&session) {
+            Ok(lines) => {
+                for line in lines {
+                    self.say_info(line);
+                }
+            }
+            Err(e) => self.say_error(format!("transitions: {e}")),
+        }
+    }
+
+    /// The Form tab's Calculation Order — the fields in `/AcroForm`'s `/CO`
+    /// order, read from the file on disk. `pagify_shell::calcorder` says why.
+    fn report_calc_order(&mut self) {
+        let Some(doc) = self.tab().doc.as_ref() else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let session = doc.session.clone();
+        match pagify_shell::calcorder::report(&session) {
+            Ok(lines) => {
+                for line in lines {
+                    self.say_info(line);
+                }
+            }
+            Err(e) => self.say_error(format!("calcorder: {e}")),
+        }
+    }
+
     /// Open or close the Tags panel — the Accessibility tab's Tags Panel.
     ///
     /// The page in view's structure tree, flattened with indents; read once

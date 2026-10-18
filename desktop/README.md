@@ -259,13 +259,13 @@ expanded the `~`.
 
 ### Not done, and honestly so
 
-- **Thirty-three verbs are named and not built** (`verbs::PLANNED`) — 31 of
+- **Thirty verbs are named and not built** (`verbs::PLANNED`) — 28 of
   the 209 ribbon buttons across the tabs answer "planned for <phase>, and not
-  built yet". Most of Form's authoring tools (17/22 that build fields rather
-  than fill them), five PagiSign, three Convert, two View (Page Transitions,
-  Assistant), one Share (Attach to Email), and one each on
-  Home/Edit/Accessibility. Seventeen of those verbs are the Form-authoring
-  block, which is **out of scope for now** — the rest have a tiered plan in
+  built yet". Most of Form's authoring tools (15 of that tab's 22 buttons,
+  plus Tool Settings), five PagiSign, three Convert, one View (Assistant),
+  one Share (Attach to Email), and one each on Home and Accessibility.
+  Seventeen of those verbs are the Form-authoring block, which is **out of
+  scope for now** — the rest have a tiered plan in
   `docs/PLANNED_BUTTONS.md`. Nothing is greyed out; the answer appears under
   the command bar when the button is pressed.
 - **Sharing is local, not online.** `email` and `sendreview` draft a message in
@@ -274,6 +274,14 @@ expanded the `~`.
   Comments panel — none of them uploads anything, and each says so. Attaching a
   file to the draft (`emailattach`) needs OS mail integration this build does
   not have; online signing, bulk send and cloud storage remain planned.
+- **The three reports read; they never write.** `crossref` lists the
+  internal page links the document already has — where each can be clicked and
+  the page it goes to; `transitions` lists each page's `/Trans` effect and
+  `/Dur` display time; `calcorder` lists the form fields in `/AcroForm`'s
+  `/CO` calculation order. The last two read the file on disk rather than the
+  open document's unsaved edits, and say so. Creating an internal link
+  (PDFium here can put a web address on a link, not a page destination),
+  writing a transition and reordering calculations are not built.
 - **PDF Portfolio is the read side of attachments.** `portfolio` opens a
   panel listing the files embedded in the document with their sizes; Extract…
   writes one out, ✕ removes it, Add file… embeds another (the box's own
@@ -320,6 +328,8 @@ review     highlight   note <text>
 measure    calibrate <distance> [unit]   pagescale   measure <distance|area>
 automate   record [name]   stop   replay <script.json>   clearhistory
 edit       undo redo
+inspect    crossref   transitions   calcorder — what the file already stores: internal
+           page links, page transitions, the form calculation order
 drawing    every SIMLUX command — line, polyline, trim, fillet, offset, … — with the same aliases
 ```
 

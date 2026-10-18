@@ -86,3 +86,27 @@ fn the_links_of_a_page_are_read_once_not_every_frame() {
     assert_eq!(app.internal_link_at(1, AppPoint { x: 15.0, y: 40.0 }), None);
     assert_eq!(app.tab().doc.as_ref().unwrap().caches.internal_links.as_ref().unwrap().0, 1);
 }
+
+/// **The Edit tab's Cross Reference, through the real dispatch.** The fixture's
+/// two annotations — one through a `/Dest` destination array, one through a
+/// `/GoTo` action, the two ways a file spells an internal link — are both
+/// named with their page, their click point and the page each goes to.
+#[test]
+fn crossref_reports_the_internal_links_this_document_has() {
+    let mut app = app();
+    app.submit("crossref");
+    let said: Vec<String> = app.cmd.history().iter().map(|e| e.text.clone()).collect();
+    assert!(
+        said.iter().any(|l| l == "page 1: link at (10, 10) → page 3"),
+        "the /Dest link is missing: {said:?}"
+    );
+    assert!(
+        said.iter().any(|l| l == "page 1: link at (20, 30) → page 2"),
+        "the /GoTo link is missing: {said:?}"
+    );
+    assert!(
+        said.iter().any(|l| l.contains("2 cross-reference(s) over 3 page(s)")),
+        "the count is missing: {said:?}"
+    );
+    assert!(said.iter().any(|l| l.contains("Read-only")), "{said:?}");
+}

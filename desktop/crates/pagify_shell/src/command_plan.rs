@@ -286,6 +286,12 @@ pub enum Effect {
     ReportAltText(String),
     /// Report each page's reading order — empty means all pages.
     ReportReadingOrder(String),
+    /// Report the internal links the document already has.
+    ReportCrossReferences,
+    /// Report each page's transition, from the file on disk.
+    ReportPageTransitions,
+    /// Report the form's calculation order, from the file on disk.
+    ReportCalcOrder,
     /// Open or close the split view's second pane.
     ToggleSplitView,
     /// Read the rows right to left, or back.
@@ -495,6 +501,9 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::Contents
         | Verb::AltText { .. }
         | Verb::ReadingOrder { .. }
+        | Verb::Crossref
+        | Verb::Transitions
+        | Verb::CalcOrder
         | Verb::ViewSplit
         | Verb::ReadingOptions
         | Verb::ReverseView
@@ -789,6 +798,9 @@ fn plan_files_and_text(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::Contents => vec![Effect::ToggleContentsPanel],
         Verb::AltText { pages } => vec![Effect::ReportAltText(pages.clone())],
         Verb::ReadingOrder { pages } => vec![Effect::ReportReadingOrder(pages.clone())],
+        Verb::Crossref => vec![Effect::ReportCrossReferences],
+        Verb::Transitions => vec![Effect::ReportPageTransitions],
+        Verb::CalcOrder => vec![Effect::ReportCalcOrder],
         Verb::ViewSplit => vec![Effect::ToggleSplitView],
         Verb::ReadingOptions => vec![Effect::Say(crate::verbs::READING_OPTIONS_WORDS.into())],
         Verb::ReverseView => vec![Effect::ToggleReverseView],
@@ -1206,6 +1218,9 @@ mod tests {
                 Verb::ReadingOrder { pages: String::new() },
                 vec![Effect::ReportReadingOrder(String::new())],
             ),
+            (Verb::Crossref, vec![Effect::ReportCrossReferences]),
+            (Verb::Transitions, vec![Effect::ReportPageTransitions]),
+            (Verb::CalcOrder, vec![Effect::ReportCalcOrder]),
             (Verb::ViewSplit, vec![Effect::ToggleSplitView]),
             (
                 Verb::ReadingOptions,
