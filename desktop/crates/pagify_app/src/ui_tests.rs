@@ -6583,3 +6583,19 @@ fn a_file_dialog_never_blocks_the_frame() {
     );
     assert!(h.state().pending_dialog.is_none(), "the answer did not clear the dialog");
 }
+
+/// **The Convert tab's PDF Portfolio button opens a real window.** It used to
+/// answer "planned for the conversion phase"; the panel now lists the
+/// document's embedded files and offers Extract…, ✕ and Add file….
+#[test]
+fn the_portfolio_button_opens_a_window_with_its_buttons() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut h = harness("two-column.pdf");
+    h.state_mut().submit("portfolio");
+    h.run_steps(2);
+    assert!(h.state().tab().panels.portfolio.is_some(), "`portfolio` did not open the panel");
+    // The window is actually drawn, not merely flagged open.
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Add file…");
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Close");
+}

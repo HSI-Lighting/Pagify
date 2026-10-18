@@ -259,10 +259,10 @@ expanded the `~`.
 
 ### Not done, and honestly so
 
-- **Thirty-four verbs are named and not built** (`verbs::PLANNED`) — 32 of the
-  209 ribbon buttons across the tabs answer "planned for <phase>, and not built
-  yet". Most of Form's authoring tools (17/22 that build fields rather than
-  fill them), five PagiSign, four Convert, two View (Page Transitions,
+- **Thirty-three verbs are named and not built** (`verbs::PLANNED`) — 31 of
+  the 209 ribbon buttons across the tabs answer "planned for <phase>, and not
+  built yet". Most of Form's authoring tools (17/22 that build fields rather
+  than fill them), five PagiSign, three Convert, two View (Page Transitions,
   Assistant), one Share (Attach to Email), and one each on
   Home/Edit/Accessibility. Nothing is greyed out; the answer appears under the
   command bar when the button is pressed.
@@ -272,6 +272,12 @@ expanded the `~`.
   Comments panel — none of them uploads anything, and each says so. Attaching a
   file to the draft (`emailattach`) needs OS mail integration this build does
   not have; online signing, bulk send and cloud storage remain planned.
+- **PDF Portfolio is the read side of attachments.** `portfolio` opens a
+  panel listing the files embedded in the document with their sizes; Extract…
+  writes one out, ✕ removes it, Add file… embeds another (the box's own
+  `attach <file>` does the same). Adding and removing are document edits —
+  `save` writes them; `undo` does not cover attachments, and the panel says so.
+  Adobe's portfolio *cover sheet and layout* are not written.
 - **Read is the OS's own voice.** `readaloud` speaks the page in view through
   `say` (macOS), `System.Speech` (Windows) or `espeak-ng`/`espeak` (Linux);
   `readaloud stop` or Escape stops it. A machine with none of those engines is
@@ -306,6 +312,7 @@ document   open close save saveas quit
 view       page <n|next|prev|first|last>   zoom <percent|in|out|fit|width|actual>   rotate [90]   readaloud [stop]
 organize   extract <pages> <file>   import <file> [pages]   deletepage <pages>   insertpage   movepage <pages> <before>
 share      email   sharelink   sendreview   trackreviews   cloudstorage
+files      portfolio — the document's embedded files: extract, remove or add one
 review     highlight   note <text>
 measure    calibrate <distance> [unit]   pagescale   measure <distance|area>
 automate   record [name]   stop   replay <script.json>   clearhistory

@@ -306,6 +306,8 @@ pub enum Effect {
     /// Read the page in view aloud with the OS's own speech engine; `stop`
     /// stops a reading already under way.
     ReadAloud { stop: bool },
+    /// Open or close the Portfolio panel — the document's embedded files.
+    TogglePortfolio,
     /// Write every field as CSV; `None` asks for the file first.
     ExportFormSheet { dest: Option<std::path::PathBuf> },
     /// Set a field's tooltip.
@@ -502,6 +504,7 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::SendForReview
         | Verb::TrackReviews
         | Verb::ReadAloud { .. }
+        | Verb::Portfolio
         | Verb::ShapeWords
         | Verb::KeepTool
         | Verb::Reflow
@@ -818,6 +821,7 @@ fn plan_files_and_text(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::SendForReview => vec![Effect::SendForReview],
         Verb::TrackReviews => vec![Effect::TrackReviews],
         Verb::ReadAloud { stop } => vec![Effect::ReadAloud { stop: *stop }],
+        Verb::Portfolio => vec![Effect::TogglePortfolio],
         _ => return None,
     })
 }
@@ -1232,6 +1236,7 @@ mod tests {
             (Verb::TrackReviews, vec![Effect::TrackReviews]),
             (Verb::ReadAloud { stop: false }, vec![Effect::ReadAloud { stop: false }]),
             (Verb::ReadAloud { stop: true }, vec![Effect::ReadAloud { stop: true }]),
+            (Verb::Portfolio, vec![Effect::TogglePortfolio]),
         ];
         for (verb, want) in cases {
             assert_eq!(plan(&verb, &env), Some(want), "planning {verb:?}");

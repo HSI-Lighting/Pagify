@@ -505,6 +505,14 @@ pub enum Verb {
     /// Write the document's text as a plain file — `toother <file.(txt|rtf|xml)>`.
     /// Bare, the app asks for the file.
     ToOther { dest: Option<PathBuf> },
+    /// Open or close the Portfolio panel: the files embedded in this
+    /// document, their sizes, and buttons to extract, remove or add one — the
+    /// Conversion tab's PDF Portfolio.
+    ///
+    /// The read half of what `attach` writes. `attach` puts a file in and
+    /// lists nothing; the panel is where the document's own portfolio can be
+    /// seen and taken back out.
+    Portfolio,
     /// Paste the clipboard's picture onto the page — the Capture tab's
     /// Clipboard tool. Text on the clipboard is pointed at `fromclipboard`.
     Clipboard,
@@ -1033,7 +1041,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("media", "the editing phase", "the Audio & Video tool"),
     ("onlineform", "the signing phase", "the Create Online Form tool"),
     ("pagetemplates", "the forms phase", "the Page Templates tool"),
-    ("portfolio", "the conversion phase", "the PDF Portfolio tool"),
     ("requestsignature", "the signing phase", "the Request Signature tool"),
     ("sendbulk", "the signing phase", "the Send in Bulk tool"),
     ("signbranding", "the signing phase", "the Add E-Sign Branding tool"),
@@ -1172,7 +1179,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "areahighlight", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
         "tickmark", "inserttext", "replacetext", "addlink", "customstamp", "imageannotation",
         "textbox",
-        "unsecure", "redact",
+        "unsecure", "redact", "portfolio",
         // Share and Read: built in the sharing phase — see
         // `parse_sharing_and_reading`.
         "sharelink", "cloudstorage", "email", "sendreview", "trackreviews", "readaloud",
@@ -1226,6 +1233,7 @@ pub fn help_text(topic: Option<&str>) -> Vec<String> {
         "           reflow — rebuild this page's reading order, when it does not read right".into(),
         "measure    calibrate <distance> [unit]   pagescale   measure <distance|area>".into(),
         "share      email   sharelink   sendreview   trackreviews   cloudstorage".into(),
+        "files      portfolio — the document's embedded files: extract, remove or add one".into(),
         "view       readaloud [stop] — reads the page in view aloud with the OS voice".into(),
         "automate   record [name]   stop   replay <script.json>".into(),
         "edit       undo redo".into(),
@@ -1841,6 +1849,7 @@ fn parse_conversion(head: &str, _rest: &[&str], tail: &str) -> Option<Result<Ver
         "toother" => Ok(Verb::ToOther {
             dest: (!tail.is_empty()).then(|| resolve_path(tail)),
         }),
+        "portfolio" => Ok(Verb::Portfolio),
         "fromtemplate" => Ok(Verb::FromTemplate {
             source: (!tail.is_empty()).then(|| resolve_path(tail)),
         }),
@@ -2309,6 +2318,17 @@ mod conversion_phase_tests {
                 "`{word}` is still in the planned table"
             );
         }
+    }
+
+    /// PDF Portfolio is a panel now, not a placeholder — and the word that
+    /// opens it must not be left in `PLANNED` without a verb to answer it.
+    #[test]
+    fn the_portfolio_word_parses_and_is_not_planned() {
+        assert_eq!(parse("portfolio"), Some(Ok(Verb::Portfolio)));
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "portfolio"),
+            "`portfolio` is still in the planned table"
+        );
     }
 }
 

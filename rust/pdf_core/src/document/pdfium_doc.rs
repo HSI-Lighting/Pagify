@@ -1770,6 +1770,89 @@ impl Document for PdfiumDocument {
         Ok(out)
     }
 
+    fn attachment_details(&self) -> Result<Vec<(String, usize)>> {
+        let bindings = pdfium()?.bindings();
+        let count = unsafe { bindings.FPDFDoc_GetAttachmentCount(self.document.handle()) };
+        let mut out = Vec::new();
+        for index in 0..count.max(0) {
+            let attachment =
+                unsafe { bindings.FPDFDoc_GetAttachment(self.document.handle(), index) };
+            if attachment.is_null() {
+                continue;
+            }
+            let name = read_form_wide(|buf, len| unsafe {
+                bindings.FPDFAttachment_GetName(attachment, buf, len)
+            })
+            .unwrap_or_else(|| format!("attachment {}", index + 1));
+            // The size is what the same two-call read reports for its first
+            // call: a null buffer asks how much room the file needs.
+            let mut size: c_ulong = 0;
+            let readable = unsafe {
+                bindings.FPDFAttachment_GetFile(attachment, std::ptr::null_mut(), 0, &mut size)
+            };
+            out.push((name, if bindings.is_true(readable) { size as usize } else { 0 }));
+        }
+        Ok(out)
+    }
+
+    fn attachment_bytes(&self, index: usize) -> Result<Vec<u8>> {
+        let bindings = pdfium()?.bindings();
+        let index = i32::try_from(index).map_err(|_| {
+            PdfError::InvalidArgument("that embedded file index is out of range".into())
+        })?;
+        let attachment = unsafe { bindings.FPDFDoc_GetAttachment(self.document.handle(), index) };
+        if attachment.is_null() {
+            return Err(PdfError::InvalidArgument(format!(
+                "the document has no embedded file {}",
+                index + 1
+            )));
+        }
+        let mut size: c_ulong = 0;
+        let readable = unsafe {
+            bindings.FPDFAttachment_GetFile(attachment, std::ptr::null_mut(), 0, &mut size)
+        };
+        if !bindings.is_true(readable) {
+            return Err(PdfError::Pdfium(format!(
+                "reading embedded file {}",
+                index + 1
+            )));
+        }
+        let mut bytes = vec![0u8; size as usize];
+        if size == 0 {
+            return Ok(bytes);
+        }
+        let mut written: c_ulong = 0;
+        let read = unsafe {
+            bindings.FPDFAttachment_GetFile(
+                attachment,
+                bytes.as_mut_ptr() as *mut c_void,
+                size,
+                &mut written,
+            )
+        };
+        if !bindings.is_true(read) {
+            return Err(PdfError::Pdfium(format!(
+                "reading embedded file {}",
+                index + 1
+            )));
+        }
+        bytes.truncate(written.min(size) as usize);
+        Ok(bytes)
+    }
+
+    fn remove_attachment(&mut self, index: usize) -> Result<bool> {
+        let bindings = pdfium()?.bindings();
+        let index = i32::try_from(index).map_err(|_| {
+            PdfError::InvalidArgument("that embedded file index is out of range".into())
+        })?;
+        let removed = unsafe { bindings.FPDFDoc_DeleteAttachment(self.document.handle(), index) };
+        if !bindings.is_true(removed) {
+            return Ok(false);
+        }
+        self.dirty = true;
+        Ok(true)
+    }
+
     fn add_annot_attachment(
         &mut self,
         page_index: usize,

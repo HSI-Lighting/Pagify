@@ -878,6 +878,90 @@ impl crate::PagifyApp {
         self.tab_mut().panels.note_view = Some(note);
     }
 
+    /// The Portfolio panel — the Conversion tab's PDF Portfolio. Lists the
+    /// document's embedded files with their sizes; `Extract…` writes one out,
+    /// `✕` removes it, `Add file…` embeds another (the box's own `attach` does
+    /// the same).
+    ///
+    /// The rows are re-read on opening and after every add or remove — every
+    /// index after a removal changes, so a list kept from before one would
+    /// extract the wrong file.
+    pub(crate) fn draw_portfolio(&mut self, ctx: &egui::Context) {
+        let Some(panel) = self.tab_mut().panels.portfolio.take() else { return };
+        let mut open = true;
+        let mut close = false;
+        let mut extract: Option<usize> = None;
+        let mut remove: Option<usize> = None;
+        let mut add = false;
+
+        egui::Window::new("PDF Portfolio")
+            .id(self.window_id("portfolio-window"))
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_pos(egui::pos2(180.0, 140.0))
+            .show(ctx, |ui| {
+                ui.set_width(440.0);
+                let count = panel.files.len();
+                ui.label(format!(
+                    "{count} embedded file{} in this document.",
+                    if count == 1 { "" } else { "s" }
+                ));
+                ui.add_space(4.0);
+                if count == 0 {
+                    ui.label(
+                        "Nothing is embedded yet — Add file… puts a file inside the PDF \
+                         itself, and it travels with the document when it is saved.",
+                    );
+                }
+                egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                    for (index, (name, size)) in panel.files.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            if ui.button("Extract…").on_hover_text("write this file out").clicked() {
+                                extract = Some(index);
+                            }
+                            if ui
+                                .button("✕")
+                                .on_hover_text("remove this embedded file")
+                                .clicked()
+                            {
+                                remove = Some(index);
+                            }
+                            ui.label(format!("{name}   —   {}", crate::file_size_words(*size)));
+                        });
+                    }
+                });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Add file…")
+                        .on_hover_text("embed another file in the PDF")
+                        .clicked()
+                    {
+                        add = true;
+                    }
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if !open || close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            // Closed: the taken rows are dropped with it.
+        } else {
+            self.tab_mut().panels.portfolio = Some(panel);
+        }
+        if add {
+            self.portfolio_add_dialog();
+        }
+        if let Some(index) = extract {
+            self.portfolio_extract_dialog(index);
+        }
+        if let Some(index) = remove {
+            self.portfolio_remove(index);
+        }
+    }
+
     pub(crate) fn draw_bookmark_panel(&mut self, ctx: &egui::Context) {
         let Some(panel) = self.tab_mut().panels.bookmark_panel.take() else { return };
         let mut open = true;

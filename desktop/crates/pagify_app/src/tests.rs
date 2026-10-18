@@ -896,3 +896,69 @@ fn the_share_words_need_an_open_document() {
         );
     }
 }
+
+/// Sizes are read, not guessed: bytes below a kilobyte, then one decimal in
+/// the unit a person would name.
+#[test]
+fn file_sizes_read_in_the_unit_a_person_would_say() {
+    assert_eq!(file_size_words(0), "0 B");
+    assert_eq!(file_size_words(999), "999 B");
+    assert_eq!(file_size_words(1024), "1.0 KB");
+    assert_eq!(file_size_words(1536), "1.5 KB");
+    assert_eq!(file_size_words(1024 * 1024), "1.0 MB");
+    assert_eq!(file_size_words(3 * 1024 * 1024 + 512 * 1024), "3.5 MB");
+}
+
+/// **The Portfolio panel, end to end.** Opening lists what is embedded,
+/// extracting writes the real bytes back out, removing drops the row (and the
+/// next extraction would otherwise use the wrong index), and pressing the
+/// word again closes it.
+#[test]
+fn the_portfolio_panel_lists_extracts_and_removes_embedded_files() {
+    let mut app = PagifyApp::new(Some(&fixture("two-column.pdf")));
+    app.submit("portfolio");
+    assert!(app.tab().panels.portfolio.is_some(), "the Portfolio panel did not open");
+    assert!(said(&app).contains("no embedded files"), "{}", said(&app));
+
+    let source = std::env::temp_dir().join(format!(
+        "pagify-portfolio-panel-{}-notes.txt",
+        std::process::id()
+    ));
+    let bytes = b"words that travelled inside a PDF".to_vec();
+    std::fs::write(&source, &bytes).expect("write the file to embed");
+    // `attach_file` refreshes the panel itself; a file embedded while the
+    // list is open must appear in it without the caller asking.
+    app.attach_file(&source);
+    let panel = app.tab().panels.portfolio.as_ref().expect("panel still open");
+    assert_eq!(panel.files.len(), 1, "the attached file is not listed");
+    assert!(panel.files[0].0.ends_with("-notes.txt"), "listed as {:?}", panel.files[0].0);
+    assert_eq!(panel.files[0].1, bytes.len());
+
+    let dest = std::env::temp_dir().join(format!(
+        "pagify-portfolio-panel-{}-extracted.txt",
+        std::process::id()
+    ));
+    app.portfolio_extract(0, &dest);
+    assert_eq!(std::fs::read(&dest).expect("read the extracted file"), bytes);
+    assert!(said(&app).contains("extracted"), "{}", said(&app));
+
+    app.portfolio_remove(0);
+    let panel = app.tab().panels.portfolio.as_ref().expect("panel still open");
+    assert!(panel.files.is_empty(), "the removed file is still listed");
+    assert!(said(&app).contains("removed"), "{}", said(&app));
+
+    app.submit("portfolio");
+    assert!(app.tab().panels.portfolio.is_none(), "a second press did not close the panel");
+
+    std::fs::remove_file(&source).ok();
+    std::fs::remove_file(&dest).ok();
+}
+
+/// The Portfolio word needs a document: on an empty window it says so.
+#[test]
+fn the_portfolio_word_needs_an_open_document() {
+    let mut app = PagifyApp::new(None);
+    app.submit("portfolio");
+    assert!(said(&app).contains("nothing open."), "{}", said(&app));
+    assert!(app.tab().panels.portfolio.is_none());
+}

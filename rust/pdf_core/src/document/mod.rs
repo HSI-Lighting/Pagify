@@ -802,6 +802,28 @@ pub trait Document: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// The document's embedded files with their sizes, in the file's own
+    /// order — the Portfolio panel's list. [`Document::attachments`] has the
+    /// names alone; a portfolio also wants to say how big each one is.
+    fn attachment_details(&self) -> Result<Vec<(String, usize)>> {
+        Ok(Vec::new())
+    }
+
+    /// The bytes of one embedded file, by its position in
+    /// [`Document::attachments`] (or [`Document::attachment_details`]).
+    fn attachment_bytes(&self, _index: usize) -> Result<Vec<u8>> {
+        Err(PdfError::Unsupported("reading embedded files"))
+    }
+
+    /// Remove one embedded file, by position; `false` when there was none
+    /// there.
+    ///
+    /// **Not a command, so not undoable** — the same promise
+    /// [`Document::add_attachment`] makes. The app says so when it runs.
+    fn remove_attachment(&mut self, _index: usize) -> Result<bool> {
+        Ok(false)
+    }
+
     /// The width of `text` at `size`, in points, in this build's standard
     /// font — what a stamp's ring or a callout's box is drawn around. The
     /// fallback answers a per-character estimate, good enough to draw a

@@ -801,6 +801,10 @@ struct PanelsState {
     /// The Tags panel's rows, while it is open on this tab — the page in
     /// view's structure tree, flattened with indents. Read once on opening.
     tags: Option<TagsPanel>,
+    /// The Portfolio panel's rows, while it is open on this tab — the
+    /// document's embedded files. Re-read on opening and after every add or
+    /// remove, never rebuilt per frame.
+    portfolio: Option<PortfolioPanel>,
 }
 
 /// The Tags panel's rows, flattened from `pagify_shell`'s tree.
@@ -812,6 +816,12 @@ struct TagsPanel {
 /// The Comments panel's rows, as `pagify_shell::comments` lists them.
 struct CommentsPanel {
     rows: Vec<pagify_shell::comments::Comment>,
+}
+
+/// The Portfolio panel's rows: every file embedded in the document and its
+/// size, in the file's own order — the read half of what `attach` writes.
+struct PortfolioPanel {
+    files: Vec<(String, usize)>,
 }
 
 /// One note open for reading.
@@ -1291,7 +1301,7 @@ impl DocTab {
             view_state: ViewState { page: 0, zoom: ZoomMode::Fit, rotation: Rotation::None, view: None, hover_view: None, viewport_rect: None, anchor_offset: None, last_view: None, scroll_offset: egui::Vec2::ZERO, scroll_pt: 0.0, pan_by: None, scroll_to_pt: None, canvas_pt: egui::vec2(800.0, 600.0), reveal: None, saved_revision: 0, copy_wanted: false, snapshot_wanted: false, autoscroll: false, ruler: false, paper_tint: pagify_shell::verbs::PaperTint::White, split: false, },
             edit: EditState { editing_run: None, new_text_box: None, editing_field: None },
             next_text_id: 0x0100_0000,
-            panels: PanelsState { pending_link: None, extract_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, view_settings: false, calculator: None, comments: None, note_view: None, tags: None, },
+            panels: PanelsState { pending_link: None, extract_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, view_settings: false, calculator: None, comments: None, note_view: None, tags: None, portfolio: None, },
             bookmarked_pages: std::collections::HashSet::new(),
             joined_groups: Vec::new(),
             organize: OrganizeState { selection_page: 0, organize_selected: Vec::new(), organize_anchor: None, organize_drag: None },
@@ -2153,6 +2163,22 @@ fn uri_escape(text: &str, keep: impl Fn(u8) -> bool) -> String {
 /// RFC 3986's unreserved set — what a query value may carry unescaped.
 fn uri_unreserved(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')
+}
+
+/// A byte count in the units a person reads, to one decimal place — the
+/// Portfolio panel's size column.
+pub(crate) fn file_size_words(bytes: usize) -> String {
+    const KB: f64 = 1024.0;
+    let size = bytes as f64;
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if size < KB * KB {
+        format!("{:.1} KB", size / KB)
+    } else if size < KB * KB * KB {
+        format!("{:.1} MB", size / (KB * KB))
+    } else {
+        format!("{:.1} GB", size / (KB * KB * KB))
+    }
 }
 
 /// A `file://` URI for a local path — the Share tab's own link.
@@ -3489,6 +3515,7 @@ impl PagifyApp {
         // A note opened from its page icon or the Comments panel — see
         // `NoteView`. Drawn here with the other panel windows.
         self.draw_note_view(&ctx);
+        self.draw_portfolio(&ctx);
         self.draw_tags(&ctx);
         self.draw_spell_check(&ctx);
         self.draw_bookmark_panel(&ctx);
@@ -16005,11 +16032,17 @@ impl PagifyApp {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "attachment".into());
         match session.add_attachment(&name, &bytes) {
-            Ok(true) => self.say_info(format!(
-                "attached `{name}` ({} byte(s)) to the document — it is in the file now, \
-                 and `save` writes it out.",
-                bytes.len()
-            )),
+            Ok(true) => {
+                self.say_info(format!(
+                    "attached `{name}` ({} byte(s)) to the document — it is in the file now, \
+                     and `save` writes it out.",
+                    bytes.len()
+                ));
+                // If the Portfolio panel is open, its list is now one row
+                // short — refresh it here rather than leaving a file out of
+                // the very panel that lists files.
+                self.refresh_portfolio();
+            }
             Ok(false) => self.say_error(format!(
                 "attach: the document already holds a file named `{name}`."
             )),
@@ -16027,6 +16060,149 @@ impl PagifyApp {
         self.pick_file_deferred(
             |dialog| dialog.set_title("Choose a file to attach"),
             |app, path| app.attach_file(&path),
+        );
+    }
+
+    /// Open or close the Portfolio panel — the Conversion tab's PDF Portfolio:
+    /// the files embedded in this document, and buttons to extract, remove or
+    /// add one.
+    fn toggle_portfolio(&mut self) {
+        if self.tab().doc.is_none() {
+            self.say_error("nothing open.");
+            return;
+        }
+        if self.tab().panels.portfolio.is_some() {
+            self.tab_mut().panels.portfolio = None;
+            self.say_info("portfolio closed.");
+            return;
+        }
+        self.tab_mut().panels.portfolio = Some(PortfolioPanel { files: Vec::new() });
+        self.refresh_portfolio();
+        let count = self
+            .tab()
+            .panels
+            .portfolio
+            .as_ref()
+            .map(|panel| panel.files.len())
+            .unwrap_or(0);
+        if count == 0 {
+            self.say_info(
+                "portfolio opened — no embedded files yet. Add file… embeds one, and \
+                 `attach <file>` does the same from the box.",
+            );
+        } else {
+            self.say_info(format!(
+                "portfolio opened — {count} embedded file{}. Extract… writes one out; ✕ removes one.",
+                if count == 1 { "" } else { "s" }
+            ));
+        }
+    }
+
+    /// Re-read the document's embedded files into the open panel. Called on
+    /// opening and after every add or remove: every index after a removal
+    /// changes, so a stale list would extract the wrong file.
+    fn refresh_portfolio(&mut self) {
+        let Some(session) = self.tab().doc.as_ref().map(|doc| doc.session.clone()) else {
+            return;
+        };
+        let files = match session.attachment_details() {
+            Ok(files) => files,
+            Err(e) => {
+                self.say_error(format!("portfolio: {e}"));
+                return;
+            }
+        };
+        if let Some(panel) = self.tab_mut().panels.portfolio.as_mut() {
+            panel.files = files;
+        }
+    }
+
+    /// Write one embedded file out to `dest`.
+    fn portfolio_extract(&mut self, index: usize, dest: &std::path::Path) {
+        let Some(session) = self.tab().doc.as_ref().map(|doc| doc.session.clone()) else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let bytes = match session.attachment_bytes(index) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                self.say_error(format!("portfolio: {e}"));
+                return;
+            }
+        };
+        match std::fs::write(dest, &bytes) {
+            Ok(()) => self.say_info(format!(
+                "extracted {} byte(s) to {}.",
+                bytes.len(),
+                dest.display()
+            )),
+            Err(e) => self.say_error(format!(
+                "portfolio: could not write {}: {e}",
+                dest.display()
+            )),
+        }
+    }
+
+    /// The panel's Extract… button: ask where, then write that file out.
+    fn portfolio_extract_dialog(&mut self, index: usize) {
+        let Some(name) = self
+            .tab()
+            .panels
+            .portfolio
+            .as_ref()
+            .and_then(|panel| panel.files.get(index))
+            .map(|(name, _)| name.clone())
+        else {
+            self.say_error("portfolio: that file is no longer in the list.");
+            return;
+        };
+        self.save_file_deferred(
+            move |dialog| dialog.set_title("Extract embedded file").set_file_name(&name),
+            move |app, path| app.portfolio_extract(index, &path),
+        );
+    }
+
+    /// Remove one embedded file from the document — see `remove_attachment`:
+    /// it is not a command, so `undo` does not cover it.
+    fn portfolio_remove(&mut self, index: usize) {
+        let Some(session) = self.tab().doc.as_ref().map(|doc| doc.session.clone()) else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let name = self
+            .tab()
+            .panels
+            .portfolio
+            .as_ref()
+            .and_then(|panel| panel.files.get(index))
+            .map(|(name, _)| name.clone())
+            .unwrap_or_else(|| format!("file {}", index + 1));
+        match session.remove_attachment(index) {
+            Ok(true) => {
+                self.refresh_portfolio();
+                self.say_info(format!(
+                    "removed `{name}` from the portfolio — `save` writes the change.                      Attachments are not covered by `undo`."
+                ));
+            }
+            Ok(false) => self
+                .say_error(format!("portfolio: `{name}` is no longer in the document.")),
+            Err(e) => self.say_error(format!("portfolio: {e}")),
+        }
+    }
+
+    /// The panel's Add file… button: choose a file, embed it, and re-read the
+    /// list so the new row is there at once.
+    fn portfolio_add_dialog(&mut self) {
+        if self.tab().doc.is_none() {
+            self.say_error("nothing open.");
+            return;
+        }
+        self.pick_file_deferred(
+            |dialog| dialog.set_title("Choose a file to embed in the document"),
+            |app, path| {
+                app.attach_file(&path);
+                app.refresh_portfolio();
+            },
         );
     }
 

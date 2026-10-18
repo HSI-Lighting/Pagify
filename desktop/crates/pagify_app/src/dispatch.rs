@@ -205,7 +205,8 @@ impl crate::PagifyApp {
             | Effect::EmailDocument
             | Effect::SendForReview
             | Effect::TrackReviews
-            | Effect::ReadAloud { .. } => self.apply_files(effect),
+            | Effect::ReadAloud { .. }
+            | Effect::TogglePortfolio => self.apply_files(effect),
             Effect::RunReflow
             | Effect::RunFind(_)
             | Effect::RunFindStep { .. }
@@ -772,6 +773,7 @@ impl crate::PagifyApp {
             Effect::SendForReview => self.compose_mail(MailKind::Review),
             Effect::TrackReviews => self.track_reviews(),
             Effect::ReadAloud { stop } => self.read_aloud(stop),
+            Effect::TogglePortfolio => self.toggle_portfolio(),
             Effect::RunAccessCheck => self.run_access_check(),
             Effect::WriteAccessReport { dest } => match dest {
                 Some(path) => self.write_access_report(&path),

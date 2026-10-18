@@ -30,4 +30,23 @@ impl Session {
     pub fn page_attachments(&self, page: usize) -> Result<Vec<String>> {
         registry::with_session(self.handle, |s| s.document.page_attachments(page))
     }
+
+    /// The document's embedded files with their sizes, in the file's own
+    /// order — what the Portfolio panel lists. [`Session::attachments`] has
+    /// the names alone.
+    pub fn attachment_details(&self) -> Result<Vec<(String, usize)>> {
+        registry::with_session(self.handle, |s| s.document.attachment_details())
+    }
+
+    /// The bytes of one embedded file, by position in
+    /// [`Session::attachment_details`].
+    pub fn attachment_bytes(&self, index: usize) -> Result<Vec<u8>> {
+        registry::with_session(self.handle, |s| s.document.attachment_bytes(index))
+    }
+
+    /// Remove one embedded file, by position; `false` when there was none
+    /// there. **Not undoable**, like `add_attachment` — the app says so.
+    pub fn remove_attachment(&self, index: usize) -> Result<bool> {
+        registry::with_session(self.handle, |s| s.document.remove_attachment(index))
+    }
 }
