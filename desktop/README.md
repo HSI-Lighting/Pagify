@@ -264,8 +264,10 @@ expanded the `~`.
   built yet". Most of Form's authoring tools (17/22 that build fields rather
   than fill them), five PagiSign, three Convert, two View (Page Transitions,
   Assistant), one Share (Attach to Email), and one each on
-  Home/Edit/Accessibility. Nothing is greyed out; the answer appears under the
-  command bar when the button is pressed.
+  Home/Edit/Accessibility. Seventeen of those verbs are the Form-authoring
+  block, which is **out of scope for now** — the rest have a tiered plan in
+  `docs/PLANNED_BUTTONS.md`. Nothing is greyed out; the answer appears under
+  the command bar when the button is pressed.
 - **Sharing is local, not online.** `email` and `sendreview` draft a message in
   the default mail client, `sharelink` copies a `file://` link, `cloudstorage`
   reveals the document's file in the file manager, and `trackreviews` opens the
@@ -282,8 +284,9 @@ expanded the `~`.
   `say` (macOS), `System.Speech` (Windows) or `espeak-ng`/`espeak` (Linux);
   `readaloud stop` or Escape stops it. A machine with none of those engines is
   told which one it is missing.
-- **Form *authoring* is not built.** Filling works — click a widget to type,
-  tick or choose — but the Form tab's tools that *create* fields are planned.
+- **Form *authoring* is out of scope.** Filling works — click a widget to
+  type, tick or choose — but the Form tab's tools that *create* fields are
+  planned, and the plan file records that decision rather than promising them.
 - **There is no AI tab.** The mockup's Assistant is a single planned button
   (View tab), not an empty tab waiting for a feature.
 - **`comment` is still a no-op word.** `redact`, `certify`/`sign`, `note`,
