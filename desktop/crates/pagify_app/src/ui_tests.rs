@@ -5423,6 +5423,44 @@ fn viewsetting_opens_and_closes_the_settings_panel() {
     assert!(!h.state().tab().panels.view_settings, "the panel did not close");
 }
 
+/// **The Form tab's Tool Settings, through the real window.** The panel opens,
+/// its one checkbox is a real checkbox, and clicking it turns the highlight on
+/// — which is also what the page then draws. The write behind it is disabled in
+/// tests (`tool_settings_path` is `None` there), so this proves the switch and
+/// never touches the person's real settings file.
+#[test]
+fn toolsettings_panel_toggles_the_field_highlight() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut h = harness("form-fields.pdf");
+    h.state_mut().submit("toolsettings");
+    h.run_steps(2);
+    assert!(h.state().tab().panels.tool_settings, "the panel did not open");
+    assert!(
+        h.query_by_label_contains("Highlight fillable fields while filling").is_some(),
+        "the panel has no highlight switch"
+    );
+    assert!(!h.state().prefs_state.tool_settings.highlight_fields, "on to begin with");
+    assert!(h.state_mut().field_highlight_rects(0).is_empty(), "washed while off");
+
+    h.get_by_label_contains("Highlight fillable fields").click();
+    h.run_steps(2);
+    assert!(
+        h.state().prefs_state.tool_settings.highlight_fields,
+        "clicking the checkbox did not turn the highlight on"
+    );
+    assert!(!h.state_mut().field_highlight_rects(0).is_empty(), "on, but no box is washed");
+    assert!(
+        said(&h).contains("highlight fillable fields while filling: on"),
+        "{}",
+        said(&h)
+    );
+
+    h.state_mut().submit("toolsettings");
+    h.run_steps(1);
+    assert!(!h.state().tab().panels.tool_settings, "the panel did not close");
+}
+
 /// The Comment tab's Accounting Calculator: the panel opens, draws its keys
 /// for a few frames, and closes on a second press. The arithmetic itself is
 /// `pagify_shell::calculator`'s own tests.

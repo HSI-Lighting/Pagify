@@ -66,6 +66,9 @@ pub(crate) struct DocCaches {
     /// The words a page draws rather than writes — see
     /// [`crate::PagifyApp::drawn_words_on`].
     pub(super) drawn_words: Option<((usize, u64, u64), Vec<pdf_core::document::RecognisedWord>)>,
+    /// Every form field the engine reports — the rectangles Tool Settings'
+    /// highlight wash covers. See [`crate::PagifyApp::form_fields_cached`].
+    pub(super) form_fields: Option<Vec<pdf_core::document::FormFieldInfo>>,
 }
 
 impl DocCaches {
@@ -87,6 +90,7 @@ impl DocCaches {
         self.foreign = None;
         self.internal_links = None;
         self.drawn_words = None;
+        self.form_fields = None;
     }
 
     /// Drop the whole-page textures and the detail crop for pages that have
@@ -426,5 +430,49 @@ impl crate::PagifyApp {
         let raster = std::rc::Rc::new(doc.session.render_page(page, Self::BACKGROUND_SAMPLE_SCALE).ok()?);
         *doc.caches.sampling.borrow_mut() = Some((key, raster.clone()));
         Some(raster)
+    }
+
+    /// Every form field the engine reports, read once and kept until
+    /// [`crate::Doc::rendered_is_stale`] empties the caches — which every
+    /// fill, edit and page change already goes through.
+    ///
+    /// **Not read per frame.** Tool Settings' wash asks which boxes a page
+    /// has every frame it is drawn, and walking a form goes through PDFium
+    /// under the one lock that covers all of it.
+    pub(crate) fn form_fields_cached(&mut self) -> &[pdf_core::document::FormFieldInfo] {
+        let Some(doc) = self.tab_mut().doc.as_mut() else { return &[] };
+        if doc.caches.form_fields.is_none() {
+            doc.caches.form_fields = Some(doc.session.form_fields().unwrap_or_default());
+        }
+        doc.caches.form_fields.as_deref().unwrap_or(&[])
+    }
+
+    /// The boxes the Form tab's highlight wash covers on this page — the ones
+    /// a click on the page could fill. Empty when the setting is off, and on a
+    /// page of a document with no form.
+    ///
+    /// **Read only.** Nothing here changes the page, the export or the file;
+    /// the wash is drawn over the screen's picture of the page and nowhere
+    /// else.
+    pub(crate) fn field_highlight_rects(&mut self, page: usize) -> Vec<pdf_core::document::Rect> {
+        use pdf_core::document::FormFieldKind;
+        if !self.prefs_state.tool_settings.highlight_fields {
+            return Vec::new();
+        }
+        self.form_fields_cached()
+            .iter()
+            .filter(|field| {
+                field.page == page
+                    && matches!(
+                        field.kind,
+                        FormFieldKind::Text
+                            | FormFieldKind::Checkbox
+                            | FormFieldKind::Radio
+                            | FormFieldKind::Combo
+                            | FormFieldKind::List
+                    )
+            })
+            .map(|field| field.rect)
+            .collect()
     }
 }

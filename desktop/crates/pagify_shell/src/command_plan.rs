@@ -292,6 +292,8 @@ pub enum Effect {
     ReportPageTransitions,
     /// Report the form's calculation order, from the file on disk.
     ReportCalcOrder,
+    /// Open or close the Form tab's Tool Settings panel.
+    ToggleToolSettings,
     /// Open or close the split view's second pane.
     ToggleSplitView,
     /// Read the rows right to left, or back.
@@ -306,6 +308,10 @@ pub enum Effect {
     /// Compose a request to review the open document in the default mail
     /// client.
     SendForReview,
+    /// Draft a message in the default mail client with the document's file
+    /// attached, where the platform can attach it — and say so plainly where
+    /// it cannot.
+    EmailAttach,
     /// Open the Comments panel, which is where a document's review marks are
     /// listed.
     TrackReviews,
@@ -504,6 +510,7 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::Crossref
         | Verb::Transitions
         | Verb::CalcOrder
+        | Verb::ToolSettings
         | Verb::ViewSplit
         | Verb::ReadingOptions
         | Verb::ReverseView
@@ -511,6 +518,7 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::RevealDocument
         | Verb::EmailDocument
         | Verb::SendForReview
+        | Verb::EmailAttach
         | Verb::TrackReviews
         | Verb::ReadAloud { .. }
         | Verb::Portfolio
@@ -801,6 +809,7 @@ fn plan_files_and_text(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::Crossref => vec![Effect::ReportCrossReferences],
         Verb::Transitions => vec![Effect::ReportPageTransitions],
         Verb::CalcOrder => vec![Effect::ReportCalcOrder],
+        Verb::ToolSettings => vec![Effect::ToggleToolSettings],
         Verb::ViewSplit => vec![Effect::ToggleSplitView],
         Verb::ReadingOptions => vec![Effect::Say(crate::verbs::READING_OPTIONS_WORDS.into())],
         Verb::ReverseView => vec![Effect::ToggleReverseView],
@@ -831,6 +840,7 @@ fn plan_files_and_text(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::RevealDocument => vec![Effect::RevealDocument],
         Verb::EmailDocument => vec![Effect::EmailDocument],
         Verb::SendForReview => vec![Effect::SendForReview],
+        Verb::EmailAttach => vec![Effect::EmailAttach],
         Verb::TrackReviews => vec![Effect::TrackReviews],
         Verb::ReadAloud { stop } => vec![Effect::ReadAloud { stop: *stop }],
         Verb::Portfolio => vec![Effect::TogglePortfolio],
@@ -1221,6 +1231,7 @@ mod tests {
             (Verb::Crossref, vec![Effect::ReportCrossReferences]),
             (Verb::Transitions, vec![Effect::ReportPageTransitions]),
             (Verb::CalcOrder, vec![Effect::ReportCalcOrder]),
+            (Verb::ToolSettings, vec![Effect::ToggleToolSettings]),
             (Verb::ViewSplit, vec![Effect::ToggleSplitView]),
             (
                 Verb::ReadingOptions,
@@ -1248,6 +1259,7 @@ mod tests {
             (Verb::RevealDocument, vec![Effect::RevealDocument]),
             (Verb::EmailDocument, vec![Effect::EmailDocument]),
             (Verb::SendForReview, vec![Effect::SendForReview]),
+            (Verb::EmailAttach, vec![Effect::EmailAttach]),
             (Verb::TrackReviews, vec![Effect::TrackReviews]),
             (Verb::ReadAloud { stop: false }, vec![Effect::ReadAloud { stop: false }]),
             (Verb::ReadAloud { stop: true }, vec![Effect::ReadAloud { stop: true }]),

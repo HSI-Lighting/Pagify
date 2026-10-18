@@ -508,6 +508,14 @@ pub enum Verb {
     /// says that unsaved edits are not in it. Reordering is form authoring,
     /// which is out of scope for this build.
     CalcOrder,
+    /// The Form tab's Tool Settings: the one preference this build stores —
+    /// whether the boxes a click can fill are washed over while filling.
+    ///
+    /// **Drawn, never written.** The wash is an overlay on the page, not a
+    /// change to it: it does not print, export or save, and turning it off
+    /// leaves the document exactly as it was. The choice is remembered in
+    /// `settings.json` under Pagify's own config directory.
+    ToolSettings,
     /// The View tab's Split: a second, read-only pane over the same strip,
     /// with its own scroll.
     ViewSplit,
@@ -812,6 +820,16 @@ pub enum Verb {
     /// for Review. The request is drafted locally; there is no service to send
     /// it through, and the message says so.
     SendForReview,
+    /// Draft a message in the default mail client **with the document's file
+    /// attached** — the Share tab's Attach to Email.
+    ///
+    /// **Only where the platform can attach it.** Linux asks `xdg-email
+    /// --attach`, macOS drives Mail with AppleScript; Windows has no
+    /// attach-capable command line, so there the draft is opened and the file
+    /// is selected in the file manager, and both the draft's words and the
+    /// program's say it was not attached. Nothing claims an attachment the OS
+    /// did not make.
+    EmailAttach,
     /// Open the Comments panel, where every review mark in the document is
     /// listed — the Share tab's Track Reviews. It is the same panel
     /// `managecomments` opens, reached from where a reviewer looks for it.
@@ -1045,7 +1063,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("combfield", "the forms phase", "the Comb Field tool"),
     ("createform", "the forms phase", "the Form tool"),
     ("editxfa", "the forms phase", "the Edit Static XFA Form tool"),
-    ("emailattach", "the sharing phase", "the Attach to Email tool"),
     ("fieldbarcode", "the forms phase", "the Barcode tool"),
     ("fieldbutton", "the forms phase", "the Push Button tool"),
     ("fieldcheckbox", "the forms phase", "the Check Box tool"),
@@ -1067,7 +1084,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("sendbulk", "the signing phase", "the Send in Bulk tool"),
     ("signbranding", "the signing phase", "the Add E-Sign Branding tool"),
     ("tooffice", "the conversion phase", "the To MS Office tool"),
-    ("toolsettings", "the forms phase", "the Tool Settings tool"),
 ];
 
 /// Parse a line as a Pagify verb.
@@ -1191,7 +1207,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "articlebox", "weblinks", "jointext", "reflow",
         "record", "stop", "endrecord", "replay", "pick", "textlayer", "whytext", "snapshot",
         "autoscroll", "ruler", "accesscheck", "accessreport", "autobookmarks", "preflight",
-        "crossref", "transitions", "calcorder",
+        "crossref", "transitions", "calcorder", "toolsettings",
         "exportimages", "fromfiles", "viewsetting", "calculator", "managecomments",
         "pagemarks", "fromclipboard", "pencil", "rearrange", "fromtemplate", "addshape",
         "drawing", "keeptool", "formexport", "formimport", "formtosheet", "tooltip",
@@ -1204,7 +1220,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "unsecure", "redact", "portfolio",
         // Share and Read: built in the sharing phase — see
         // `parse_sharing_and_reading`.
-        "sharelink", "cloudstorage", "email", "sendreview", "trackreviews", "readaloud",
+        "sharelink", "cloudstorage", "email", "sendreview", "emailattach", "trackreviews", "readaloud",
     ];
     tokens.extend(PLANNED.iter().map(|(v, _, _)| *v));
     tokens
@@ -1268,6 +1284,26 @@ pub fn help_text(topic: Option<&str>) -> Vec<String> {
                         .into(),
                 ]
             }
+            "toolsettings" => {
+                return vec![
+                    "toolsettings — opens the Form tab's Tool Settings. One setting so far: \
+                     highlight fillable fields while filling, a light wash over the boxes a \
+                     click can fill. It is drawn over the page and never written into it, and \
+                     the choice is kept in settings.json under Pagify's own config folder."
+                        .into(),
+                ]
+            }
+            "emailattach" => {
+                return vec![
+                    "emailattach — opens a message in the default mail client with this \
+                     document's file attached. Where the platform has no command that can \
+                     attach a file to a draft (Windows), it opens the draft, selects the file \
+                     in the file manager, and says it could not attach it — it never claims \
+                     an attachment that was not made. `email` is the same message without the \
+                     file."
+                        .into(),
+                ]
+            }
             _ => {}
         }
         return vec![format!("no help for '{topic}'.")];
@@ -1282,11 +1318,12 @@ pub fn help_text(topic: Option<&str>) -> Vec<String> {
         "text       find <text>   findnext / fn   findprev / fp   — ⌘C copies a selection".into(),
         "           reflow — rebuild this page's reading order, when it does not read right".into(),
         "measure    calibrate <distance> [unit]   pagescale   measure <distance|area>".into(),
-        "share      email   sharelink   sendreview   trackreviews   cloudstorage".into(),
+        "share      email   emailattach   sharelink   sendreview   trackreviews   cloudstorage".into(),
         "files      portfolio — the document's embedded files: extract, remove or add one".into(),
         "view       readaloud [stop] — reads the page in view aloud with the OS voice".into(),
         "automate   record [name]   stop   replay <script.json>".into(),
         "edit       undo redo".into(),
+        "form       toolsettings — highlight fillable fields while filling, and remember it".into(),
         "inspect    crossref   transitions   calcorder — what the file already stores: its".into(),
         "           internal page links, each page's transition, the form calculation order".into(),
         "text       textlayer   — what kind of text this page has, and why selection".into(),
@@ -1697,6 +1734,7 @@ fn parse_sharing_and_reading(head: &str, rest: &[&str], _tail: &str) -> Option<R
         "cloudstorage" => Ok(Verb::RevealDocument),
         "email" => Ok(Verb::EmailDocument),
         "sendreview" => Ok(Verb::SendForReview),
+        "emailattach" => Ok(Verb::EmailAttach),
         "trackreviews" => Ok(Verb::TrackReviews),
         "readaloud" => match rest.first().map(|word| word.to_ascii_lowercase()).as_deref() {
             None => Ok(Verb::ReadAloud { stop: false }),
@@ -2016,7 +2054,7 @@ fn parse_conversion(head: &str, _rest: &[&str], tail: &str) -> Option<Result<Ver
     })
 }
 
-/// One domain of [`parse`]: the 38 commands below.
+/// One domain of [`parse`]: the 39 commands below.
 fn parse_marks_and_misc(head: &str, rest: &[&str], tail: &str) -> Option<Result<Verb, String>> {
     Some(match head {
         "highlight" | "hl" => Ok(Verb::MarkText(Markup::Highlight)),
@@ -2124,6 +2162,7 @@ fn parse_marks_and_misc(head: &str, rest: &[&str], tail: &str) -> Option<Result<
         "crossref" => Ok(Verb::Crossref),
         "transitions" => Ok(Verb::Transitions),
         "calcorder" => Ok(Verb::CalcOrder),
+        "toolsettings" => Ok(Verb::ToolSettings),
         "exportimages" => Ok(Verb::ExportAllImages {
             dest: (!tail.is_empty()).then(|| resolve_path(tail)),
         }),
@@ -2235,6 +2274,7 @@ mod sharing_and_reading_tests {
         assert_eq!(parse("cloudstorage"), Some(Ok(Verb::RevealDocument)));
         assert_eq!(parse("email"), Some(Ok(Verb::EmailDocument)));
         assert_eq!(parse("sendreview"), Some(Ok(Verb::SendForReview)));
+        assert_eq!(parse("emailattach"), Some(Ok(Verb::EmailAttach)));
         assert_eq!(parse("trackreviews"), Some(Ok(Verb::TrackReviews)));
         assert_eq!(parse("readaloud"), Some(Ok(Verb::ReadAloud { stop: false })));
         assert_eq!(parse("readaloud stop"), Some(Ok(Verb::ReadAloud { stop: true })));
@@ -2242,7 +2282,10 @@ mod sharing_and_reading_tests {
             parse("readaloud louder"),
             Some(Err("readaloud: expected nothing or `stop`, got 'louder'".into()))
         );
-        for word in ["sharelink", "cloudstorage", "email", "sendreview", "trackreviews", "readaloud"] {
+        for word in [
+            "sharelink", "cloudstorage", "email", "sendreview", "emailattach", "trackreviews",
+            "readaloud",
+        ] {
             assert!(
                 PLANNED.iter().all(|(v, _, _)| *v != word),
                 "`{word}` is still in the planned table"
@@ -2250,12 +2293,19 @@ mod sharing_and_reading_tests {
         }
     }
 
-    /// What is still planned on the Share tab is planned for an honest reason:
-    /// attaching a file to a mail message is OS mail integration this build
-    /// does not have. It must keep answering as a placeholder, not as a typo.
+    /// Attaching the file to the mail draft is a command now, not a
+    /// placeholder — and the answer it gives follows what the platform can
+    /// actually do (the app owns that half; see `attachment_draft`).
     #[test]
-    fn attaching_to_mail_is_still_honestly_planned() {
-        assert!(matches!(parse("emailattach"), Some(Ok(Verb::Planned { verb: "emailattach", .. }))));
+    fn attaching_to_mail_parses_and_is_not_planned() {
+        assert_eq!(parse("emailattach"), Some(Ok(Verb::EmailAttach)));
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "emailattach"),
+            "`emailattach` is still in the planned table"
+        );
+        let help = help_text(Some("emailattach")).join("\n");
+        assert!(help.contains("attached"), "{help}");
+        assert!(help.contains("could not attach"), "the Windows limit is not said: {help}");
     }
 }
 
@@ -2369,6 +2419,20 @@ mod report_tests {
                 "`{word}` is still in the planned table"
             );
         }
+    }
+
+    /// Tool Settings is a real word now: it parses, it is not a placeholder,
+    /// and `help toolsettings` says what it stores and where.
+    #[test]
+    fn tool_settings_parses_and_is_not_planned() {
+        assert_eq!(parse("toolsettings"), Some(Ok(Verb::ToolSettings)));
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "toolsettings"),
+            "`toolsettings` is still in the planned table"
+        );
+        let help = help_text(Some("toolsettings")).join("\n");
+        assert!(help.contains("settings.json"), "{help}");
+        assert!(help.contains("never written into it"), "{help}");
     }
 
     /// Each report word has a help topic that says what it reads and what is

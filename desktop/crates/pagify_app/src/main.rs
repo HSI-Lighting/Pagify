@@ -789,6 +789,8 @@ struct PanelsState {
     spelling: Option<SpellCheck>,
     /// Whether the View Settings panel is open on this tab.
     view_settings: bool,
+    /// Whether the Form tab's Tool Settings panel is open on this tab.
+    tool_settings: bool,
     /// The Accounting Calculator, while its panel is open on this tab.
     calculator: Option<pagify_shell::calculator::Calculator>,
     /// The Comments panel's rows, while it is open on this tab. Read once on
@@ -1301,7 +1303,7 @@ impl DocTab {
             view_state: ViewState { page: 0, zoom: ZoomMode::Fit, rotation: Rotation::None, view: None, hover_view: None, viewport_rect: None, anchor_offset: None, last_view: None, scroll_offset: egui::Vec2::ZERO, scroll_pt: 0.0, pan_by: None, scroll_to_pt: None, canvas_pt: egui::vec2(800.0, 600.0), reveal: None, saved_revision: 0, copy_wanted: false, snapshot_wanted: false, autoscroll: false, ruler: false, paper_tint: pagify_shell::verbs::PaperTint::White, split: false, },
             edit: EditState { editing_run: None, new_text_box: None, editing_field: None },
             next_text_id: 0x0100_0000,
-            panels: PanelsState { pending_link: None, extract_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, view_settings: false, calculator: None, comments: None, note_view: None, tags: None, portfolio: None, },
+            panels: PanelsState { pending_link: None, extract_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, view_settings: false, tool_settings: false, calculator: None, comments: None, note_view: None, tags: None, portfolio: None, },
             bookmarked_pages: std::collections::HashSet::new(),
             joined_groups: Vec::new(),
             organize: OrganizeState { selection_page: 0, organize_selected: Vec::new(), organize_anchor: None, organize_drag: None },
@@ -1482,6 +1484,13 @@ struct PrefsState {
     draw_fill: bool,
     snaps: SnapSet,
     grid_pt: f64,
+    /// What the Form tab's Tool Settings panel holds — see
+    /// [`pagify_shell::tool_settings`].
+    tool_settings: pagify_shell::tool_settings::ToolSettings,
+    /// Where [`Self::tool_settings`] is written, or `None` where nothing may be
+    /// written — a test run, where hundreds of apps must not touch the real
+    /// file, exactly as `signatures_path` is `None` there.
+    tool_settings_path: Option<PathBuf>,
 }
 
 /// The off-thread render worker, whether async rendering is on, and its stats.
@@ -2206,6 +2215,150 @@ fn mailto_uri(subject: &str, body: &str) -> String {
         uri_escape(subject, uri_unreserved),
         uri_escape(body, uri_unreserved)
     )
+}
+
+/// What a platform can do about opening a mail draft that carries a file.
+///
+/// **A description, not an effect.** Keeping the launcher as data is what lets
+/// the command each platform would run be asserted in a test without launching
+/// anything — the same seam `open_in_browser` keeps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MailAttachmentPlan {
+    /// A launcher that can put the file in the draft itself.
+    Attach { program: &'static str, args: Vec<String> },
+    /// No attach-capable launcher on this platform: open the draft and show
+    /// the file in the file manager, and say it was not attached.
+    DraftAndReveal,
+}
+
+/// Which route a build carries for attaching a file to a mail draft.
+///
+/// A value rather than three `cfg` branches at the point of use, so the routes
+/// this machine cannot run stay testable from the machine running the suite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MailPlatform {
+    Linux,
+    MacOs,
+    Windows,
+}
+
+/// The platform this binary was built for.
+fn current_mail_platform() -> MailPlatform {
+    if cfg!(target_os = "macos") {
+        MailPlatform::MacOs
+    } else if cfg!(target_os = "windows") {
+        MailPlatform::Windows
+    } else {
+        MailPlatform::Linux
+    }
+}
+
+/// The draft a mail platform gets: subject, body, and the words this program
+/// says afterwards.
+///
+/// **The body and the words follow the platform's ability, not the button's
+/// name.** Windows has no command line that attaches a file to a draft, so
+/// there the draft says the file was selected rather than attached, and the
+/// program says the same. Nothing ever claims an attachment that was not made.
+fn attachment_draft(platform: MailPlatform, name: &str, pages: usize) -> (String, String, String) {
+    let plural = if pages == 1 { "" } else { "s" };
+    let subject = format!("A PDF from Pagify: {name}");
+    match platform {
+        MailPlatform::Linux | MailPlatform::MacOs => (
+            subject,
+            format!("Here is {name} ({pages} page{plural}), attached.\n"),
+            format!("a message was opened in the mail client with {name} attached."),
+        ),
+        MailPlatform::Windows => (
+            subject,
+            format!(
+                "Here is {name} ({pages} page{plural}). The file is selected in the file \
+                 manager — attach it before sending.\n"
+            ),
+            format!(
+                "this platform has no command that attaches a file to a mail draft, so the \
+                 draft was opened and {name} is selected in the file manager — attach it there."
+            ),
+        ),
+    }
+}
+
+/// The launcher that would carry `path` into a mail draft on `platform`.
+fn mail_attachment_plan(
+    platform: MailPlatform,
+    path: &std::path::Path,
+    subject: &str,
+    body: &str,
+) -> MailAttachmentPlan {
+    let path = path.display().to_string();
+    match platform {
+        // xdg-utils' own mail command: it hands a configured client a draft
+        // that already names the file.
+        MailPlatform::Linux => MailAttachmentPlan::Attach {
+            program: "xdg-email",
+            args: vec![
+                "--subject".into(),
+                subject.to_string(),
+                "--body".into(),
+                body.to_string(),
+                "--attach".into(),
+                path,
+            ],
+        },
+        // Mail has no command line of its own for a compose window with a
+        // file in it; AppleScript is the supported way to ask it for one.
+        MailPlatform::MacOs => {
+            let script = format!(
+                "tell application \"Mail\"\n  set msg to make new outgoing message with \
+                 properties {{subject:{subject}, content:{body}, visible:true}}\n  tell content \
+                 of msg\n    make new attachment with properties {{file name:POSIX file \
+                 {path}}} at after the last paragraph\n  end tell\n  activate\nend tell",
+                subject = applescript_literal(subject),
+                body = applescript_literal(body),
+                path = applescript_literal(&path),
+            );
+            MailAttachmentPlan::Attach {
+                program: "osascript",
+                args: vec!["-e".into(), script],
+            }
+        }
+        MailPlatform::Windows => MailAttachmentPlan::DraftAndReveal,
+    }
+}
+
+/// `text` as an AppleScript string literal: a backslash and a quote are the
+/// two characters the script language treats as syntax.
+fn applescript_literal(text: &str) -> String {
+    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// Open the draft a mail platform can carry, and hand back what was done.
+///
+/// **No launcher in a test.** A suite that opens a mail client on whatever
+/// machine runs it is a suite nobody wants to run; the tests read the plan and
+/// the caller's words instead, the same seam `open_in_browser` keeps.
+fn open_attachment_draft(
+    platform: MailPlatform,
+    path: &std::path::Path,
+    subject: &str,
+    body: &str,
+) -> std::io::Result<MailAttachmentPlan> {
+    let plan = mail_attachment_plan(platform, path, subject, body);
+    if cfg!(test) {
+        return Ok(plan);
+    }
+    match &plan {
+        MailAttachmentPlan::Attach { program, args } => {
+            let mut command = std::process::Command::new(program);
+            command.args(args);
+            spawn_launcher(&mut command)?;
+        }
+        MailAttachmentPlan::DraftAndReveal => {
+            open_in_browser(&mailto_uri(subject, body))?;
+            reveal_in_file_manager(path)?;
+        }
+    }
+    Ok(plan)
 }
 
 /// Run one launcher and reap it on a thread of its own — the same reason
@@ -3510,6 +3663,7 @@ impl PagifyApp {
         self.draw_snippet_list(&ctx);
         self.draw_find_replace(&ctx);
         self.draw_view_settings(&ctx);
+        self.draw_tool_settings(&ctx);
         self.draw_calculator(&ctx);
         self.draw_comments(&ctx);
         // A note opened from its page icon or the Comments panel — see
@@ -4967,7 +5121,23 @@ impl PagifyApp {
             } else {
                 pagify_shell::session_log::SessionLog::start()
             }, recorder: Recorder::default(), replay_depth: 0, },
-            prefs_state: PrefsState { ortho: false, defaults: tools::Defaults::default(), draw_fill: false, snaps: SnapSet::defaults(), grid_pt: 0.0, },
+            prefs_state: PrefsState {
+                ortho: false,
+                defaults: tools::Defaults::default(),
+                draw_fill: false,
+                snaps: SnapSet::defaults(),
+                grid_pt: 0.0,
+                tool_settings: if cfg!(test) {
+                    pagify_shell::tool_settings::ToolSettings::default()
+                } else {
+                    pagify_shell::tool_settings::ToolSettings::load()
+                },
+                tool_settings_path: if cfg!(test) {
+                    None
+                } else {
+                    pagify_shell::tool_settings::ToolSettings::path()
+                },
+            },
             render_state: RenderState { renders: None, async_render: !cfg!(test), render_stats: RenderStats::default(), },
             ui_state: UiState { show_thumbs: true, show_contents: false, outline_open: std::collections::HashSet::new(), outline_active: None, organize_open: false, show_layers: false, command_open: false, errors_said: 0, },
             pending_dialog: None,
@@ -9669,6 +9839,38 @@ impl PagifyApp {
     fn toggle_view_settings(&mut self) {
         let open = !self.tab().panels.view_settings;
         self.tab_mut().panels.view_settings = open;
+    }
+
+    /// Open or close the Form tab's Tool Settings — the panel holding the
+    /// preferences a form's filling has. Its one setting so far is
+    /// [`pagify_shell::tool_settings::ToolSettings::highlight_fields`].
+    fn toggle_tool_settings(&mut self) {
+        let open = !self.tab().panels.tool_settings;
+        self.tab_mut().panels.tool_settings = open;
+        let words = self.prefs_state.tool_settings.highlight_words();
+        self.say_info(if open {
+            format!(
+                "tool settings opened — highlighting fillable fields while filling is {words}. \
+                 The wash is drawn over the page and never written into it."
+            )
+        } else {
+            "tool settings closed.".to_string()
+        });
+    }
+
+    /// Write the Tool Settings choice, and say if it could not be written.
+    ///
+    /// `tool_settings_path` is `None` under test on purpose: a suite that
+    /// writes the person's real settings file is a suite that changes their
+    /// program, and every other kept thing here is disabled in tests the same
+    /// way.
+    fn save_tool_settings(&mut self) {
+        let Some(path) = self.prefs_state.tool_settings_path.clone() else {
+            return;
+        };
+        if let Err(e) = self.prefs_state.tool_settings.save_to(&path) {
+            self.say_error(format!("the tool settings could not be written: {e}"));
+        }
     }
 
     /// Toggle Reverse View — the View tab's button. The rows' own layout
@@ -17263,6 +17465,33 @@ impl PagifyApp {
         };
         match open_in_browser(&mailto_uri(&subject, &body)) {
             Ok(()) => self.say_info(said),
+            Err(e) => self.say_error(format!("the mail client did not open: {e}")),
+        }
+    }
+
+    /// The Share tab's Attach to Email: a message draft carrying the
+    /// document's own file.
+    ///
+    /// **Never claims an attachment the OS did not make.** Where the platform
+    /// has an attach-capable route — Linux's `xdg-email --attach`, Mail through
+    /// AppleScript on macOS — the file goes into the draft. Windows has no such
+    /// command line, so the draft is opened and the file selected in the file
+    /// manager, and both the draft's words and this program's say *that*
+    /// rather than calling it attached.
+    fn email_attach(&mut self) {
+        let Some(path) = self.open_document_path() else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "this document".into());
+        let pages = self.tab().doc.as_ref().map(|doc| doc.page_count).unwrap_or(0);
+        let platform = current_mail_platform();
+        let (subject, body, said) = attachment_draft(platform, &name, pages);
+        match open_attachment_draft(platform, &path, &subject, &body) {
+            Ok(_) => self.say_info(said),
             Err(e) => self.say_error(format!("the mail client did not open: {e}")),
         }
     }

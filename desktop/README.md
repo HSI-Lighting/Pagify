@@ -259,21 +259,26 @@ expanded the `~`.
 
 ### Not done, and honestly so
 
-- **Thirty verbs are named and not built** (`verbs::PLANNED`) — 28 of
+- **Twenty-eight verbs are named and not built** (`verbs::PLANNED`) — 26 of
   the 209 ribbon buttons across the tabs answer "planned for <phase>, and not
-  built yet". Most of Form's authoring tools (15 of that tab's 22 buttons,
-  plus Tool Settings), five PagiSign, three Convert, one View (Assistant),
-  one Share (Attach to Email), and one each on Home and Accessibility.
+  built yet". Most of Form's authoring tools (15 of that tab's 22 buttons that
+  create fields rather than fill them), five PagiSign, three Convert, one View
+  (Assistant), and one each on Home and Accessibility.
   Seventeen of those verbs are the Form-authoring block, which is **out of
   scope for now** — the rest have a tiered plan in
   `docs/PLANNED_BUTTONS.md`. Nothing is greyed out; the answer appears under
   the command bar when the button is pressed.
 - **Sharing is local, not online.** `email` and `sendreview` draft a message in
-  the default mail client, `sharelink` copies a `file://` link, `cloudstorage`
-  reveals the document's file in the file manager, and `trackreviews` opens the
-  Comments panel — none of them uploads anything, and each says so. Attaching a
-  file to the draft (`emailattach`) needs OS mail integration this build does
-  not have; online signing, bulk send and cloud storage remain planned.
+  the default mail client, `emailattach` drafts the same message with the file
+  attached where the OS can attach it, `sharelink` copies a `file://` link,
+  `cloudstorage` reveals the document's file in the file manager, and
+  `trackreviews` opens the Comments panel — none of them uploads anything, and
+  each says so. Attaching is Linux's `xdg-email --attach` and macOS Mail through
+  AppleScript; Windows has no command line that attaches a file to a draft, so
+  there the draft is opened, the file is selected in the file manager, and both
+  the draft and the program say it was not attached — nothing claims an
+  attachment that was not made. Online signing, bulk send and cloud storage
+  remain planned.
 - **The three reports read; they never write.** `crossref` lists the
   internal page links the document already has — where each can be clicked and
   the page it goes to; `transitions` lists each page's `/Trans` effect and
@@ -295,11 +300,18 @@ expanded the `~`.
 - **Form *authoring* is out of scope.** Filling works — click a widget to
   type, tick or choose — but the Form tab's tools that *create* fields are
   planned, and the plan file records that decision rather than promising them.
+  Tool Settings remembers one thing about filling: whether the boxes a click
+  can fill are washed over while filling. The wash is drawn on the screen and
+  never written into the page, and the choice lives in `settings.json`.
 - **There is no AI tab.** The mockup's Assistant is a single planned button
   (View tab), not an empty tab waiting for a feature.
 - **`comment` is still a no-op word.** `redact`, `certify`/`sign`, `note`,
   `stamp`, `callout` and the Comments panel all work; `comment` itself is
-  reserved for *threaded* review comments and says it is planned.
+  reserved for *threaded* review comments and says it is planned. The thread
+  model is decided — a note plus `/IRT` reply annotations, PDF-native so other
+  readers show the thread too — but PDFium can only *read* a reply link
+  (`FPDFAnnot_GetLinkedAnnot`), not write one, so the write half needs the
+  engine work recorded in `docs/PLANNED_BUTTONS.md`.
 - **Notarization and code signing have not been run** — they need credentials.
   The scripts are written and the ordering is right; they have not been executed.
 - **Printing is Windows-only.** It has no ribbon or File-tab button; ⌘P/Ctrl+P
@@ -322,12 +334,13 @@ expanded the `~`.
 document   open close save saveas quit
 view       page <n|next|prev|first|last>   zoom <percent|in|out|fit|width|actual>   rotate [90]   readaloud [stop]
 organize   extract <pages> <file>   import <file> [pages]   deletepage <pages>   insertpage   movepage <pages> <before>
-share      email   sharelink   sendreview   trackreviews   cloudstorage
+share      email   emailattach   sharelink   sendreview   trackreviews   cloudstorage
 files      portfolio — the document's embedded files: extract, remove or add one
 review     highlight   note <text>
 measure    calibrate <distance> [unit]   pagescale   measure <distance|area>
 automate   record [name]   stop   replay <script.json>   clearhistory
 edit       undo redo
+form       toolsettings — highlight fillable fields while filling, remembered
 inspect    crossref   transitions   calcorder — what the file already stores: internal
            page links, page transitions, the form calculation order
 drawing    every SIMLUX command — line, polyline, trim, fillet, offset, … — with the same aliases
@@ -351,6 +364,7 @@ can say so. Nothing is kept beside a document or beside the executable.
 | `recent.json` | the documents opened recently: path, page count, when |
 | `predefined.json` | texts saved with `predefined` for typing into forms |
 | `signatures.json` | drawn or uploaded signatures — strokes, or a picture's pixels — with their names |
+| `settings.json` | the Tool Settings: whether fillable fields are highlighted while filling |
 | `scripts/*.json` | recordings made with `record` |
 
 All of it is plain JSON, on purpose: it is yours to read. `clearhistory`

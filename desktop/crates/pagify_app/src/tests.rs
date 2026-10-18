@@ -1013,3 +1013,154 @@ fn a_report_says_when_it_cannot_read_the_file() {
     );
     assert!(!said(&app).contains("no page transitions"), "{}", said(&app));
 }
+
+/// **What Attach to Email does on each platform, asserted without launching
+/// anything.** Each route is described as data — `MailAttachmentPlan` — so the
+/// commands this machine cannot run are still checked here rather than left to
+/// a person to try on the other two.
+#[test]
+fn the_attachment_draft_is_planned_for_each_platform() {
+    let path = std::path::Path::new("/tmp/My Report.pdf");
+    let (subject, body, said) = attachment_draft(MailPlatform::Linux, "My Report.pdf", 3);
+    assert_eq!(subject, "A PDF from Pagify: My Report.pdf");
+    assert!(body.contains("3 pages"), "{body}");
+    assert!(body.contains("attached"), "{body}");
+    assert!(said.contains("with My Report.pdf attached"), "{said}");
+
+    // Linux asks xdg-utils for a compose window that already names the file.
+    match mail_attachment_plan(MailPlatform::Linux, path, &subject, &body) {
+        MailAttachmentPlan::Attach { program, args } => {
+            assert_eq!(program, "xdg-email");
+            assert_eq!(args[0], "--subject");
+            assert_eq!(args[1], "A PDF from Pagify: My Report.pdf");
+            assert!(args.contains(&"--attach".to_string()), "{args:?}");
+            assert_eq!(args.last().map(String::as_str), Some("/tmp/My Report.pdf"));
+        }
+        other => panic!("Linux got {other:?}"),
+    }
+
+    // macOS asks Mail with a script; the path and the words are in it, quoted.
+    match mail_attachment_plan(MailPlatform::MacOs, path, &subject, &body) {
+        MailAttachmentPlan::Attach { program, args } => {
+            assert_eq!(program, "osascript");
+            let script = args.iter().find(|arg| arg.contains("make new attachment")).expect("no attachment in the script");
+            assert!(script.contains("POSIX file \"/tmp/My Report.pdf\""), "{script}");
+            assert!(script.contains("subject:\"A PDF from Pagify: My Report.pdf\""), "{script}");
+            assert!(script.contains("activate"), "{script}");
+        }
+        other => panic!("macOS got {other:?}"),
+    }
+
+    // Windows has no route that attaches, so the plan says so and the words
+    // must not claim the file went with the draft.
+    assert_eq!(
+        mail_attachment_plan(MailPlatform::Windows, path, &subject, &body),
+        MailAttachmentPlan::DraftAndReveal
+    );
+    let (windows_subject, windows_body, windows_said) =
+        attachment_draft(MailPlatform::Windows, "My Report.pdf", 1);
+    assert_eq!(windows_subject, "A PDF from Pagify: My Report.pdf");
+    assert!(!windows_body.contains("attached"), "the draft claims an attachment: {windows_body}");
+    assert!(windows_body.contains("file is selected"), "{windows_body}");
+    assert!(windows_body.contains("1 page"), "{windows_body}");
+    assert!(!windows_said.contains("with My Report.pdf attached"), "{windows_said}");
+    assert!(windows_said.contains("no command that attaches"), "{windows_said}");
+    assert!(windows_said.contains("selected in the file manager"), "{windows_said}");
+}
+
+/// An AppleScript string keeps its punctuation: quotes and backslashes are the
+/// two characters the script language would otherwise read as syntax.
+#[test]
+fn an_applescript_literal_escapes_what_the_language_reads() {
+    assert_eq!(
+        applescript_literal(r#"a "b" c\d"#),
+        r#""a \"b\" c\\d""#
+    );
+}
+
+/// **The Share tab's Attach to Email, through the real dispatch.** The host's
+/// own route stops at the plan under test, so what this asserts is the line
+/// the program says — which differs by platform on purpose. The platform that
+/// cannot attach must not say it did.
+#[test]
+fn emailattach_opens_a_draft_and_says_what_the_platform_can_do() {
+    let mut app = app_on("two-column.pdf");
+    app.submit("emailattach");
+    let said = said(&app);
+    assert!(
+        !said.contains("emailattach:") && !said.contains("mail client did not open"),
+        "emailattach failed: {said}"
+    );
+    match current_mail_platform() {
+        MailPlatform::Linux | MailPlatform::MacOs => {
+            assert!(said.contains("with two-column.pdf attached"), "{said}");
+        }
+        MailPlatform::Windows => {
+            assert!(said.contains("no command that attaches"), "{said}");
+            assert!(!said.contains("with two-column.pdf attached"), "{said}");
+        }
+    }
+}
+
+/// The word needs a document: on an empty window it says so rather than
+/// opening a mail client for nothing.
+#[test]
+fn emailattach_needs_an_open_document() {
+    let mut app = PagifyApp::new(None);
+    app.submit("emailattach");
+    assert!(said(&app).contains("nothing open."), "{}", said(&app));
+}
+
+/// **Tool Settings opens and closes, and says which way its one setting is.**
+/// A panel that opened silently would leave the button looking unbuilt.
+#[test]
+fn tool_settings_opens_and_says_what_it_holds() {
+    let mut app = app_on("spread.pdf");
+    assert!(!app.tab().panels.tool_settings, "the panel started open");
+    app.submit("toolsettings");
+    assert!(app.tab().panels.tool_settings, "the panel did not open");
+    assert!(said(&app).contains("tool settings opened"), "{}", said(&app));
+    assert!(
+        said(&app).contains("highlighting fillable fields while filling is off"),
+        "{}",
+        said(&app)
+    );
+
+    app.submit("toolsettings");
+    assert!(!app.tab().panels.tool_settings, "the panel did not close");
+    assert!(said(&app).contains("tool settings closed"), "{}", said(&app));
+}
+
+/// **The highlight covers exactly the boxes a click can fill, and is nothing
+/// at all when it is off.** Off: no rectangles. On: one per fillable widget —
+/// text, tick box, radio, combo or list. A document with no form: none either
+/// way, so turning the setting on cannot invent a box to wash.
+#[test]
+fn the_field_highlight_covers_exactly_the_fillable_fields() {
+    let mut app = app_on("form-fields.pdf");
+    assert!(app.field_highlight_rects(0).is_empty(), "washed with the setting off");
+
+    app.prefs_state.tool_settings.highlight_fields = true;
+    let fillable = app
+        .form_fields_cached()
+        .iter()
+        .filter(|field| {
+            matches!(
+                field.kind,
+                FormFieldKind::Text
+                    | FormFieldKind::Checkbox
+                    | FormFieldKind::Radio
+                    | FormFieldKind::Combo
+                    | FormFieldKind::List
+            )
+        })
+        .count();
+    assert!(fillable > 0, "form-fields.pdf should hold fillable fields");
+    assert_eq!(app.field_highlight_rects(0).len(), fillable, "one wash per fillable field");
+    assert!(app.field_highlight_rects(1).is_empty(), "a page the fields are not on got a wash");
+
+    let mut plain = app_on("spread.pdf");
+    plain.prefs_state.tool_settings.highlight_fields = true;
+    assert!(plain.form_fields_cached().is_empty(), "spread.pdf was expected to have no form");
+    assert!(plain.field_highlight_rects(0).is_empty(), "a document with no form got a wash");
+}

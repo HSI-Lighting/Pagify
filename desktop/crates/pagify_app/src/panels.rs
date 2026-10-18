@@ -620,6 +620,64 @@ impl crate::PagifyApp {
         }
     }
 
+    /// The Form tab's Tool Settings — the preferences a form's filling has.
+    ///
+    /// One setting so far: highlighting the boxes a click can fill, kept by
+    /// [`pagify_shell::tool_settings`] in `settings.json` under Pagify's own
+    /// configuration folder. The value lives in `prefs_state`, not on the tab —
+    /// a preference about filling is not a fact about one document — and the
+    /// write is this frame's job, because only the app knows where Pagify keeps
+    /// what is its own.
+    pub(crate) fn draw_tool_settings(&mut self, ctx: &egui::Context) {
+        if !self.tab().panels.tool_settings {
+            return;
+        }
+        let mut open = true;
+        let mut highlight = self.prefs_state.tool_settings.highlight_fields;
+        let mut changed = false;
+
+        egui::Window::new("Tool Settings")
+            .id(self.window_id("tool-settings-window"))
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_pos(egui::pos2(180.0, 140.0))
+            .show(ctx, |ui| {
+                ui.set_width(330.0);
+                ui.label("Form fields");
+                ui.add_space(2.0);
+                if ui
+                    .checkbox(&mut highlight, "Highlight fillable fields while filling")
+                    .changed()
+                {
+                    changed = true;
+                }
+                ui.label(
+                    "A light wash over every box a click can fill — text fields, tick \
+                     boxes, radios and choice lists. Drawn over the page and never written \
+                     into it: it does not print, export or save.",
+                );
+                ui.add_space(6.0);
+                ui.label(
+                    "Remembered for this machine in settings.json, under Pagify's own \
+                     configuration folder.",
+                );
+            });
+
+        if changed {
+            self.prefs_state.tool_settings.highlight_fields = highlight;
+            self.save_tool_settings();
+            let words = self.prefs_state.tool_settings.highlight_words();
+            self.say_info(format!(
+                "highlight fillable fields while filling: {words}. Drawn over the page, \
+                 never written into it."
+            ));
+        }
+        if !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.tab_mut().panels.tool_settings = false;
+        }
+    }
+
     /// The Accounting Calculator — the Comment tab's little adding machine.
     ///
     /// The arithmetic is `pagify_shell::calculator`'s; this draws its keys and

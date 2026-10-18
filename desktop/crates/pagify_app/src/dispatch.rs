@@ -201,12 +201,14 @@ impl crate::PagifyApp {
             | Effect::ReportCrossReferences
             | Effect::ReportPageTransitions
             | Effect::ReportCalcOrder
+            | Effect::ToggleToolSettings
             | Effect::ToggleSplitView
             | Effect::ToggleReverseView
             | Effect::ShareLink
             | Effect::RevealDocument
             | Effect::EmailDocument
             | Effect::SendForReview
+            | Effect::EmailAttach
             | Effect::TrackReviews
             | Effect::ReadAloud { .. }
             | Effect::TogglePortfolio => self.apply_files(effect),
@@ -771,12 +773,14 @@ impl crate::PagifyApp {
             Effect::ReportCrossReferences => self.report_cross_references(),
             Effect::ReportPageTransitions => self.report_page_transitions(),
             Effect::ReportCalcOrder => self.report_calc_order(),
+            Effect::ToggleToolSettings => self.toggle_tool_settings(),
             Effect::ToggleSplitView => self.toggle_split_view(),
             Effect::ToggleReverseView => self.toggle_reverse_view(),
             Effect::ShareLink => self.share_link(),
             Effect::RevealDocument => self.reveal_document(),
             Effect::EmailDocument => self.compose_mail(MailKind::Document),
             Effect::SendForReview => self.compose_mail(MailKind::Review),
+            Effect::EmailAttach => self.email_attach(),
             Effect::TrackReviews => self.track_reviews(),
             Effect::ReadAloud { stop } => self.read_aloud(stop),
             Effect::TogglePortfolio => self.toggle_portfolio(),

@@ -1237,6 +1237,35 @@ impl crate::PagifyApp {
         });
     }
 
+    /// The Form tab's Tool Settings wash: a light tint over every box a click
+    /// can fill, when "highlight fillable fields while filling" is on.
+    ///
+    /// **Drawn, never written.** The wash is on the screen's picture of the
+    /// page only — the raster, an export and a save know nothing about it — so
+    /// it cannot become a document change by being looked at. Empty when the
+    /// setting is off, which is what makes it a preference rather than a
+    /// different page.
+    fn draw_field_highlights(&mut self, ui: &mut egui::Ui, page: usize, view: PageView) {
+        let rects = self.field_highlight_rects(page);
+        if rects.is_empty() {
+            return;
+        }
+        let wash = egui::Color32::from_rgba_unmultiplied(124, 96, 220, 40);
+        let edge = egui::Color32::from_rgba_unmultiplied(124, 96, 220, 130);
+        for rect in rects {
+            let min = view.to_screen(AppPoint { x: rect.left as f64, y: rect.top as f64 });
+            let max = view.to_screen(AppPoint { x: rect.right as f64, y: rect.bottom as f64 });
+            let box_rect = egui::Rect::from_two_pos(min, max);
+            ui.painter().rect_filled(box_rect, egui::CornerRadius::ZERO, wash);
+            ui.painter().rect_stroke(
+                box_rect,
+                egui::CornerRadius::ZERO,
+                egui::Stroke::new(1.0, edge),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
+
     /// **Staged redactions, drawn where they will land.** `markredact`'s
     /// whole promise is that you can see what is about to go before it does;
     /// split out of the page loop to keep that loop's function inside the
@@ -1439,6 +1468,7 @@ impl crate::PagifyApp {
                         };
                         self.draw_detail_overlay(ctx, ui, page, view, rect, device_scale);
                         self.draw_text_highlights(ui.painter(), page, view);
+                        self.draw_field_highlights(ui, page, view);
                         if let Some(layer) = self.tab_mut().markup.existing(page) {
                             overlay::draw_layer(
                                 ui.painter(),

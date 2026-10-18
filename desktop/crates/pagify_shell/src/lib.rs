@@ -48,6 +48,7 @@ pub mod signatures;
 pub mod spelling;
 pub mod state;
 pub mod stats;
+pub mod tool_settings;
 pub mod tools;
 pub mod transitions;
 pub mod models;
