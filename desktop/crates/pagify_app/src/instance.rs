@@ -759,6 +759,15 @@ mod tests {
 
     /// The update script is started by the running Pagify and outlives it. If it
     /// inherited the lock the relaunched Pagify would find the old one still "running".
+    ///
+    /// **Waits for the child to have `exec`ed before letting the lock go.** On
+    /// Unix `spawn` returns after the fork and before `exec`, and the fork's
+    /// own copy of the lock's descriptor keeps the lock alive until `exec`
+    /// clears its close-on-exec flag — a window that a loaded machine can hold
+    /// open long enough for this test to fail, which it did, reported as "a
+    /// running child process kept the lock" when the truth was a child that
+    /// had not started yet. The shell writes its ready byte *after* `exec`, so
+    /// reading it is the proof that the descriptor is gone.
     #[test]
     fn a_child_process_does_not_keep_the_lock_alive() {
         let dir = scratch("inherit");
@@ -778,15 +787,32 @@ mod tests {
             }
             c
         } else {
-            let mut c = std::process::Command::new("sleep");
-            c.arg("5");
+            // A shell rather than `sleep`: its first byte of output is the
+            // signal that it has execed — see the test's own note.
+            let mut c = std::process::Command::new("sh");
+            c.args(["-c", "echo ready; sleep 5"]);
             c
         };
         let mut child = command
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
+            .stdout(if cfg!(windows) {
+                std::process::Stdio::null()
+            } else {
+                std::process::Stdio::piped()
+            })
             .spawn()
             .expect("a child to start");
+        #[cfg(not(windows))]
+        {
+            use std::io::Read as _;
+            let mut ready = [0u8; 1];
+            child
+                .stdout
+                .as_mut()
+                .expect("the child's stdout is piped")
+                .read_exact(&mut ready)
+                .expect("the child's ready line");
+        }
         drop(file);
         let got = take_lock(&path);
         let _ = child.kill();
