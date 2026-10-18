@@ -272,6 +272,64 @@ fn the_eraser_still_erases_a_selected_drawing() {
     assert_eq!(app.tab().markup.existing(0).map(|l| l.len()).unwrap_or(0), 0, "the drawing is still there");
 }
 
+/// **Reported from use: "after i add a note to a page, it shows a little box
+/// on the top left of the page. how do i read the note?"** The box is the
+/// note's icon; its words live in the annotation and the program drew them
+/// nowhere, so a note could be written and never read back. The click on the
+/// icon now opens the whole of it — this is the same call that click makes.
+#[test]
+fn a_click_on_a_note_opens_its_words_to_be_read() {
+    let mut h = page_with_a_highlight_and_a_note();
+    // Mark 1 is the highlight, mark 2 the note — the listing number a click
+    // under the note's icon resolves to.
+    assert!(h.state_mut().open_note(0, 2), "the note did not open");
+    h.run_steps(2);
+    let note = h.state().tab().panels.note_view.as_ref().expect("no note open");
+    assert_eq!(note.contents, "a note");
+    assert!(
+        h.query_by_label_contains("a note").is_some(),
+        "the note's own words are not on screen"
+    );
+}
+
+/// The same, through the real pointer path: a click on the little box the
+/// page draws in the corner resolves to the note and opens it.
+#[test]
+fn clicking_the_little_box_on_the_page_opens_the_note() {
+    let mut h = page_with_a_highlight_and_a_note();
+    h.run_steps(2);
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
+    let at = view.to_screen(AppPoint { x: 310.0, y: 310.0 });
+    click(&mut h, at);
+    h.run_steps(1);
+    let note = h.state().tab().panels.note_view.as_ref().expect("a click on the note did not open it");
+    assert_eq!(note.contents, "a note");
+}
+
+/// The Comments panel could only ever show a note's first 60 characters.
+/// Its row now has a Read button that opens the same window as the icon.
+#[test]
+fn the_comments_panel_can_open_a_note_to_read_it() {
+    let mut h = page_with_a_highlight_and_a_note();
+    h.state_mut().submit("managecomments");
+    h.run_steps(2);
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Read").click();
+    h.run_steps(2);
+    let note = h.state().tab().panels.note_view.as_ref().expect("Read opened nothing");
+    assert_eq!(note.contents, "a note");
+}
+
+/// `marks` is the command-line listing of a page's annotations; it used to
+/// say only "Note", so even that could not be read. Its opening words are
+/// part of what the mark is.
+#[test]
+fn marks_shows_what_a_note_says() {
+    let mut h = page_with_a_highlight_and_a_note();
+    h.state_mut().submit("marks");
+    assert!(said(&h).contains("a note"), "the listing does not show the note's words: {}", said(&h));
+}
+
+
 /// **The build number is in the title bar, at the far right** — with or
 /// without a document open, past the Ortho / Pages checkboxes.
 #[test]

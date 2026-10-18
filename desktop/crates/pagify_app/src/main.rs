@@ -794,6 +794,10 @@ struct PanelsState {
     /// The Comments panel's rows, while it is open on this tab. Read once on
     /// opening and re-read after every removal — never rebuilt per frame.
     comments: Option<CommentsPanel>,
+    /// The note being read, while its window is open on this tab — see
+    /// [`NoteView`]. A note is a small icon on the page whose words this
+    /// program draws nowhere else.
+    note_view: Option<NoteView>,
     /// The Tags panel's rows, while it is open on this tab — the page in
     /// view's structure tree, flattened with indents. Read once on opening.
     tags: Option<TagsPanel>,
@@ -808,6 +812,23 @@ struct TagsPanel {
 /// The Comments panel's rows, as `pagify_shell::comments` lists them.
 struct CommentsPanel {
     rows: Vec<pagify_shell::comments::Comment>,
+}
+
+/// One note open for reading.
+///
+/// **A note's words are not on the page.** A PDF note is a small icon in the
+/// page's corner — the text lives in the annotation's own `/Contents` — and
+/// until this existed the only place any of it surfaced was the Comments
+/// panel's 60-character snippet, so a note longer than a line could be
+/// written and never read again. The page icon, the Comments panel's Read
+/// button and the `marks` listing all open this.
+struct NoteView {
+    /// The page the note is on, zero-based.
+    page: usize,
+    /// PDFium's own annotation index — what removes it.
+    index: usize,
+    /// Every word it carries, as typed.
+    contents: String,
 }
 
 /// The rail/Organize selection and drag: which page the rail follows, which
@@ -1270,7 +1291,7 @@ impl DocTab {
             view_state: ViewState { page: 0, zoom: ZoomMode::Fit, rotation: Rotation::None, view: None, hover_view: None, viewport_rect: None, anchor_offset: None, last_view: None, scroll_offset: egui::Vec2::ZERO, scroll_pt: 0.0, pan_by: None, scroll_to_pt: None, canvas_pt: egui::vec2(800.0, 600.0), reveal: None, saved_revision: 0, copy_wanted: false, snapshot_wanted: false, autoscroll: false, ruler: false, paper_tint: pagify_shell::verbs::PaperTint::White, split: false, },
             edit: EditState { editing_run: None, new_text_box: None, editing_field: None },
             next_text_id: 0x0100_0000,
-            panels: PanelsState { pending_link: None, extract_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, view_settings: false, calculator: None, comments: None, tags: None, },
+            panels: PanelsState { pending_link: None, extract_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, view_settings: false, calculator: None, comments: None, note_view: None, tags: None, },
             bookmarked_pages: std::collections::HashSet::new(),
             joined_groups: Vec::new(),
             organize: OrganizeState { selection_page: 0, organize_selected: Vec::new(), organize_anchor: None, organize_drag: None },
@@ -3257,6 +3278,9 @@ impl PagifyApp {
         self.draw_view_settings(&ctx);
         self.draw_calculator(&ctx);
         self.draw_comments(&ctx);
+        // A note opened from its page icon or the Comments panel — see
+        // `NoteView`. Drawn here with the other panel windows.
+        self.draw_note_view(&ctx);
         self.draw_tags(&ctx);
         self.draw_spell_check(&ctx);
         self.draw_bookmark_panel(&ctx);
@@ -9478,6 +9502,42 @@ impl PagifyApp {
             Ok(rows) => self.tab_mut().panels.comments = Some(CommentsPanel { rows }),
             Err(e) => self.say_error(format!("managecomments: {e}")),
         }
+    }
+
+    /// **A note's words are not on the page.** A PDF note is a small icon in
+    /// a page corner — the words live in the annotation — and this program
+    /// draws nothing of them: `marks` named the mark and the Comments panel
+    /// showed a 60-character snippet, so a note could be written and never
+    /// read back. A click on its icon opens it here; see [`Self::note_view`].
+    ///
+    /// `number` is the 1-based position `foreign_at` gives a click — not
+    /// PDFium's annotation index, which `annotations` can leave gaps in.
+    fn open_note(&mut self, page: usize, number: usize) -> bool {
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else { return false };
+        let Ok(marks) = session.annotations(page) else { return false };
+        let Some(mark) = marks.get(number.wrapping_sub(1)) else { return false };
+        let pdf_core::document::Annotation::Note { contents, .. } = &mark.annotation else {
+            return false;
+        };
+        self.show_note(page, mark.index, contents.clone());
+        true
+    }
+
+    /// [`Self::open_note`] for a caller holding the engine's own annotation
+    /// index rather than a click's listing number — the Comments panel's rows.
+    fn open_note_by_index(&mut self, page: usize, index: usize) -> bool {
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else { return false };
+        let Ok(marks) = session.annotations(page) else { return false };
+        let Some(mark) = marks.iter().find(|mark| mark.index == index) else { return false };
+        let pdf_core::document::Annotation::Note { contents, .. } = &mark.annotation else {
+            return false;
+        };
+        self.show_note(page, mark.index, contents.clone());
+        true
+    }
+
+    fn show_note(&mut self, page: usize, index: usize, contents: String) {
+        self.tab_mut().panels.note_view = Some(NoteView { page, index, contents });
     }
 
     /// Take one annotation off, by the engine's own page and index — the
@@ -16380,9 +16440,23 @@ impl PagifyApp {
         ));
         for (n, mark) in marks.iter().enumerate() {
             let where_ = describe_where(&mark.annotation);
-            self.say_info(format!("  {}. {}{where_}", n + 1, mark.annotation.describe()));
+            // A note's own words are not drawn on the page, so the listing
+            // was the only place one could be seen at all — and it said no
+            // more than "Note". Its opening words are part of what the mark
+            // *is*; clicking it (`open_note`) shows the rest.
+            let says = match &mark.annotation {
+                pdf_core::document::Annotation::Note { contents, .. } => {
+                    format!(" — \"{}\"", short(contents))
+                }
+                _ => String::new(),
+            };
+            self.say_info(format!(
+                "  {}. {}{where_}{says}",
+                n + 1,
+                mark.annotation.describe()
+            ));
         }
-        self.say_info("`removemark <n>` takes one off.");
+        self.say_info("`removemark <n>` takes one off; a note opens when clicked.");
     }
 
     /// Remove an annotation by the number `marks` gave it.

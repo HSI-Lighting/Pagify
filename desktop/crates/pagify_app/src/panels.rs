@@ -758,6 +758,7 @@ impl crate::PagifyApp {
         let mut close = false;
         let mut go_to: Option<usize> = None;
         let mut remove: Option<(usize, usize)> = None;
+        let mut read: Option<(usize, usize)> = None;
 
         egui::Window::new("Comments")
             .id(self.window_id("comments-window"))
@@ -775,6 +776,12 @@ impl crate::PagifyApp {
                         ui.horizontal(|ui| {
                             if ui.button("Go").clicked() {
                                 go_to = Some(row.page);
+                            }
+                            // **A note's words are not on the page** — this
+                            // list has a 60-character snippet, and Read opens
+                            // the whole of it (see `NoteView`).
+                            if row.kind == "note" && ui.button("Read").clicked() {
+                                read = Some((row.page, row.index));
                             }
                             let text = if row.detail.is_empty() {
                                 format!("page {} — {}", row.page + 1, row.kind)
@@ -802,9 +809,73 @@ impl crate::PagifyApp {
         if let Some(page) = go_to {
             self.submit(&format!("page {}", page + 1));
         }
+        if let Some((page, index)) = read {
+            self.open_note_by_index(page, index);
+        }
         if let Some((page, index)) = remove {
+            // The window reading this very note must not outlive it.
+            if self
+                .tab()
+                .panels
+                .note_view
+                .as_ref()
+                .is_some_and(|note| note.page == page && note.index == index)
+            {
+                self.tab_mut().panels.note_view = None;
+            }
             self.remove_annotation(page, index);
         }
+    }
+
+    /// The note being read — its whole text, where the page has only a small
+    /// icon. See [`crate::NoteView`] for why this window has to exist.
+    ///
+    /// Read-only: the engine has no command that changes an annotation's
+    /// contents, and remove-then-add would be a different mark (a new undo
+    /// step, a new annotation index), so the words are offered as a Copy and
+    /// the mark itself as a Remove.
+    pub(crate) fn draw_note_view(&mut self, ctx: &egui::Context) {
+        let Some(note) = self.tab_mut().panels.note_view.take() else { return };
+        let mut open = true;
+        let mut close = false;
+        let mut remove = false;
+        egui::Window::new(format!("Note — page {}", note.page + 1))
+            .id(self.window_id("note-view"))
+            .open(&mut open)
+            .resizable(true)
+            .collapsible(false)
+            .default_width(340.0)
+            .show(ctx, |ui| {
+                ui.set_width(340.0);
+                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                    ui.add(egui::Label::new(&note.contents).wrap());
+                });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Copy").clicked() {
+                        ui.ctx().copy_text(note.contents.clone());
+                    }
+                    if ui
+                        .button("Remove")
+                        .on_hover_text("take the note off the page")
+                        .clicked()
+                    {
+                        remove = true;
+                    }
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if remove {
+            self.remove_annotation(note.page, note.index);
+            return;
+        }
+        if !open || close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            return;
+        }
+        self.tab_mut().panels.note_view = Some(note);
     }
 
     pub(crate) fn draw_bookmark_panel(&mut self, ctx: &egui::Context) {

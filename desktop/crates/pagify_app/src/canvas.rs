@@ -2584,6 +2584,13 @@ impl crate::PagifyApp {
                     self.open_or_report_link(n, &uri);
                     return;
                 }
+                // **A note is unreadable everywhere else.** Its page presence
+                // is a small icon; the words live in the annotation and this
+                // program draws none of them, so clicking the icon is the
+                // thing a click on it should do — see `open_note`.
+                if self.open_note(page, n) {
+                    return;
+                }
                 // A mark this program did not make. It cannot be reshaped —
                 // that would mean reconstructing geometry nobody recorded — but
                 // it can be named and taken away, which is the difference
