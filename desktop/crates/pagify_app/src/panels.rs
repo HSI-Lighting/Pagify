@@ -10,6 +10,7 @@ use crate::{
     ListAction, RenderJob, SignatureList, SignaturePad, SpellCheck, Tool,
 };
 use crate::spelling;
+use crate::text_fields;
 use crate::theme;
 use pagify_shell::page_space::AppPoint;
 use pagify_shell::verbs::{PageTarget, Verb};
@@ -129,11 +130,15 @@ impl crate::PagifyApp {
                 ui.add_space(10.0);
 
                 ui.label("Find:");
-                let find_field = ui.add(
-                    egui::TextEdit::singleline(&mut panel.find)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("word to search for"),
-                );
+                // Defused for risky text — see `text_fields`.
+                let find_risky = text_fields::risky(&panel.find);
+                let find_field = text_fields::add(ui, find_risky, |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut panel.find)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("word to search for"),
+                    )
+                });
                 // A single-line field lets go of the keyboard on Enter, so a
                 // second Enter would reach nothing: it is handed back at once,
                 // which is what lets Enter step through the matches.
@@ -146,11 +151,14 @@ impl crate::PagifyApp {
                 if panel.mode != FindReplaceMode::Find {
                     ui.add_space(6.0);
                     ui.label("Replace with:");
-                    let replace_field = ui.add(
-                        egui::TextEdit::singleline(&mut panel.replace)
-                            .desired_width(f32::INFINITY)
-                            .hint_text("its replacement"),
-                    );
+                    let replace_risky = text_fields::risky(&panel.replace);
+                    let replace_field = text_fields::add(ui, replace_risky, |ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut panel.replace)
+                                .desired_width(f32::INFINITY)
+                                .hint_text("its replacement"),
+                        )
+                    });
                     if replace_field.lost_focus() && enter {
                         entered = true;
                         replace_field.request_focus();
@@ -324,10 +332,14 @@ impl crate::PagifyApp {
                 ui.add_space(8.0);
 
                 ui.label("Change to:");
-                ui.add(
-                    egui::TextEdit::singleline(&mut panel.replacement)
-                        .desired_width(f32::INFINITY),
-                );
+                // Defused for risky text — see `text_fields`.
+                let replacement_risky = text_fields::risky(&panel.replacement);
+                text_fields::add(ui, replacement_risky, |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut panel.replacement)
+                            .desired_width(f32::INFINITY),
+                    )
+                });
 
                 ui.add_space(10.0);
                 let something = !panel.replacement.trim().is_empty();
@@ -852,11 +864,15 @@ impl crate::PagifyApp {
                 ));
                 ui.add_space(6.0);
                 ui.label("Link to:");
-                let field = ui.add(
-                    egui::TextEdit::singleline(&mut pending.url)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("https://…"),
-                );
+                // Defused for risky text — see `text_fields`.
+                let url_risky = text_fields::risky(&pending.url);
+                let field = text_fields::add(ui, url_risky, |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut pending.url)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("https://…"),
+                    )
+                });
                 let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
                 ui.add_space(10.0);
@@ -905,11 +921,15 @@ impl crate::PagifyApp {
             .show(ctx, |ui| {
                 ui.set_width(300.0);
                 ui.label("Title (optional):");
-                let field = ui.add(
-                    egui::TextEdit::singleline(&mut pending.title)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("Article"),
-                );
+                // Defused for risky text — see `text_fields`.
+                let title_risky = text_fields::risky(&pending.title);
+                let field = text_fields::add(ui, title_risky, |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut pending.title)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("Article"),
+                    )
+                });
                 let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
                 ui.add_space(10.0);
@@ -1014,12 +1034,16 @@ impl crate::PagifyApp {
             ui.separator();
             ui.add_space(8.0);
             ui.label("Keep something new");
-            let field = ui.add(
-                egui::TextEdit::multiline(&mut panel.adding)
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(2)
-                    .hint_text("Jane Smith"),
-            );
+            // Defused for risky text — see `text_fields`.
+            let adding_risky = text_fields::risky(&panel.adding);
+            let field = text_fields::add(ui, adding_risky, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut panel.adding)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(2)
+                        .hint_text("Jane Smith"),
+                )
+            });
             // Enter finishes it, since a snippet is usually one line — and
             // Shift-Enter is still how a second line is typed.
             let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -1148,10 +1172,14 @@ impl crate::PagifyApp {
                             ui.vertical(|ui| {
                                 match &mut panel.renaming {
                                     Some((which, typed)) if which == &entry.name => {
-                                        let field = ui.add(
-                                            egui::TextEdit::singleline(typed)
-                                                .desired_width(180.0),
-                                        );
+                                        // Defused for risky text — see `text_fields`.
+                                        let typed_risky = text_fields::risky(typed);
+                                        let field = text_fields::add(ui, typed_risky, |ui| {
+                                            ui.add(
+                                                egui::TextEdit::singleline(typed)
+                                                    .desired_width(180.0),
+                                            )
+                                        });
                                         let entered = field.lost_focus()
                                             && ui.input(|i| i.key_pressed(egui::Key::Enter));
                                         ui.horizontal(|ui| {
@@ -1363,11 +1391,15 @@ impl crate::PagifyApp {
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 ui.label("Called");
-                ui.add(
-                    egui::TextEdit::singleline(&mut pad.name)
-                        .desired_width(200.0)
-                        .hint_text("Signature"),
-                );
+                // Defused for risky text — see `text_fields`.
+                let name_risky = text_fields::risky(&pad.name);
+                text_fields::add(ui, name_risky, |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut pad.name)
+                            .desired_width(200.0)
+                            .hint_text("Signature"),
+                    )
+                });
             });
 
             ui.add_space(12.0);
@@ -1450,12 +1482,17 @@ impl crate::PagifyApp {
             ui.label(&explains);
             ui.add_space(10.0);
 
-            let field = ui.add(
-                egui::TextEdit::singleline(&mut *self.tab_mut().secure_state.password_typed)
-                    .password(true)
-                    .desired_width(f32::INFINITY)
-                    .hint_text("password"),
-            );
+            // Defused for risky text — see `text_fields`.
+            let password_risky =
+                text_fields::risky(&self.tab_mut().secure_state.password_typed);
+            let field = text_fields::add(ui, password_risky, |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut *self.tab_mut().secure_state.password_typed)
+                        .password(true)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("password"),
+                )
+            });
             if !self.tab_mut().secure_state.password_field_focused {
                 field.request_focus();
                 self.tab_mut().secure_state.password_field_focused = true;
@@ -1609,11 +1646,15 @@ impl crate::PagifyApp {
             ));
             ui.add_space(10.0);
             ui.label("Pages:");
-            let field = ui.add(
-                egui::TextEdit::singleline(&mut ask.pages)
-                    .desired_width(f32::INFINITY)
-                    .hint_text("e.g. 1-3,7"),
-            );
+            // Defused for risky text — see `text_fields`.
+            let pages_risky = text_fields::risky(&ask.pages);
+            let field = text_fields::add(ui, pages_risky, |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut ask.pages)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("e.g. 1-3,7"),
+                )
+            });
             if !ask.focused {
                 field.request_focus();
                 ask.focused = true;

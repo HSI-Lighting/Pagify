@@ -236,6 +236,15 @@ pub fn apply(ctx: &egui::Context) {
     ctx.all_styles_mut(|style| {
         style.spacing.item_spacing = egui::vec2(8.0, 8.0);
         style.spacing.button_padding = egui::vec2(12.0, 6.0);
+        // **No selectable labels.** egui's label text selection runs the same
+        // word-selection arithmetic `TextEdit` does, and in this egui version
+        // that arithmetic underflows on right-to-left text (see
+        // `text_fields`). Labels here are chrome — messages, command history,
+        // comments, titles — and nothing in the app selects them on purpose
+        // (page text is selected on the canvas). Turning it off in the one
+        // place every label inherits covers labels added later, too.
+        style.interaction.selectable_labels = false;
+        style.interaction.multi_widget_text_select = false;
     });
 }
 

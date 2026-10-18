@@ -868,3 +868,88 @@ fn a_turned_view_highlights_the_words_under_the_pointer() {
         rect.left, rect.top, rect.right, rect.bottom
     );
 }
+
+/// **Reported from use: the program closed when a Persian replacement was
+/// double-clicked in Search & Replace.** egui 0.36's word selection
+/// underflows when the text lays out with more glyphs than characters (any
+/// right-to-left run) or holds a carriage return — see `text_fields` for the
+/// arithmetic and the one-frame defence. The double-click now simply does not
+/// select the word, and the panel stays up.
+#[test]
+fn double_clicking_a_right_to_left_replacement_does_not_close_the_program() {
+    for text in ["\u{633}\u{644}\u{627}\u{645}", "ab\rcd"] {
+        let mut h = harness("quadrants.pdf");
+        h.state_mut().submit("replace");
+        h.run_steps(2);
+        {
+            let panel = h.state_mut().tab_mut().panels.find_replace.as_mut().expect("panel");
+            panel.mode = FindReplaceMode::ReplaceAll;
+            panel.find = "a".into();
+            panel.replace = text.to_string();
+        }
+        h.run_steps(2);
+        let rect = {
+            let nodes: Vec<_> = h.get_all_by_role(egui::accesskit::Role::TextInput).collect();
+            nodes.get(2).expect("replacement input").rect()
+        };
+        // A word selection runs for a click anywhere on the text, and the
+        // panic case is a click that maps past the end of a right-to-left row.
+        for frac in [0.5f32, 0.95] {
+            let pos = egui::pos2(rect.left() + rect.width() * frac, rect.center().y);
+            for _ in 0..2 {
+                h.input_mut().events.push(egui::Event::PointerMoved(pos));
+                for pressed in [true, false] {
+                    h.input_mut().events.push(egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::default(),
+                    });
+                }
+            }
+            h.run_steps(1);
+        }
+        assert!(
+            h.state().tab().panels.find_replace.is_some(),
+            "the panel did not survive a double click on {text:?}"
+        );
+        assert!(h.state().tab().doc.is_some(), "the document was closed by a double click");
+
+        // The same arithmetic runs for word-wise keyboard moves and deletes —
+        // Alt/Ctrl+Left on the risky text must not take the process down
+        // either (see `text_fields`).
+        let centre = rect.center();
+        h.input_mut().events.push(egui::Event::PointerMoved(centre));
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: centre,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        });
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: centre,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        });
+        h.run_steps(1);
+        let alt = egui::Modifiers { alt: true, ..Default::default() };
+        h.input_mut().events.push(egui::Event::ModifiersChanged(alt));
+        for pressed in [true, false] {
+            h.input_mut().events.push(egui::Event::Key {
+                key: egui::Key::ArrowLeft,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers: alt,
+            });
+        }
+        h.run_steps(1);
+        h.input_mut().events.push(egui::Event::ModifiersChanged(egui::Modifiers::default()));
+        h.run_steps(1);
+        assert!(
+            h.state().tab().panels.find_replace.is_some(),
+            "word-left on {text:?} closed the panel"
+        );
+    }
+}

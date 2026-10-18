@@ -38,6 +38,7 @@ mod ribbon;
 mod view;
 mod workspace;
 mod system_fonts;
+mod text_fields;
 mod text_style_panel;
 mod theme;
 
@@ -3948,14 +3949,18 @@ impl PagifyApp {
                     None if command_open => "type a command",
                     None => "type a command...",
                 };
-                let response = ui.add_sized(
-                    egui::vec2(input_width, 22.0),
-                    egui::TextEdit::singleline(self.cmd.input_mut())
-                        .id(command_id)
-                        .font(egui::FontId::monospace(13.0))
-                        .password(is_password)
-                        .hint_text(hint_text),
-                );
+                // Defused for risky text — see `text_fields`.
+                let command_risky = text_fields::risky(self.cmd.input());
+                let response = text_fields::add(ui, command_risky, |ui| {
+                    ui.add_sized(
+                        egui::vec2(input_width, 22.0),
+                        egui::TextEdit::singleline(self.cmd.input_mut())
+                            .id(command_id)
+                            .font(egui::FontId::monospace(13.0))
+                            .password(is_password)
+                            .hint_text(hint_text),
+                    )
+                });
                 if response.changed() {
                     self.cmd.note_edited();
                 }
@@ -17773,6 +17778,9 @@ impl PagifyApp {
             // own exactly the way a paragraph already could (see
             // `apply_one_edit`), so Enter has to add a line here too
             // rather than submit — a singleline field could never do that.
+            // Defused for risky text — see `text_fields`: a document's own
+            // text can be right-to-left.
+            let editor_risky = text_fields::risky(&edit.buffer);
             let editor = egui::TextEdit::multiline(&mut edit.buffer).layouter(&mut layouter);
             // `.frame(Frame::NONE)`, not just a background colour and zero
             // margin: leaving the frame unset made egui fall back to its own
@@ -17783,7 +17791,9 @@ impl PagifyApp {
             // neither is exactly the boxed, generic-editor look this is
             // meant to avoid; a blank frame leaves only what is drawn
             // explicitly.
-            let response = ui.put(rect, editor.id(id).frame(egui::Frame::NONE));
+            let response = text_fields::add(ui, editor_risky, |ui| {
+                ui.put(rect, editor.id(id).frame(egui::Frame::NONE))
+            });
             // Once, the moment this editor first appears — not every frame,
             // or typing would never be able to give the focus back to
             // whatever else the user clicked afterwards.
@@ -18021,14 +18031,18 @@ fn wrap_typed_last_line(
                     let size_px = ((field.rect.bottom - field.rect.top) * 0.72 * view.scale)
                         .clamp(6.0, 200.0);
                     let id = egui::Id::new(("field-editor", page, field.name.clone()));
-                    let response = ui.put(
-                        rect,
-                        egui::TextEdit::singleline(&mut field.buffer)
-                            .id(id)
-                            .background_color(paper)
-                            .margin(egui::Margin::same(2))
-                            .font(egui::FontId::proportional(size_px)),
-                    );
+                    // Defused for risky text — see `text_fields`.
+                    let buffer_risky = text_fields::risky(&field.buffer);
+                    let response = text_fields::add(ui, buffer_risky, |ui| {
+                        ui.put(
+                            rect,
+                            egui::TextEdit::singleline(&mut field.buffer)
+                                .id(id)
+                                .background_color(paper)
+                                .margin(egui::Margin::same(2))
+                                .font(egui::FontId::proportional(size_px)),
+                        )
+                    });
                     if !field.focused {
                         field.focused = true;
                         response.request_focus();
@@ -18098,14 +18112,19 @@ fn wrap_typed_last_line(
 
         let size_px = (new_text.size * view.scale).clamp(6.0, 200.0);
         let id = egui::Id::new(("new-text-box", page));
-        let response = ui.put(
-            rect,
-            egui::TextEdit::multiline(&mut new_text.buffer)
-                .id(id)
-                .background_color(paper)
-                .margin(egui::Margin::same(2))
-                .font(egui::FontId::proportional(size_px)),
-        );
+        // Defused for risky text — see `text_fields`: a document's own text
+        // can be right-to-left.
+        let buffer_risky = text_fields::risky(&new_text.buffer);
+        let response = text_fields::add(ui, buffer_risky, |ui| {
+            ui.put(
+                rect,
+                egui::TextEdit::multiline(&mut new_text.buffer)
+                    .id(id)
+                    .background_color(paper)
+                    .margin(egui::Margin::same(2))
+                    .font(egui::FontId::proportional(size_px)),
+            )
+        });
 
         if !new_text.focused {
             new_text.focused = true;
