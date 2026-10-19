@@ -1164,3 +1164,34 @@ fn the_field_highlight_covers_exactly_the_fillable_fields() {
     assert!(plain.form_fields_cached().is_empty(), "spread.pdf was expected to have no form");
     assert!(plain.field_highlight_rects(0).is_empty(), "a document with no form got a wash");
 }
+
+/// **A reply thread made in another application shows as a thread in the
+/// Comments panel.** The PDF's own `/IRT` links are read back by the engine,
+/// handed to the panel as depths, and the replies sit under the note they
+/// answer rather than beside it as unrelated marks.
+#[test]
+fn the_comments_panel_indents_replies_under_the_note_they_answer() {
+    let path = crate::tests_support::temp_pdf(
+        "comments-thread",
+        &crate::tests_support::threaded_pdf(),
+    );
+    let mut app = PagifyApp::new(Some(path.to_str().expect("a UTF-8 path")));
+    assert!(app.tab().doc.is_some(), "the threaded fixture did not open");
+
+    app.submit("managecomments");
+    let panel = app.tab().panels.comments.as_ref().expect("the Comments panel did not open");
+    let shape: Vec<(String, usize)> = panel
+        .rows
+        .iter()
+        .map(|row| (row.comment.detail.clone(), row.depth))
+        .collect();
+    assert_eq!(shape.len(), 3, "{shape:?}");
+    assert!(
+        shape.iter().map(|(_, depth)| *depth).collect::<Vec<_>>() == [0, 1, 2],
+        "the replies are not indented under their parent: {shape:?}"
+    );
+    assert!(shape[0].0.contains("first"), "the root does not lead: {shape:?}");
+    assert!(shape[1].0.contains("second"), "the first reply is not under it: {shape:?}");
+
+    std::fs::remove_file(&path).ok();
+}

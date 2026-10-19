@@ -1,6 +1,7 @@
-//! `managecomments`' listing, against a document with a mark added by the
-//! test itself: the round trip that matters is that the index the list hands
-//! out is the index the removal takes.
+//! `managecomments`' listing — against a document with a mark added by the
+//! test itself (the index the list hands out is the index the removal takes),
+//! and against a hand-written document carrying the PDF's own reply links
+//! (`/IRT`), so a thread another application made reads back as one.
 //!
 //! ```text
 //! PAGIFY_PDFIUM_LIB=<pdfium> cargo test -p pagify_shell --test comments
@@ -35,6 +36,7 @@ fn a_note_lands_in_the_list_and_can_be_removed_by_its_listed_index() {
                 },
                 contents: "check this figure".into(),
                 color: pdf_core::document::Color { r: 255, g: 220, b: 0, a: 255 },
+                reply_to: None,
             },
         })
         .expect("add a note");
@@ -83,4 +85,104 @@ fn a_picture_reads_as_its_pixel_size() {
     let row = listed.first().expect("one row");
     assert_eq!(row.kind, "picture");
     assert_eq!(row.detail, "8×6");
+}
+
+/// A small, valid PDF with the objects given, written with a plain xref
+/// table — the shape PDFium opens and `pdf_core::pdf` reads.
+fn pdf(objects: &[&str]) -> Vec<u8> {
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (index, body) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", index + 1).as_bytes());
+    }
+    let xref_at = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes());
+    for offset in &offsets {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+/// One page, three text annotations: a root note, a reply to it, and a reply
+/// to the reply — the PDF's own `/IRT` thread construct.
+fn threaded_pdf() -> Vec<u8> {
+    pdf(&[
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 300] /Contents 4 0 R \
+         /Annots [5 0 R 6 0 R 7 0 R] >>",
+        "<< /Length 0 >>\nstream\n\nendstream",
+        "<< /Type /Annot /Subtype /Text /Rect [10 10 30 30] /Contents (first) \
+         /NM (root) >>",
+        "<< /Type /Annot /Subtype /Text /Rect [40 10 60 30] /Contents (second) \
+         /IRT 5 0 R /RT /R /NM (reply-one) >>",
+        "<< /Type /Annot /Subtype /Text /Rect [70 10 90 30] /Contents (third) \
+         /IRT 6 0 R /RT /R /NM (reply-two) >>",
+    ])
+}
+
+/// Write `bytes` somewhere no other test uses, and hand back the path.
+fn temp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir()
+        .join(format!("pagify-comments-{name}-{}-{n}.pdf", std::process::id()));
+    std::fs::write(&path, bytes).expect("the fixture could not be written");
+    path
+}
+
+fn reply_to(mark: &pdf_core::document::IndexedAnnotation) -> Option<usize> {
+    match &mark.annotation {
+        pdf_core::document::Annotation::Note { reply_to, .. } => *reply_to,
+        other => panic!("expected a note, got {other:?}"),
+    }
+}
+
+/// **A thread made by another application reads back as one.** The engine
+/// reads the file's `/IRT` link, resolves it to the parent annotation the page
+/// already holds, and the panel's own ordering indents the replies under it.
+#[test]
+fn a_thread_another_application_made_reads_back_with_its_replies() {
+    let path = temp("thread", &threaded_pdf());
+    let session = Session::open(&path).expect("open the threaded fixture");
+    let marks = session.annotations(0).expect("annotations");
+    assert_eq!(marks.len(), 3, "three notes were written: {marks:?}");
+    assert_eq!(reply_to(&marks[0]), None, "the root answers nothing");
+    assert_eq!(reply_to(&marks[1]), Some(marks[0].index), "the first reply answers the root");
+    assert_eq!(reply_to(&marks[2]), Some(marks[1].index), "the second answers the first");
+
+    let rows = comments::thread_rows(comments::comments(&session).expect("list"));
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert_eq!(rows.iter().map(|row| row.depth).collect::<Vec<_>>(), [0, 1, 2], "{rows:?}");
+    assert!(rows[0].comment.detail.contains("first"), "{rows:?}");
+    assert!(rows[1].comment.detail.contains("second"), "{rows:?}");
+    std::fs::remove_file(&path).ok();
+}
+
+/// **The thread survives this engine's own save.** PDFium copies annotation
+/// dictionaries it did not write, so a `/IRT` link read from a file is still
+/// there in the file this program writes.
+#[test]
+fn a_thread_survives_this_engines_own_save() {
+    let source = temp("round-trip", &threaded_pdf());
+    let saved = std::env::temp_dir()
+        .join(format!("pagify-comments-saved-{}.pdf", std::process::id()));
+    let session = Session::open(&source).expect("open the threaded fixture");
+    session.save_to(&saved, false).expect("save");
+    let reopened = Session::open(&saved).expect("reopen the saved file");
+    let marks = reopened.annotations(0).expect("annotations");
+    assert_eq!(marks.len(), 3, "{marks:?}");
+    assert_eq!(reply_to(&marks[0]), None);
+    assert_eq!(reply_to(&marks[1]), Some(marks[0].index), "the first reply lost its /IRT");
+    assert_eq!(reply_to(&marks[2]), Some(marks[1].index), "the second lost its /IRT");
+    std::fs::remove_file(&source).ok();
+    std::fs::remove_file(&saved).ok();
 }

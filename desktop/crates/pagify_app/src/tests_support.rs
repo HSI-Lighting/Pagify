@@ -160,3 +160,64 @@ pub fn picture(app: &PagifyApp) -> Vec<u8> {
 pub fn same_picture(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a == b
 }
+
+// -- hand-written PDFs for tests that need a file no fixture has ------------
+
+/// A small, valid PDF with the objects given, written with a plain
+/// cross-reference table — the shape PDFium opens and `pdf_core::pdf` reads.
+///
+/// For the tests whose subject is a PDF construct no committed fixture carries:
+/// a reply thread's `/IRT` link, say. Wrong here is a compile error away, and
+/// nothing is written into the repository.
+pub fn raw_pdf(objects: &[&str]) -> Vec<u8> {
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (index, body) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", index + 1).as_bytes());
+    }
+    let xref_at = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes());
+    for offset in &offsets {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+/// Write a test PDF somewhere no other test uses, and hand back the path.
+///
+/// The name is uniqued by process, a counter and the caller's tag, so parallel
+/// tests never share a file.
+pub fn temp_pdf(tag: &str, bytes: &[u8]) -> std::path::PathBuf {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir()
+        .join(format!("pagify-test-{tag}-{}-{n}.pdf", std::process::id()));
+    std::fs::write(&path, bytes).expect("the test PDF could not be written");
+    path
+}
+
+/// One page, three text annotations: a root note, a reply to it, and a reply
+/// to the reply — the PDF's own `/IRT` thread construct.
+pub fn threaded_pdf() -> Vec<u8> {
+    raw_pdf(&[
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 300] /Contents 4 0 R \
+         /Annots [5 0 R 6 0 R 7 0 R] >>",
+        "<< /Length 0 >>\nstream\n\nendstream",
+        "<< /Type /Annot /Subtype /Text /Rect [10 10 30 30] /Contents (first) \
+         /NM (root) >>",
+        "<< /Type /Annot /Subtype /Text /Rect [40 10 60 30] /Contents (second) \
+         /IRT 5 0 R /RT /R /NM (reply-one) >>",
+        "<< /Type /Annot /Subtype /Text /Rect [70 10 90 30] /Contents (third) \
+         /IRT 6 0 R /RT /R /NM (reply-two) >>",
+    ])
+}

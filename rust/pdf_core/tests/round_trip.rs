@@ -572,6 +572,7 @@ fn a_mark_undone_before_saving_never_reaches_the_file() {
                         b: 0,
                         a: 255,
                     },
+                    reply_to: None,
                 },
             },
             doc.as_document_mut().expect("mutable"),

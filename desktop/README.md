@@ -308,10 +308,12 @@ expanded the `~`.
 - **`comment` is still a no-op word.** `redact`, `certify`/`sign`, `note`,
   `stamp`, `callout` and the Comments panel all work; `comment` itself is
   reserved for *threaded* review comments and says it is planned. The thread
-  model is decided — a note plus `/IRT` reply annotations, PDF-native so other
-  readers show the thread too — but PDFium can only *read* a reply link
-  (`FPDFAnnot_GetLinkedAnnot`), not write one, so the write half needs the
-  engine work recorded in `docs/PLANNED_BUTTONS.md`.
+  model is PDF-native — a note plus `/IRT` reply annotations, so other readers
+  show the thread too. **The read half is built**: a thread another application
+  made is read from the file's `/IRT` links and the Comments panel indents the
+  replies under the note they answer, including after this program's own save.
+  Creating a reply is the part that needs engine work — PDFium reads `/IRT` but
+  has no setter for one — and is recorded in `docs/PLANNED_BUTTONS.md`.
 - **Notarization and code signing have not been run** — they need credentials.
   The scripts are written and the ordering is right; they have not been executed.
 - **Printing is Windows-only.** It has no ribbon or File-tab button; ⌘P/Ctrl+P

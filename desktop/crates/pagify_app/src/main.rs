@@ -817,7 +817,9 @@ struct TagsPanel {
 
 /// The Comments panel's rows, as `pagify_shell::comments` lists them.
 struct CommentsPanel {
-    rows: Vec<pagify_shell::comments::Comment>,
+    /// The comments arranged as threads, with the depth the panel indents by —
+    /// see `pagify_shell::comments::thread_rows`.
+    rows: Vec<pagify_shell::comments::Row>,
 }
 
 /// The Portfolio panel's rows: every file embedded in the document and its
@@ -9948,7 +9950,10 @@ impl PagifyApp {
             return;
         };
         match pagify_shell::comments::comments(&session) {
-            Ok(rows) => self.tab_mut().panels.comments = Some(CommentsPanel { rows }),
+            Ok(rows) => {
+                let rows = pagify_shell::comments::thread_rows(rows);
+                self.tab_mut().panels.comments = Some(CommentsPanel { rows });
+            }
             Err(e) => self.say_error(format!("managecomments: {e}")),
         }
     }
@@ -10006,6 +10011,7 @@ impl PagifyApp {
                     doc.rendered_is_stale();
                 }
                 if let Ok(rows) = pagify_shell::comments::comments(&session) {
+                    let rows = pagify_shell::comments::thread_rows(rows);
                     if let Some(panel) = self.tab_mut().panels.comments.as_mut() {
                         panel.rows = rows;
                     }

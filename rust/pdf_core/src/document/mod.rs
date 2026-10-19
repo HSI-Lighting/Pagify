@@ -2334,6 +2334,20 @@ pub enum Annotation {
         rect: Rect,
         contents: String,
         color: Color,
+        /// The PDFium index of the annotation this note answers, on the same
+        /// page — the file's own `/IRT` (in-reply-to) link, which is how a PDF
+        /// spells a reply. `None` starts a thread.
+        ///
+        /// **Read, not yet written by this engine**: [`Document::annotations`]
+        /// fills it from the file, so a thread another application made reads
+        /// back with its replies attached; creating a reply is a later step —
+        /// PDFium reads `/IRT` but has no public setter for a dictionary
+        /// reference.
+        ///
+        /// Defaulted on the wire: a note written by a build that knew nothing
+        /// of threads is a note that starts one.
+        #[serde(default)]
+        reply_to: Option<usize>,
     },
     /// Words written onto the page, straight or along a curve.
     ///

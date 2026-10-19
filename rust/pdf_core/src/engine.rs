@@ -1142,6 +1142,7 @@ mod tests {
                 },
                 contents: "check this".into(),
                 color: yellow(),
+                reply_to: None,
             },
             Annotation::Image {
                 rect: Rect {

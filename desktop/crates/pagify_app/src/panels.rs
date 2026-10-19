@@ -831,24 +831,38 @@ impl crate::PagifyApp {
                 }
                 egui::ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
                     for row in &panel.rows {
+                        let comment = &row.comment;
                         ui.horizontal(|ui| {
                             if ui.button("Go").clicked() {
-                                go_to = Some(row.page);
+                                go_to = Some(comment.page);
                             }
                             // **A note's words are not on the page** — this
                             // list has a 60-character snippet, and Read opens
                             // the whole of it (see `NoteView`).
-                            if row.kind == "note" && ui.button("Read").clicked() {
-                                read = Some((row.page, row.index));
+                            if comment.kind == "note" && ui.button("Read").clicked() {
+                                read = Some((comment.page, comment.index));
                             }
-                            let text = if row.detail.is_empty() {
-                                format!("page {} — {}", row.page + 1, row.kind)
+                            // A reply is indented under its note, marked with
+                            // the same arrow every threaded list uses — the
+                            // file's own `/IRT` link is what put it there.
+                            let indent = if row.depth == 0 {
+                                String::new()
                             } else {
-                                format!("page {} — {}: {}", row.page + 1, row.kind, row.detail)
+                                format!("{}↳ ", "    ".repeat(row.depth - 1))
+                            };
+                            let text = if comment.detail.is_empty() {
+                                format!("{indent}page {} — {}", comment.page + 1, comment.kind)
+                            } else {
+                                format!(
+                                    "{indent}page {} — {}: {}",
+                                    comment.page + 1,
+                                    comment.kind,
+                                    comment.detail
+                                )
                             };
                             ui.label(text);
                             if ui.button("✕").on_hover_text("remove this one").clicked() {
-                                remove = Some((row.page, row.index));
+                                remove = Some((comment.page, comment.index));
                             }
                         });
                     }

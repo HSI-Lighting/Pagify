@@ -88,12 +88,21 @@ of `note`; a thread is PDF annotations — a root note plus `/IRT` replies — n
 a sidecar file. Recorded here so the work starts from a decision rather than
 repeating it.
 
-**Why it is not written yet: the engine cannot create a reply.** The pinned
-PDFium (chromium/7881) can *read* a reply link — `FPDFAnnot_GetLinkedAnnot`
-supports the `/IRT` key — but its public annotation API has **no setter** for
+**Step 1 — the read — is built.** `Annotation::Note` carries `reply_to`, read
+from the file's `/IRT` link through `FPDFAnnot_GetLinkedAnnot` and resolved to
+the parent annotation by its `/NM` name (or by subtype, rectangle and words
+when it is unnamed — PDFium hands back a *fresh wrapper* for the linked
+annotation, so its handle is never pointer-equal to the page's own;
+measured). `pagify_shell::comments::thread_rows` groups the list into threads,
+the Comments panel indents replies under the note they answer, and the link
+survives this engine's own save and reopen. Tests: a hand-written `/IRT` file
+read back as a thread, a save round trip, the grouping's ordering/cycle/absent
+parent cases, and the panel through the real window.
+
+**Why the write half is not written yet.** The pinned PDFium (chromium/7881)
+can *read* a reply link, but its public annotation API has **no setter** for
 dictionary references: `FPDFAnnot_SetStringValue` writes strings only, and
-there is no `/IRT` (or generic dictionary) writer. So the read half is available
-today and the write half is not.
+there is no `/IRT` (or generic dictionary) writer.
 
 The model, so the next session does not have to choose again:
 
@@ -112,11 +121,8 @@ The model, so the next session does not have to choose again:
 
 The engine work the write half needs, in the order it should be done:
 
-1. **Read:** add `reply_to` to the annotation model (`Annotation::Text` first —
-   the other kinds can follow) from `FPDFAnnot_GetLinkedAnnot(annot, "IRT")`,
-   comparing handles against the page's annotation list to name the parent.
-   Test against a hand-written fixture with two annotations and a `/IRT`
-   reference (the same raw-PDF style `internal_link_tests` uses).
+1. ~~**Read**~~ — done, above. (The model variant is `Annotation::Note`: a PDF
+   `/Text` annotation is a note in this engine, and that is what a reply is.)
 2. **Write:** PDFium cannot set `/IRT`, so a created reply needs a raw
    dictionary edit. The least invasive route is a **save-time appended
    revision**: annotations are created through PDFium as they are today (a
@@ -141,9 +147,8 @@ The engine work the write half needs, in the order it should be done:
    answer can point at `note` for the root and reserve `comment` for threads
    that have replies).
 
-The right next commit is step 1 (the read) alone: it is testable against a
-fixture written in the test, needs no save-path change, and makes the panel's
-thread grouping visible. Steps 2–4 are one commit after that.
+Step 1 is committed; the next commit is step 2 (the write) alone, and steps
+3–4 with it.
 
 ### Tier C — needs engine work (non-form)
 
@@ -204,8 +209,8 @@ From `desktop/`:
 export PAGIFY_PDFIUM_LIB="$PWD/third_party/pdfium/pdfium-linux-x64/lib/libpdfium.so"
 export XDG_CONFIG_HOME="$PWD/target/audit/test-config"   # isolates the real ~/.config/Pagify
 mkdir -p "$XDG_CONFIG_HOME"
-cargo test -p pagify_shell --no-fail-fast     # 802 passed, 0 failed, 37 ignored
-cargo test -p pagify_app --no-fail-fast       # 993 passed, exactly 12 known failures, 15 ignored
+cargo test -p pagify_shell --no-fail-fast     # 809 passed, 0 failed, 37 ignored
+cargo test -p pagify_app --no-fail-fast       # 995 passed, exactly 12 known failures, 15 ignored
 cargo check --workspace --all-targets         # clean
 ```
 

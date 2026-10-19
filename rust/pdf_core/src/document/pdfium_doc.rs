@@ -2457,26 +2457,92 @@ impl Document for PdfiumDocument {
         let bindings = pdfium()?.bindings();
         let count = unsafe { bindings.FPDFPage_GetAnnotCount(page.handle) };
 
-        let mut marks = Vec::new();
+        // **Every annotation is opened once and kept open for the pass.** A
+        // reply is named only by the handle its `/IRT` resolves to, so the
+        // parent's PDFium index has to be found among the page's own
+        // annotations here, where all of them are open — the per-annotation
+        // read has no way to name another annotation. A page holds tens at
+        // most.
+        let mut handles: Vec<(usize, FPDF_ANNOTATION)> = Vec::new();
         for i in 0..count.max(0) {
             let annot = unsafe { bindings.FPDFPage_GetAnnot(page.handle, i) };
             if annot.is_null() {
                 continue;
             }
-            let read = self.read_annotation(annot, &space);
-            unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+            handles.push((i as usize, annot));
+        }
 
-            // The index carried is PDFium's, not this list's. A page holding one
-            // form widget followed by one highlight yields a single entry whose
-            // index is 1 — addressing it as 0 would delete the widget.
-            if let Some(annotation) = read? {
-                marks.push(IndexedAnnotation {
-                    index: i as usize,
-                    annotation,
-                });
+        // **The parent is found by what the annotation says, not by its
+        // handle.** `FPDFAnnot_GetLinkedAnnot` hands back a fresh wrapper
+        // rather than the page's own handle for that annotation, so the two
+        // pointers are never equal — measured, which is why this compares the
+        // identity a PDF annotation actually carries: its `/NM` name when it
+        // has one, otherwise its subtype, rectangle and words.
+        let names: Vec<Option<String>> = handles
+            .iter()
+            .map(|(_, annot)| read_annotation_string(*annot, "NM"))
+            .collect();
+        let mut parents: HashMap<usize, usize> = HashMap::new();
+        for (index, annot) in &handles {
+            let parent = unsafe { bindings.FPDFAnnot_GetLinkedAnnot(*annot, "IRT") };
+            if parent.is_null() {
+                continue;
+            }
+            let parent_name = read_annotation_string(parent, "NM");
+            let mut found = None;
+            for (position, (parent_index, candidate)) in handles.iter().enumerate() {
+                if parent_index == index {
+                    continue;
+                }
+                let same = match &parent_name {
+                    // Both named: the name is the identity, so a different
+                    // name is a different annotation even if the rest matches.
+                    Some(name) => names[position].as_ref() == Some(name),
+                    // Unnamed parent: fall back to subtype, rectangle and
+                    // words, which are what a note is made of.
+                    None => same_unnamed_annotation(parent, *candidate),
+                };
+                if same {
+                    // Two annotations can say exactly the same thing; with no
+                    // way to tell them apart the reply is left unthreaded
+                    // rather than attached to a guess.
+                    if found.is_some() {
+                        found = None;
+                        break;
+                    }
+                    found = Some(*parent_index);
+                }
+            }
+            unsafe { bindings.FPDFPage_CloseAnnot(parent) };
+            if let Some(parent_index) = found {
+                parents.insert(*index, parent_index);
             }
         }
-        Ok(marks)
+
+        // **Closed on every path**, the failure one included: these are
+        // PDFium's handles, and a page that cannot be read must not leak one
+        // per annotation on its way to the error.
+        let outcome = (|| -> Result<Vec<IndexedAnnotation>> {
+            let mut marks = Vec::new();
+            for (index, annot) in &handles {
+                let read = self.read_annotation(*annot, &space, parents.get(index).copied());
+
+                // The index carried is PDFium's, not this list's. A page holding
+                // one form widget followed by one highlight yields a single entry
+                // whose index is 1 — addressing it as 0 would delete the widget.
+                if let Some(annotation) = read? {
+                    marks.push(IndexedAnnotation {
+                        index: *index,
+                        annotation,
+                    });
+                }
+            }
+            Ok(marks)
+        })();
+        for (_, annot) in handles {
+            unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+        }
+        outcome
     }
 
     fn internal_links(&self, page_index: usize) -> Result<Vec<InternalLink>> {
@@ -4077,7 +4143,7 @@ impl Document for PdfiumDocument {
             // drawing.
             let name = read_annotation_string(annot, SIGNATURE_KEY);
             let read = match &name {
-                Some(_) => self.read_annotation(annot, &space),
+                Some(_) => self.read_annotation(annot, &space, None),
                 None => Ok(None),
             };
             unsafe { bindings.FPDFPage_CloseAnnot(annot) };
@@ -4121,7 +4187,7 @@ impl Document for PdfiumDocument {
             }
             let name = read_annotation_string(annot, SIGNATURE_KEY);
             let read = match &name {
-                Some(_) => self.read_annotation(annot, &space),
+                Some(_) => self.read_annotation(annot, &space, None),
                 None => Ok(None),
             };
             // The id, if this picture kept one — read here, while the
@@ -4189,7 +4255,7 @@ impl Document for PdfiumDocument {
                 unsafe { bindings.FPDFPage_CloseAnnot(annot) };
                 continue;
             }
-            let read = self.read_annotation(annot, &space);
+            let read = self.read_annotation(annot, &space, None);
             let rotation = read_rotation(annot);
             unsafe { bindings.FPDFPage_CloseAnnot(annot) };
 
@@ -7581,7 +7647,7 @@ impl DocumentMut for PdfiumDocument {
                     "page {page_index} has no annotation at index {index}"
                 )));
             }
-            let read = self.read_annotation(annot, &space);
+            let read = self.read_annotation(annot, &space, None);
             unsafe { bindings.FPDFPage_CloseAnnot(annot) };
 
             read?.ok_or(PdfError::Unsupported(
@@ -17488,6 +17554,7 @@ impl PdfiumDocument {
         &self,
         annot: FPDF_ANNOTATION,
         space: &PageSpace,
+        reply_to: Option<usize>,
     ) -> Result<Option<Annotation>> {
         let bindings = pdfium()?.bindings();
         let subtype = unsafe { bindings.FPDFAnnot_GetSubtype(annot) };
@@ -17610,6 +17677,9 @@ impl PdfiumDocument {
                     },
                     contents: read_annotation_string(annot, "Contents").unwrap_or_default(),
                     color: colour,
+                    // The file's own `/IRT` link, already resolved to the
+                    // parent's PDFium index by the page-level read.
+                    reply_to,
                 }
             }
 
@@ -17933,6 +18003,32 @@ fn read_rotation(annot: FPDF_ANNOTATION) -> f32 {
 }
 
 /// Read a UTF-16LE string value off an annotation.
+/// Whether `other` is the same annotation as the wrapper `parent`, when
+/// neither carries a `/NM` name — compared by the things a note is made of:
+/// its subtype, its rectangle and its words.
+///
+/// Only a fallback: a parent **without** `/NM` cannot be paired with a named
+/// candidate, because the same dictionary would have read the same name. Two
+/// annotation wrappers over one dictionary read identically, so this is exact
+/// rather than approximate; the risk is only a document holding two identical
+/// unnamed annotations, which is why the caller refuses an ambiguous match.
+fn same_unnamed_annotation(parent: FPDF_ANNOTATION, other: FPDF_ANNOTATION) -> bool {
+    let Ok(bindings) = pdfium().map(|pdfium| pdfium.bindings()) else { return false };
+    let subtype = |annot: FPDF_ANNOTATION| unsafe { bindings.FPDFAnnot_GetSubtype(annot) };
+    if unsafe { subtype(parent) } != unsafe { subtype(other) } {
+        return false;
+    }
+    let rect = |annot: FPDF_ANNOTATION| {
+        let mut found = FS_RECTF { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 };
+        let ok = unsafe { bindings.FPDFAnnot_GetRect(annot, &mut found) } != 0;
+        ok.then_some([found.left, found.top, found.right, found.bottom])
+    };
+    if rect(parent) != rect(other) {
+        return false;
+    }
+    read_annotation_string(parent, "Contents") == read_annotation_string(other, "Contents")
+}
+
 fn read_annotation_string(annot: FPDF_ANNOTATION, key: &str) -> Option<String> {
     let bindings = pdfium().ok()?.bindings();
 

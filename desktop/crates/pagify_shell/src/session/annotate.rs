@@ -29,7 +29,12 @@ impl Session {
     ) -> Result<pdf_core::engine::EditState> {
         self.execute(pdf_core::command::Command::AddAnnotation {
             page_index: page,
-            annotation: pdf_core::document::Annotation::Note { rect, contents, color: colour },
+            annotation: pdf_core::document::Annotation::Note {
+                rect,
+                contents,
+                color: colour,
+                reply_to: None,
+            },
         })
     }
 

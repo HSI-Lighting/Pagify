@@ -213,6 +213,7 @@ fn page_with_a_highlight_and_a_note() -> Harness<'static, PagifyApp> {
                 rect: pdf_core::document::Rect { left: 300.0, top: 300.0, right: 320.0, bottom: 320.0 },
                 contents: "a note".into(),
                 color: pdf_core::document::Color { r: 255, g: 224, b: 102, a: 255 },
+                reply_to: None,
             },
         })
         .expect("a note");
@@ -5459,6 +5460,29 @@ fn toolsettings_panel_toggles_the_field_highlight() {
     h.state_mut().submit("toolsettings");
     h.run_steps(1);
     assert!(!h.state().tab().panels.tool_settings, "the panel did not close");
+}
+
+/// **The Comments panel shows a thread as a thread, in the real window.** The
+/// replies another application linked with `/IRT` are indented under their
+/// note with the arrow a threaded list uses.
+#[test]
+fn the_comments_panel_indents_a_reply_thread() {
+    use egui_kittest::kittest::Queryable;
+
+    let path = crate::tests_support::temp_pdf(
+        "comments-panel",
+        &crate::tests_support::threaded_pdf(),
+    );
+    let app = PagifyApp::new(Some(path.to_str().expect("a UTF-8 path")));
+    assert!(app.tab().doc.is_some(), "the threaded fixture did not open");
+    let mut h = harness_from(app);
+    h.state_mut().submit("managecomments");
+    h.run_steps(2);
+    assert!(
+        h.query_all_by_label_contains("↳").count() == 2,
+        "the two replies are not indented in the Comments panel"
+    );
+    std::fs::remove_file(&path).ok();
 }
 
 /// The Comment tab's Accounting Calculator: the panel opens, draws its keys
