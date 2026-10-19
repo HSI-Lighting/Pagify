@@ -354,6 +354,12 @@ pub enum Effect {
     RunRemoveMark(usize),
     /// Add a note.
     RunNote(String),
+    /// Open the Comments panel, where threads are listed.
+    ShowCommentThreads,
+    /// Start a review-comment thread where `note` would put a note.
+    RunComment(String),
+    /// Answer the note the Comments panel last picked.
+    RunCommentReply(String),
     /// Step the undo/redo history; `undo` picks the direction.
     UndoRedo { undo: bool },
     /// Set the pointer tool (select or hand).
@@ -538,7 +544,9 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::MarkText(_)
         | Verb::ListMarks
         | Verb::RemoveMark(_)
-        | Verb::Note(_) => plan_files_and_text(verb, env),
+        | Verb::Note(_)
+        | Verb::Comment { .. }
+        | Verb::CommentReply(_) => plan_files_and_text(verb, env),
         Verb::Undo
         | Verb::Redo
         | Verb::Pointer(_)
@@ -833,6 +841,13 @@ fn plan_files_and_text(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::ListMarks => vec![Effect::RunListMarks],
         Verb::RemoveMark(n) => vec![Effect::RunRemoveMark(*n)],
         Verb::Note(text) => vec![Effect::RunNote(text.clone())],
+        // Threaded comments: bare `comment` shows the threads; words start one
+        // — a thread's first mark is a note; `reply` answers the picked note.
+        Verb::Comment { text } => match text {
+            None => vec![Effect::ShowCommentThreads],
+            Some(text) => vec![Effect::RunComment(text.clone())],
+        },
+        Verb::CommentReply(text) => vec![Effect::RunCommentReply(text.clone())],
         // Sharing and reading: the local half of the Share tab, and View's
         // Read. Each hands off to the OS or opens a panel; none touches the
         // document, which is why they are effects rather than page operations.
@@ -1255,6 +1270,9 @@ mod tests {
             (Verb::ListMarks, vec![Effect::RunListMarks]),
             (Verb::RemoveMark(2), vec![Effect::RunRemoveMark(2)]),
             (Verb::Note("t".into()), vec![Effect::RunNote("t".into())]),
+            (Verb::Comment { text: None }, vec![Effect::ShowCommentThreads]),
+            (Verb::Comment { text: Some("t".into()) }, vec![Effect::RunComment("t".into())]),
+            (Verb::CommentReply("t".into()), vec![Effect::RunCommentReply("t".into())]),
             (Verb::ShareLink, vec![Effect::ShareLink]),
             (Verb::RevealDocument, vec![Effect::RevealDocument]),
             (Verb::EmailDocument, vec![Effect::EmailDocument]),

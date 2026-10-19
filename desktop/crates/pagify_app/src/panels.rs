@@ -7,7 +7,7 @@
 use crate::overlay::PageView;
 use crate::{
     compact_page_spec, page_to_image, paint_signature, short, view_height, Awaiting, DetailTile, FindReplaceMode,
-    ListAction, RenderJob, SignatureList, SignaturePad, SpellCheck, Tool,
+    ListAction, RenderJob, ReplyView, SignatureList, SignaturePad, SpellCheck, Tool,
 };
 use crate::spelling;
 use crate::text_fields;
@@ -817,6 +817,7 @@ impl crate::PagifyApp {
         let mut go_to: Option<usize> = None;
         let mut remove: Option<(usize, usize)> = None;
         let mut read: Option<(usize, usize)> = None;
+        let mut reply: Option<(usize, usize)> = None;
 
         egui::Window::new("Comments")
             .id(self.window_id("comments-window"))
@@ -841,6 +842,17 @@ impl crate::PagifyApp {
                             // the whole of it (see `NoteView`).
                             if comment.kind == "note" && ui.button("Read").clicked() {
                                 read = Some((comment.page, comment.index));
+                            }
+                            // **A reply is a PDF reply annotation** (`/IRT`),
+                            // so answering here writes a thread any reader
+                            // shows, not a Pagify-only comment list.
+                            if comment.kind == "note"
+                                && ui
+                                    .button("Reply")
+                                    .on_hover_text("answer this note in its thread")
+                                    .clicked()
+                            {
+                                reply = Some((comment.page, comment.index));
                             }
                             // A reply is indented under its note, marked with
                             // the same arrow every threaded list uses — the
@@ -883,6 +895,13 @@ impl crate::PagifyApp {
         }
         if let Some((page, index)) = read {
             self.open_note_by_index(page, index);
+        }
+        if let Some((page, index)) = reply {
+            // Picking a note is what `comment reply <words>` answers, so the
+            // panel's own button and the typed word agree about the target.
+            self.tab_mut().panels.reply_to = Some((page, index));
+            self.tab_mut().panels.reply_view =
+                Some(ReplyView { page, parent: index, text: String::new() });
         }
         if let Some((page, index)) = remove {
             // The window reading this very note must not outlive it.
@@ -948,6 +967,60 @@ impl crate::PagifyApp {
             return;
         }
         self.tab_mut().panels.note_view = Some(note);
+    }
+
+    /// The reply being written to one note.
+    ///
+    /// `comment reply <words>` and the Comments panel's Reply button share this
+    /// window's target, so whichever way the words are given they land in the
+    /// same thread. Add appends the reply annotation and re-reads the panel's
+    /// rows — every index after it changes.
+    pub(crate) fn draw_reply_view(&mut self, ctx: &egui::Context) {
+        let Some(mut reply) = self.tab_mut().panels.reply_view.take() else { return };
+        let mut open = true;
+        let mut close = false;
+        let mut add = false;
+        egui::Window::new(format!("Reply — page {}", reply.page + 1))
+            .id(self.window_id("reply-view"))
+            .open(&mut open)
+            .resizable(true)
+            .collapsible(false)
+            .default_width(340.0)
+            .show(ctx, |ui| {
+                ui.set_width(340.0);
+                ui.label(
+                    "Answering the note the Comments panel picked. The reply is a PDF reply \
+                     annotation (/IRT), so other readers show the thread too.",
+                );
+                ui.add_space(4.0);
+                ui.add(
+                    egui::TextEdit::multiline(&mut reply.text)
+                        .desired_rows(4)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("what to say"),
+                );
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Add reply").clicked() {
+                        add = true;
+                    }
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if add {
+            self.add_reply(reply.page, reply.parent, &reply.text);
+            // A failed add keeps the words; a taken one closes the window.
+            if self.tab().panels.reply_view.is_none() && !reply.text.trim().is_empty() {
+                return;
+            }
+        }
+        if !open || close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            return;
+        }
+        self.tab_mut().panels.reply_view = Some(reply);
     }
 
     /// The Portfolio panel — the Conversion tab's PDF Portfolio. Lists the

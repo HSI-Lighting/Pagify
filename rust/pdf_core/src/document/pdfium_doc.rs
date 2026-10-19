@@ -294,6 +294,22 @@ struct Wanted {
 /// why it could not be read.
 type CachedVault = std::result::Result<Option<Vault>, String>;
 
+/// A reply this session made, waiting for a save to write its `/IRT` link.
+///
+/// **Why the link cannot be set on the annotation directly.** PDFium's public
+/// API reads `/IRT` (`FPDFAnnot_GetLinkedAnnot`) but has no setter for a
+/// dictionary *reference* — `FPDFAnnot_SetStringValue` writes strings only —
+/// so the reply is created through PDFium like any note and the one reference
+/// it cannot hold is appended to the saved file instead (see
+/// [`PdfiumDocument::patch_reply_links`]). The two annotations are named here
+/// because object numbers and annotation indexes both move while the document
+/// is edited; `/NM` names are what survive to the save.
+struct PendingReply {
+    page_index: usize,
+    reply_nm: String,
+    parent_nm: String,
+}
+
 pub struct PdfiumDocument {
     document: PdfDocument<'static>,
     source: DocumentSource,
@@ -451,6 +467,18 @@ pub struct PdfiumDocument {
     /// whose entry was already consumed by `apply_signatures`, or dropped
     /// with a closed document) can never collide with a live one.
     next_alpha_id: u64,
+    /// Reply links this session has made but PDFium cannot write. Each names
+    /// the reply and the note it answers by the `/NM` names set on them when
+    /// the reply was created, because object numbers and annotation indexes
+    /// both move while the document is edited and a name does not. Written to
+    /// the file by [`Self::patch_reply_links`] at save time.
+    pending_replies: Vec<PendingReply>,
+    /// The next `/NM` annotation name [`Self::annotation_name`] hands out.
+    /// Paired with a per-document random prefix, so a name cannot collide
+    /// with one this file already carries.
+    next_annotation_name: u64,
+    /// A random prefix for the names above, made when the document is opened.
+    annotation_name_prefix: String,
     /// **Temporary.** Where [`Self::set_runs_in_stream`] last spent its own
     /// time — overwritten on every call, read back by
     /// [`Self::last_batch_timing`] right after, for a caller to put in its
@@ -875,6 +903,9 @@ impl PdfiumDocument {
             substituted: None,
             image_alpha: std::collections::HashMap::new(),
             next_alpha_id: 0,
+            pending_replies: Vec::new(),
+            next_annotation_name: 0,
+            annotation_name_prefix: Self::annotation_name_prefix(),
             last_batch_timing: Vec::new(),
         })
     }
@@ -2539,10 +2570,23 @@ impl Document for PdfiumDocument {
             }
             Ok(marks)
         })();
-        for (_, annot) in handles {
-            unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+        for ((_, annot), _) in handles.iter().zip(names.iter()) {
+            unsafe { bindings.FPDFPage_CloseAnnot(*annot) };
         }
-        outcome
+        let mut marks = outcome?;
+
+        // A reply this session made carries no `/IRT` in PDFium's dictionary —
+        // it is written at save time — so its relation is merged in from
+        // `pending_replies` by the names set when it was created.
+        if !self.pending_replies.is_empty() {
+            let places: Vec<(usize, Option<&str>)> = handles
+                .iter()
+                .zip(names.iter())
+                .map(|((index, _), name)| (*index, name.as_deref()))
+                .collect();
+            self.merge_pending_replies(page_index, &places, &mut marks);
+        }
+        Ok(marks)
     }
 
     fn internal_links(&self, page_index: usize) -> Result<Vec<InternalLink>> {
@@ -7429,10 +7473,19 @@ impl DocumentMut for PdfiumDocument {
                 "annotation was created but the page reports none".into(),
             ));
         }
+        let created = (count - 1) as usize;
+
+        // **A reply is a note plus one reference PDFium cannot write.** The
+        // note itself is made above, like any other; the link back to what it
+        // answers is named here, while both handles are in hand, and appended
+        // to the file at save time — see `PendingReply`.
+        if let Annotation::Note { reply_to: Some(parent), .. } = annotation {
+            self.record_reply_link(&page, page_index, created, *parent)?;
+        }
 
         // An `/Annots` entry, not page content — see `exact_content`.
         self.touch_annotation();
-        Ok((count - 1) as usize)
+        Ok(created)
     }
 
     fn remove_annotation(&mut self, page_index: usize, index: usize) -> Result<()> {
@@ -7445,15 +7498,36 @@ impl DocumentMut for PdfiumDocument {
         })?;
 
         let page = RawPage::open(self.document.handle(), page_number)?;
-        let removed = unsafe {
-            pdfium()?
-                .bindings()
-                .FPDFPage_RemoveAnnot(page.handle, annot_index)
+        let bindings = pdfium()?.bindings();
+        // The name the save patch would know this annotation by, read before
+        // it goes: a relation naming it can never be written afterwards.
+        let removed_name = {
+            let annot = unsafe { bindings.FPDFPage_GetAnnot(page.handle, annot_index) };
+            let name = if annot.is_null() {
+                None
+            } else {
+                read_annotation_string(annot, "NM")
+            };
+            if !annot.is_null() {
+                unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+            }
+            name
         };
+        let removed = unsafe { bindings.FPDFPage_RemoveAnnot(page.handle, annot_index) };
         if removed == 0 {
             return Err(PdfError::Pdfium(format!(
                 "page {page_index} has no annotation at index {index}"
             )));
+        }
+
+        // Every relation that names it — as the reply or as the note it
+        // answers — is unwritable now, so it goes with the annotation. The
+        // other end simply stays a note.
+        if let Some(name) = removed_name {
+            self.pending_replies.retain(|pending| {
+                !(pending.page_index == page_index
+                    && (pending.reply_nm == name || pending.parent_nm == name))
+            });
         }
 
         // See `exact_content`: removing an annotation is not a content edit.
@@ -7648,11 +7722,31 @@ impl DocumentMut for PdfiumDocument {
                 )));
             }
             let read = self.read_annotation(annot, &space, None);
+            let name = read_annotation_string(annot, "NM");
             unsafe { bindings.FPDFPage_CloseAnnot(annot) };
 
-            read?.ok_or(PdfError::Unsupported(
+            let mut annotation = read?.ok_or(PdfError::Unsupported(
                 "erasing an annotation of a kind this engine does not model",
-            ))?
+            ))?;
+            // **A reply made in this session has no `/IRT` in PDFium's
+            // dictionary yet** — that is written at save time — so its
+            // relation lives in `pending_replies`. Keeping it on the record
+            // lets an undo put the reply back as a reply rather than as a
+            // loose note.
+            if let (Annotation::Note { reply_to, .. }, Some(name)) = (&mut annotation, name) {
+                if reply_to.is_none() {
+                    if let Some(pending) = self.pending_replies.iter().find(|pending| {
+                        pending.page_index == page_index && pending.reply_nm == name
+                    }) {
+                        if let Ok(Some(parent_index)) =
+                            self.annotation_index_by_name(page.handle, &pending.parent_nm)
+                        {
+                            *reply_to = Some(parent_index);
+                        }
+                    }
+                }
+            }
+            annotation
         };
 
         self.remove_annotation(page_index, index)?;
@@ -7903,6 +7997,12 @@ impl DocumentMut for PdfiumDocument {
                 .map_err(|e| PdfError::Pdfium(e.to_string()))?
         };
 
+        // The reply links, before any password goes on: the appended revision
+        // is plaintext, so it must be part of what gets encrypted. See
+        // `patch_reply_links` for why a document already carrying a password
+        // refuses this rather than writing a revision nothing can read.
+        let bytes = self.patch_reply_links(bytes)?;
+
         // The password goes on last, because everything after it would be
         // writing plaintext into a file that is supposed to be ciphertext.
         let bytes = match &self.security {
@@ -7970,6 +8070,10 @@ impl DocumentMut for PdfiumDocument {
             return Ok(());
         }
         let bytes = close_trailing_xref_object(self.save_with_flags(FPDF_INCREMENTAL)?);
+        // The one reference PDFium's annotation API cannot write — see
+        // `PendingReply`. Done before the bytes reach the destination, so a
+        // failure leaves the file on disk exactly as it was.
+        let bytes = self.patch_reply_links(bytes)?;
         dest.write_all(&bytes)?;
         self.dirty = false;
         // What PDFium just wrote is, by construction, exactly its current
@@ -18371,6 +18475,447 @@ fn find_last(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     find_last(haystack, needle).is_some()
+}
+
+impl PdfiumDocument {
+    /// A name for a new annotation: random per document, so it cannot collide
+    /// with a name the file already carries, and monotonic within the session.
+    fn annotation_name(&mut self) -> String {
+        self.next_annotation_name += 1;
+        format!("{}-{}", self.annotation_name_prefix, self.next_annotation_name)
+    }
+
+    /// The per-document prefix [`Self::annotation_name`] uses.
+    fn annotation_name_prefix() -> String {
+        let mut tag = [0u8; 8];
+        Self::randomness(&mut tag);
+        tag.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    /// Name both ends of a reply and remember the relation for the save patch.
+    ///
+    /// **A note that has no `/NM` is given one.** That is metadata, not
+    /// content — the format defines `/NM` as the annotation's unique name, and
+    /// nothing draws it — and it is what lets a save find the note again after
+    /// any number of edits have moved its object number and its index.
+    fn record_reply_link(
+        &mut self,
+        page: &RawPage,
+        page_index: usize,
+        reply_index: usize,
+        parent_index: usize,
+    ) -> Result<()> {
+        if parent_index == reply_index || parent_index >= reply_index {
+            return Err(PdfError::InvalidArgument(
+                "a reply must answer an annotation that was already on the page".into(),
+            ));
+        }
+        let bindings = pdfium()?.bindings();
+        let open = |index: usize| -> Result<FPDF_ANNOTATION> {
+            let at = i32::try_from(index).map_err(|_| {
+                PdfError::InvalidArgument(format!("annotation index {index} is out of range"))
+            })?;
+            let annot = unsafe { bindings.FPDFPage_GetAnnot(page.handle, at) };
+            if annot.is_null() {
+                Err(PdfError::InvalidArgument(format!(
+                    "page {page_index} has no annotation at index {index} — a reply must \
+                     answer one that is on the page"
+                )))
+            } else {
+                Ok(annot)
+            }
+        };
+        let parent = open(parent_index)?;
+        let reply = open(reply_index)?;
+
+        let parent_nm = match read_annotation_string(parent, "NM").filter(|name| !name.is_empty()) {
+            Some(name) => name,
+            None => {
+                let name = self.annotation_name();
+                if unsafe { bindings.FPDFAnnot_SetStringValue_str(parent, "NM", &name) } == 0 {
+                    unsafe {
+                        bindings.FPDFPage_CloseAnnot(parent);
+                        bindings.FPDFPage_CloseAnnot(reply);
+                    }
+                    return Err(PdfError::Pdfium(
+                        "could not name the note a reply answers".into(),
+                    ));
+                }
+                name
+            }
+        };
+        let reply_nm = self.annotation_name();
+        let named = unsafe { bindings.FPDFAnnot_SetStringValue_str(reply, "NM", &reply_nm) } != 0;
+        unsafe {
+            bindings.FPDFPage_CloseAnnot(parent);
+            bindings.FPDFPage_CloseAnnot(reply);
+        }
+        if !named {
+            return Err(PdfError::Pdfium("could not name the reply annotation".into()));
+        }
+        self.pending_replies.push(PendingReply { page_index, reply_nm, parent_nm });
+        Ok(())
+    }
+
+    /// The PDFium index of the page's annotation carrying `name`, or `None`.
+    fn annotation_index_by_name(&self, page: FPDF_PAGE, name: &str) -> Result<Option<usize>> {
+        let bindings = pdfium()?.bindings();
+        let count = unsafe { bindings.FPDFPage_GetAnnotCount(page) };
+        for index in 0..count.max(0) {
+            let annot = unsafe { bindings.FPDFPage_GetAnnot(page, index) };
+            if annot.is_null() {
+                continue;
+            }
+            let found = read_annotation_string(annot, "NM").as_deref() == Some(name);
+            unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+            if found {
+                return Ok(Some(index as usize));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Put this session's own reply links back onto the annotations it made.
+    ///
+    /// `places` pairs each opened annotation's PDFium index with the name read
+    /// from it; a relation's two names are resolved against those, and a reply
+    /// whose parent is no longer there stays a plain note.
+    fn merge_pending_replies(
+        &self,
+        page_index: usize,
+        places: &[(usize, Option<&str>)],
+        marks: &mut [IndexedAnnotation],
+    ) {
+        let index_of = |name: &str| {
+            places
+                .iter()
+                .find(|(_, candidate)| candidate.as_deref() == Some(name))
+                .map(|(index, _)| *index)
+        };
+        for pending in self.pending_replies.iter().filter(|pending| pending.page_index == page_index)
+        {
+            let (Some(reply), Some(parent)) =
+                (index_of(&pending.reply_nm), index_of(&pending.parent_nm))
+            else {
+                continue;
+            };
+            let Some(mark) = marks.iter_mut().find(|mark| mark.index == reply) else { continue };
+            if let Annotation::Note { reply_to, .. } = &mut mark.annotation {
+                if reply_to.is_none() {
+                    *reply_to = Some(parent);
+                }
+            }
+        }
+    }
+
+    /// Append the `/IRT` links PDFium cannot write, as one extra revision.
+    ///
+    /// A no-op when this session made no replies. Refused — rather than
+    /// skipped — when the bytes being written are or stay ciphertext, because
+    /// the revision appended here is plaintext and a reader could not decrypt
+    /// it.
+    ///
+    /// **PDFium writes a page's `/Annots` as inline dictionaries.** A reference
+    /// `/IRT` needs an indirect object to point at, so the two annotations a
+    /// relation names are given object numbers of their own first — and the
+    /// page object rewritten to name them — before the reply gains its `/IRT`.
+    /// Measured on a full-copy save, which is the shape this must handle:
+    /// `/Annots [<</Type/Annot/NM(e4…-1)>> <</Type/Annot/NM(e4…-2)>>]`.
+    fn patch_reply_links(&self, bytes: Vec<u8>) -> Result<Vec<u8>> {
+        use crate::pdf::{Dict, Object};
+
+        if self.pending_replies.is_empty() {
+            return Ok(bytes);
+        }
+        if self.already_secured || self.remove_password || self.security.is_some() {
+            return Err(PdfError::Unsupported(
+                "a reply thread cannot be written while the document's password is being kept \
+                 or changed — the revision that carries the /IRT links would be plaintext",
+            ));
+        }
+        let file = crate::pdf::File::parse(&bytes).map_err(|_| {
+            PdfError::Unsupported(
+                "a reply thread cannot be written to this file: its cross-reference table \
+                 is not the plain kind this program appends to",
+            )
+        })?;
+        let pages = page_objects(&file)?;
+
+        let mut replacements: Vec<(u32, Vec<u8>)> = Vec::new();
+        // Dictionaries that are about to be written as objects of their own:
+        // an inline annotation the page's `/Annots` held, given a number so a
+        // reply link can point at it.
+        let mut fresh: HashMap<u32, Dict> = HashMap::new();
+        let mut next_number = file.next_object_number()?;
+
+        for page_index in 0..pages.len() {
+            let pendings: Vec<&PendingReply> = self
+                .pending_replies
+                .iter()
+                .filter(|pending| pending.page_index == page_index)
+                .collect();
+            if pendings.is_empty() {
+                continue;
+            }
+            let page_number = *pages.get(page_index).ok_or_else(|| {
+                PdfError::Internal(format!(
+                    "the reply thread could not be written: page {} is not in the saved file",
+                    page_index + 1
+                ))
+            })?;
+            let Ok(Object::Dict(mut page_dict)) = file.object(page_number) else {
+                return Err(PdfError::Internal(
+                    "the page a reply is on is not a dictionary in the saved file".into(),
+                ));
+            };
+            let Some(Object::Array(mut annots)) = page_dict.get(b"Annots").cloned() else {
+                return Err(PdfError::Internal(
+                    "the reply thread could not be written: the page's annotations are not \
+                     in the saved file"
+                        .into(),
+                ));
+            };
+            let names: Vec<Option<String>> =
+                annots.iter().map(|entry| annotation_name_of(&file, entry)).collect();
+            let find = |name: &str| {
+                names.iter().position(|candidate| candidate.as_deref() == Some(name))
+            };
+
+            // Give the two annotations each relation names a number, once
+            // between all relations of this page.
+            for pending in &pendings {
+                for name in [&pending.reply_nm, &pending.parent_nm] {
+                    let Some(position) = find(name) else {
+                        return Err(PdfError::Internal(format!(
+                            "the reply thread could not be written: the annotation `{name}` \
+                             was not in the saved file"
+                        )));
+                    };
+                    if let Object::Dict(direct) = &annots[position] {
+                        let number = next_number;
+                        next_number += 1;
+                        fresh.insert(number, direct.clone());
+                        annots[position] = Object::Reference(number, 0);
+                    }
+                }
+            }
+
+            // The reply gains its `/IRT`, pointing at the note it answers.
+            for pending in &pendings {
+                let reply_position = find(&pending.reply_nm).expect("found above");
+                let parent_position = find(&pending.parent_nm).expect("found above");
+                let (Some(reply_number), Some(parent_number)) = (
+                    object_number_of(&annots[reply_position]),
+                    object_number_of(&annots[parent_position]),
+                ) else {
+                    return Err(PdfError::Internal(
+                        "a reply annotation did not become an object of its own".into(),
+                    ));
+                };
+                if reply_number == parent_number {
+                    return Err(PdfError::Internal("a reply annotation points at itself".into()));
+                }
+                let mut dict = match fresh.get(&reply_number) {
+                    Some(dict) => dict.clone(),
+                    None => match file.object(reply_number) {
+                        Ok(Object::Dict(dict)) => dict,
+                        _ => {
+                            return Err(PdfError::Internal(
+                                "a reply annotation is not a dictionary in the saved file".into(),
+                            ))
+                        }
+                    },
+                };
+                dict.set(b"IRT", Object::Reference(parent_number, 0));
+                match fresh.get_mut(&reply_number) {
+                    // A newly made object: its dictionary *is* what gets written
+                    // into the extra objects, so the link goes there.
+                    Some(stored) => *stored = dict,
+                    // An object PDFium wrote: one replacement carries its new
+                    // dictionary in the appended revision.
+                    None => {
+                        let mut body = Vec::new();
+                        crate::pdf::write_object(&mut body, &Object::Dict(dict));
+                        replacements.push((reply_number, body));
+                    }
+                }
+            }
+
+            page_dict.set(b"Annots", Object::Array(annots));
+            let mut body = Vec::new();
+            crate::pdf::write_object(&mut body, &Object::Dict(page_dict));
+            replacements.push((page_number, body));
+        }
+
+        let mut extra: Vec<(u32, Vec<u8>)> = Vec::with_capacity(fresh.len());
+        for (number, dict) in fresh {
+            let mut body = Vec::new();
+            crate::pdf::write_object(&mut body, &Object::Dict(dict));
+            extra.push((number, body));
+        }
+
+        // An appended revision rather than a rewrite: every object PDFium wrote
+        // stays exactly where it is, so whatever a signature covered it still
+        // covers — and the reply link is the only thing this session adds.
+        file.append_revision(&replacements, &extra)
+    }
+}
+
+/// The object number a `/Annots` entry names, directly or through a reference.
+fn object_number_of(entry: &crate::pdf::Object) -> Option<u32> {
+    match entry {
+        crate::pdf::Object::Reference(number, _) => Some(*number),
+        _ => None,
+    }
+}
+
+/// An annotation dictionary's `/NM` name, whether the entry is an inline
+/// dictionary or a reference to one.
+fn annotation_name_of(file: &crate::pdf::File, entry: &crate::pdf::Object) -> Option<String> {
+    match entry {
+        crate::pdf::Object::Dict(dict) => annotation_name_from(dict),
+        crate::pdf::Object::Reference(number, _) => match file.object(*number) {
+            Ok(crate::pdf::Object::Dict(dict)) => annotation_name_from(&dict),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn annotation_name_from(dict: &crate::pdf::Dict) -> Option<String> {
+    if dict.get(b"Type").and_then(crate::pdf::Object::as_name) != Some(&b"Annot"[..]) {
+        return None;
+    }
+    dict.get(b"NM").and_then(pdf_text_string)
+}
+
+/// The page dictionaries of a file, in page order, walked from the catalogue's
+/// `/Pages` tree.
+fn page_objects(file: &crate::pdf::File) -> Result<Vec<u32>> {
+    use crate::pdf::Object;
+
+    let Some(Object::Reference(root, _)) = file.trailer().get(b"Root") else {
+        return Err(PdfError::InvalidArgument("the catalogue cannot be read".into()));
+    };
+    let Ok(Object::Dict(catalog)) = file.object(*root) else {
+        return Err(PdfError::InvalidArgument("the catalogue cannot be read".into()));
+    };
+    let Some(Object::Reference(pages, _)) = catalog.get(b"Pages") else {
+        return Err(PdfError::InvalidArgument("the page tree cannot be read".into()));
+    };
+
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let mut stack = vec![*pages];
+    while let Some(number) = stack.pop() {
+        if !seen.insert(number) {
+            continue;
+        }
+        let Ok(Object::Dict(node)) = file.object(number) else { continue };
+        if node.get(b"Type").and_then(Object::as_name) == Some(&b"Pages"[..]) {
+            if let Some(Object::Array(kids)) = node.get(b"Kids") {
+                for kid in kids.iter().rev() {
+                    if let Object::Reference(kid, _) = kid {
+                        stack.push(*kid);
+                    }
+                }
+            }
+        } else {
+            out.push(number);
+        }
+    }
+    Ok(out)
+}
+
+/// A PDF literal string's meaning: its escape sequences decoded back to the
+/// bytes they stand for.
+///
+/// PDFium writes a string it was given as a `FPDF_WIDESTRING` back as a literal
+/// whose UTF-16BE bytes are octal-escaped (`(\376\377\000p\000a…)`), so
+/// reading the raw bytes would compare an escape sequence against a name, not
+/// a name against a name — the first save this was tried on failed exactly
+/// that way.
+fn pdf_literal_bytes(raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut at = 0;
+    while let Some(&byte) = raw.get(at) {
+        if byte != b'\\' {
+            out.push(byte);
+            at += 1;
+            continue;
+        }
+        at += 1;
+        let Some(&next) = raw.get(at) else { break };
+        match next {
+            b'n' => out.push(b'\n'),
+            b'r' => out.push(b'\r'),
+            b't' => out.push(b'\t'),
+            b'b' => out.push(0x08),
+            b'f' => out.push(0x0C),
+            b'(' | b')' | b'\\' => out.push(next),
+            b'\r' => {
+                at += 1;
+                if raw.get(at) == Some(&b'\n') {
+                    at += 1;
+                }
+                continue;
+            }
+            b'\n' => {}
+            b'0'..=b'7' => {
+                let mut value = 0u16;
+                let mut digits = 0;
+                while digits < 3 {
+                    match raw.get(at) {
+                        Some(digit @ b'0'..=b'7') => {
+                            value = value * 8 + u16::from(digit - b'0');
+                            at += 1;
+                            digits += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                out.push((value & 0xFF) as u8);
+                continue;
+            }
+            other => out.push(other),
+        }
+        at += 1;
+    }
+    out
+}
+
+/// A PDF text string's bytes as words: a literal string or a hex string, with
+/// the UTF-16BE byte-order mark the format uses for anything non-Latin-1.
+///
+/// Only this engine's own annotation names need reading back, and they are
+/// plain ASCII; the escaped-literal and UTF-16 paths are here because PDFium
+/// writes a `FPDF_WIDESTRING` back as a PDF text string, which may be either.
+fn pdf_text_string(object: &crate::pdf::Object) -> Option<String> {
+    let bytes = match object {
+        crate::pdf::Object::LiteralString(raw) => pdf_literal_bytes(raw),
+        crate::pdf::Object::HexString(raw) => {
+            let digits: Vec<u8> = raw.iter().copied().filter(|byte| !byte.is_ascii_whitespace()).collect();
+            if !digits.iter().all(u8::is_ascii_hexdigit) {
+                return None;
+            }
+            let mut out = Vec::with_capacity(digits.len() / 2);
+            for pair in digits.chunks(2) {
+                let high = (pair[0] as char).to_digit(16)?;
+                let low = pair.get(1).map_or(Some(0), |low| (*low as char).to_digit(16))?;
+                out.push(((high << 4) | low) as u8);
+            }
+            out
+        }
+        _ => return None,
+    };
+    if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
+        let units: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+            .collect();
+        return Some(String::from_utf16_lossy(&units));
+    }
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 #[cfg(test)]

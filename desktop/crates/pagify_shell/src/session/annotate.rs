@@ -38,6 +38,33 @@ impl Session {
         })
     }
 
+    /// Answer a note with a reply that stays in the PDF's own thread.
+    ///
+    /// `parent` is PDFium's annotation index for the note, on `page` — the
+    /// same index the Comments panel hands out. The reply is created like any
+    /// note; the `/IRT` link that makes it a reply is the one reference
+    /// PDFium's annotation API cannot write, so it is appended to the file
+    /// when the document is saved (see `pdf_core`'s `PendingReply`). The
+    /// thread shows in this session as soon as the reply is added.
+    pub fn reply_note(
+        &self,
+        page: usize,
+        parent: usize,
+        rect: pdf_core::document::Rect,
+        contents: String,
+        colour: pdf_core::document::Color,
+    ) -> Result<pdf_core::engine::EditState> {
+        self.execute(pdf_core::command::Command::AddAnnotation {
+            page_index: page,
+            annotation: pdf_core::document::Annotation::Note {
+                rect,
+                contents,
+                color: colour,
+                reply_to: Some(parent),
+            },
+        })
+    }
+
     /// Make one rectangle of the page a clickable link to `uri`.
     ///
     /// One call per line — see [`pdf_core::document::Annotation::Link`]'s own

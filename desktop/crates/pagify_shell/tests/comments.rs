@@ -186,3 +186,130 @@ fn a_thread_survives_this_engines_own_save() {
     std::fs::remove_file(&source).ok();
     std::fs::remove_file(&saved).ok();
 }
+
+/// A note to hang a thread on, added through the engine's ordinary path.
+fn note(session: &Session, page: usize, left: f32, words: &str) -> usize {
+    session
+        .note(
+            page,
+            pdf_core::document::Rect {
+                left,
+                top: 20.0,
+                right: left + 20.0,
+                bottom: 40.0,
+            },
+            words.into(),
+            pdf_core::document::Color { r: 255, g: 220, b: 0, a: 255 },
+        )
+        .expect("a note");
+    session
+        .annotations(page)
+        .expect("annotations")
+        .into_iter()
+        .find(|mark| matches!(&mark.annotation, pdf_core::document::Annotation::Note { contents, .. } if contents == words))
+        .expect("the note just added")
+        .index
+}
+
+fn note_contents(mark: &pdf_core::document::IndexedAnnotation) -> String {
+    match &mark.annotation {
+        pdf_core::document::Annotation::Note { contents, .. } => contents.clone(),
+        other => panic!("expected a note, got {other:?}"),
+    }
+}
+
+/// **The write half: a reply made here is a reply before the file is touched,
+/// and the `/IRT` link reaches the file on save.** The in-session answer comes
+/// from the engine's own record; the reopened one from the file's dictionary,
+/// which is the proof that the save patch wrote it.
+#[test]
+fn a_reply_made_here_is_threaded_before_and_after_a_save() {
+    let source = std::env::temp_dir().join(format!("pagify-reply-src-{}.pdf", std::process::id()));
+    let saved = std::env::temp_dir().join(format!("pagify-reply-saved-{}.pdf", std::process::id()));
+    std::fs::copy(fixture("two-column.pdf"), &source).expect("copy the fixture");
+
+    let session = Session::open(&source).expect("open");
+    let root = note(&session, 0, 20.0, "root words");
+    session
+        .reply_note(
+            0,
+            root,
+            pdf_core::document::Rect { left: 40.0, top: 34.0, right: 60.0, bottom: 54.0 },
+            "reply words".into(),
+            pdf_core::document::Color { r: 255, g: 220, b: 0, a: 255 },
+        )
+        .expect("a reply");
+
+    // Before any save: the engine's own record says it is a reply.
+    let marks = session.annotations(0).expect("annotations");
+    let reply = marks
+        .iter()
+        .find(|mark| note_contents(mark) == "reply words")
+        .expect("the reply just added");
+    assert_eq!(reply_to(reply), Some(root), "the reply does not answer the root");
+    let rows = comments::thread_rows(comments::comments(&session).expect("list"));
+    assert_eq!(rows.iter().map(|row| row.depth).collect::<Vec<_>>(), [0, 1], "{rows:?}");
+
+    // After a save and reopen: the same relation, read from the file's `/IRT`.
+    session.save_to(&saved, false).expect("save");
+    let reopened = Session::open(&saved).expect("reopen the saved file");
+    let marks = reopened.annotations(0).expect("annotations");
+    assert_eq!(marks.len(), 2, "the two notes are not both in the saved file: {marks:?}");
+    let root_mark = marks
+        .iter()
+        .find(|mark| note_contents(mark) == "root words")
+        .expect("the root in the saved file");
+    let reply_mark = marks
+        .iter()
+        .find(|mark| note_contents(mark) == "reply words")
+        .expect("the reply in the saved file");
+    assert_eq!(
+        reply_to(reply_mark),
+        Some(root_mark.index),
+        "the saved file's /IRT link does not name the root"
+    );
+
+    std::fs::remove_file(&source).ok();
+    std::fs::remove_file(&saved).ok();
+}
+
+/// Removing a reply takes its link with it: the file that is saved afterwards
+/// has the root and no reply, rather than a link to something gone.
+#[test]
+fn a_removed_reply_leaves_the_file_without_a_thread() {
+    let source = std::env::temp_dir().join(format!("pagify-reply-rm-src-{}.pdf", std::process::id()));
+    let saved = std::env::temp_dir().join(format!("pagify-reply-rm-saved-{}.pdf", std::process::id()));
+    std::fs::copy(fixture("two-column.pdf"), &source).expect("copy the fixture");
+
+    let session = Session::open(&source).expect("open");
+    let root = note(&session, 0, 20.0, "root words");
+    session
+        .reply_note(
+            0,
+            root,
+            pdf_core::document::Rect { left: 40.0, top: 34.0, right: 60.0, bottom: 54.0 },
+            "reply words".into(),
+            pdf_core::document::Color { r: 255, g: 220, b: 0, a: 255 },
+        )
+        .expect("a reply");
+    let reply = session
+        .annotations(0)
+        .expect("annotations")
+        .into_iter()
+        .find(|mark| note_contents(mark) == "reply words")
+        .expect("the reply")
+        .index;
+    session
+        .execute(pdf_core::command::Command::RemoveAnnotation { page_index: 0, index: reply })
+        .expect("remove the reply");
+
+    session.save_to(&saved, false).expect("save");
+    let reopened = Session::open(&saved).expect("reopen the saved file");
+    let marks = reopened.annotations(0).expect("annotations");
+    assert_eq!(marks.len(), 1, "the removed reply is still in the saved file: {marks:?}");
+    assert_eq!(reply_to(&marks[0]), None);
+    assert_eq!(note_contents(&marks[0]), "root words");
+
+    std::fs::remove_file(&source).ok();
+    std::fs::remove_file(&saved).ok();
+}

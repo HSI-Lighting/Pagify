@@ -5485,6 +5485,71 @@ fn the_comments_panel_indents_a_reply_thread() {
     std::fs::remove_file(&path).ok();
 }
 
+/// **The Comments panel's Reply button and the reply window work together**:
+/// press Reply on a note, type an answer, Add appends a reply annotation that
+/// is threaded under the note. The typeable command for the same thing is
+/// `comment reply <words>`, tested through dispatch in `tests.rs`.
+#[test]
+fn the_comments_panel_reply_window_adds_a_threaded_reply() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut h = harness("two-column.pdf");
+    h.state_mut().submit("note the root note");
+    h.run_steps(1);
+    h.state_mut().submit("managecomments");
+    h.run_steps(1);
+
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Reply").click();
+    h.run_steps(1);
+    let field = h.get_by_role(egui::accesskit::Role::MultilineTextInput);
+    field.focus();
+    field.type_text("agreed");
+    h.run_steps(1);
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Add reply").click();
+    h.run_steps(1);
+
+    let said = said(&h);
+    assert!(said.contains("reply added"), "{said}");
+    let notes: Vec<(String, Option<usize>)> = h
+        .state()
+        .tab()
+        .doc
+        .as_ref()
+        .expect("a document")
+        .session
+        .annotations(0)
+        .expect("annotations")
+        .into_iter()
+        .filter_map(|mark| match mark.annotation {
+            pdf_core::document::Annotation::Note { contents, reply_to, .. } => {
+                Some((contents, reply_to))
+            }
+            _ => None,
+        })
+        .collect();
+    let root_index = h
+        .state()
+        .tab()
+        .doc
+        .as_ref()
+        .expect("a document")
+        .session
+        .annotations(0)
+        .expect("annotations")
+        .into_iter()
+        .find(|mark| {
+            matches!(&mark.annotation, pdf_core::document::Annotation::Note { contents, .. }
+                if contents.contains("root note"))
+        })
+        .expect("the note's index")
+        .index;
+    let reply = notes
+        .iter()
+        .find(|(contents, _)| contents.contains("agreed"))
+        .expect("the reply");
+    assert_eq!(reply.1, Some(root_index), "the reply is not threaded under the note");
+}
+
 /// The Comment tab's Accounting Calculator: the panel opens, draws its keys
 /// for a few frames, and closes on a second press. The arithmetic itself is
 /// `pagify_shell::calculator`'s own tests.

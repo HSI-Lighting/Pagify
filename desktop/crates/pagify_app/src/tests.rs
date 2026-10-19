@@ -1195,3 +1195,86 @@ fn the_comments_panel_indents_replies_under_the_note_they_answer() {
 
     std::fs::remove_file(&path).ok();
 }
+
+// -- threaded comments, through the real dispatch ---------------------------
+
+fn comments_note(
+    app: &PagifyApp,
+) -> Vec<(String, Option<usize>)> {
+    app.tab()
+        .doc
+        .as_ref()
+        .expect("a document")
+        .session
+        .annotations(0)
+        .expect("annotations")
+        .into_iter()
+        .filter_map(|mark| match mark.annotation {
+            pdf_core::document::Annotation::Note { contents, reply_to, .. } => {
+                Some((contents, reply_to))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// `comment <words>` starts a thread where `note` puts a note, and says where
+/// the replies go — the word is the Comment tab's, not the Edit tab's.
+#[test]
+fn comment_starts_a_thread_and_says_where_replies_go() {
+    let mut app = app_on("two-column.pdf");
+    app.submit("comment check this figure");
+    let said = said(&app);
+    assert!(said.contains("thread started"), "{said}");
+    assert!(said.contains("Comments panel"), "{said}");
+    let notes = comments_note(&app);
+    assert_eq!(notes.len(), 1, "no thread was started: {notes:?}");
+    assert!(notes[0].0.contains("check this figure"), "{notes:?}");
+    assert_eq!(notes[0].1, None, "the thread's first mark answers nothing");
+}
+
+/// Bare `comment` opens the thread list and says what a reply is, rather than
+/// toggling a panel that is already open.
+#[test]
+fn comment_opens_the_thread_list() {
+    let mut app = app_on("two-column.pdf");
+    app.submit("comment");
+    assert!(app.tab().panels.comments.is_some(), "the Comments panel did not open");
+    assert!(said(&app).contains("Comments panel lists"), "{}", said(&app));
+}
+
+/// `comment reply <words>` answers the note the Comments panel picked, and the
+/// reply is threaded in the engine from the moment it is made.
+#[test]
+fn comment_reply_answers_the_picked_note() {
+    let mut app = app_on("two-column.pdf");
+    app.submit("note the root note");
+    app.submit("managecomments");
+    let panel = app.tab().panels.comments.as_ref().expect("the Comments panel");
+    let (page, parent) = {
+        let row = panel.rows.first().expect("one comment");
+        (row.comment.page, row.comment.index)
+    };
+    app.tab_mut().panels.reply_to = Some((page, parent));
+
+    app.submit("comment reply agreed, fixing it");
+    let said = said(&app);
+    assert!(said.contains("reply added"), "{said}");
+    let notes = comments_note(&app);
+    assert_eq!(notes.len(), 2, "the reply is not on the page: {notes:?}");
+    let reply = notes
+        .iter()
+        .find(|(contents, _)| contents.contains("agreed"))
+        .expect("the reply");
+    assert_eq!(reply.1, Some(parent), "the reply does not answer the note");
+}
+
+/// Without a picked note there is nothing to answer, and the box says so
+/// instead of putting a loose note on the page.
+#[test]
+fn comment_reply_without_a_picked_note_says_so() {
+    let mut app = app_on("two-column.pdf");
+    app.submit("comment reply hello");
+    assert!(said(&app).contains("open the Comments panel"), "{}", said(&app));
+    assert!(comments_note(&app).is_empty(), "a reply was made anyway");
+}

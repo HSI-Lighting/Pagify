@@ -800,6 +800,12 @@ struct PanelsState {
     /// [`NoteView`]. A note is a small icon on the page whose words this
     /// program draws nowhere else.
     note_view: Option<NoteView>,
+    /// The note the Comments panel last picked to answer — `(page, PDFium
+    /// annotation index)`. What `comment reply <words>` answers, and what the
+    /// reply window is open on.
+    reply_to: Option<(usize, usize)>,
+    /// The reply window, while it is open on this tab.
+    reply_view: Option<ReplyView>,
     /// The Tags panel's rows, while it is open on this tab — the page in
     /// view's structure tree, flattened with indents. Read once on opening.
     tags: Option<TagsPanel>,
@@ -843,6 +849,21 @@ struct NoteView {
     index: usize,
     /// Every word it carries, as typed.
     contents: String,
+}
+
+/// A reply being written to one note.
+///
+/// **A thread is the PDF's own.** The reply lands as a PDF reply annotation
+/// (`/IRT`) under the note it answers, so a reader that is not Pagify shows the
+/// thread too; the one reference PDFium cannot write is appended to the file
+/// when it is saved.
+struct ReplyView {
+    /// The page the note being answered is on, zero-based.
+    page: usize,
+    /// PDFium's own annotation index of that note.
+    parent: usize,
+    /// What is being typed.
+    text: String,
 }
 
 /// The rail/Organize selection and drag: which page the rail follows, which
@@ -1305,7 +1326,7 @@ impl DocTab {
             view_state: ViewState { page: 0, zoom: ZoomMode::Fit, rotation: Rotation::None, view: None, hover_view: None, viewport_rect: None, anchor_offset: None, last_view: None, scroll_offset: egui::Vec2::ZERO, scroll_pt: 0.0, pan_by: None, scroll_to_pt: None, canvas_pt: egui::vec2(800.0, 600.0), reveal: None, saved_revision: 0, copy_wanted: false, snapshot_wanted: false, autoscroll: false, ruler: false, paper_tint: pagify_shell::verbs::PaperTint::White, split: false, },
             edit: EditState { editing_run: None, new_text_box: None, editing_field: None },
             next_text_id: 0x0100_0000,
-            panels: PanelsState { pending_link: None, extract_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, view_settings: false, tool_settings: false, calculator: None, comments: None, note_view: None, tags: None, portfolio: None, },
+            panels: PanelsState { pending_link: None, extract_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, view_settings: false, tool_settings: false, calculator: None, comments: None, note_view: None, reply_to: None, reply_view: None, tags: None, portfolio: None, },
             bookmarked_pages: std::collections::HashSet::new(),
             joined_groups: Vec::new(),
             organize: OrganizeState { selection_page: 0, organize_selected: Vec::new(), organize_anchor: None, organize_drag: None },
@@ -3671,6 +3692,7 @@ impl PagifyApp {
         // A note opened from its page icon or the Comments panel — see
         // `NoteView`. Drawn here with the other panel windows.
         self.draw_note_view(&ctx);
+        self.draw_reply_view(&ctx);
         self.draw_portfolio(&ctx);
         self.draw_tags(&ctx);
         self.draw_spell_check(&ctx);
@@ -17393,6 +17415,117 @@ impl PagifyApp {
                 }
             }
             Err(e) => self.say_error(format!("note: {e}")),
+        }
+    }
+
+    /// `comment <words>`: start a review-comment thread where `note` puts a
+    /// note — a thread's first mark *is* a note, so the two cannot disagree
+    /// about where it is. The Comments panel lists it, and replies go under it
+    /// there.
+    fn add_comment(&mut self, text: String) {
+        let page = self.tab().view_state.page;
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let rect = pdf_core::document::Rect { left: 24.0, top: 24.0, right: 44.0, bottom: 44.0 };
+        match session.note(page, rect, text, MARKUP_INK) {
+            Ok(_) => {
+                self.say_info(
+                    "thread started at the top-left of the page — the Comments panel lists it; \
+                     press Reply there (or `comment reply <words>`) to answer it.",
+                );
+                if let Some(doc) = &mut self.tab_mut().doc {
+                    doc.rendered_is_stale();
+                }
+            }
+            Err(e) => self.say_error(format!("comment: {e}")),
+        }
+    }
+
+    /// Bare `comment`: show the threads. Opens the panel rather than toggling
+    /// it, because the word means "where are the threads", not "put the list
+    /// away".
+    fn show_comment_threads(&mut self) {
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            self.say_error("nothing open.");
+            return;
+        };
+        match pagify_shell::comments::comments(&session) {
+            Ok(rows) => {
+                let count = rows.len();
+                let rows = pagify_shell::comments::thread_rows(rows);
+                self.tab_mut().panels.comments = Some(CommentsPanel { rows });
+                self.say_info(format!(
+                    "the Comments panel lists {count} mark(s); replies sit under the note they \
+                     answer. A reply is a PDF reply annotation, so other readers show the \
+                     thread too."
+                ));
+            }
+            Err(e) => self.say_error(format!("comment: {e}")),
+        }
+    }
+
+    /// `comment reply <words>`: answer the note the Comments panel last picked.
+    fn add_comment_reply(&mut self, text: &str) {
+        let Some((page, parent)) = self.tab().panels.reply_to else {
+            self.say_error(
+                "comment reply: open the Comments panel and press Reply on the note first",
+            );
+            return;
+        };
+        self.add_reply(page, parent, text);
+    }
+
+    /// Add one reply under a note, and keep the panel in step with it.
+    ///
+    /// The reply's icon is placed just below-right of the note's, so a thread
+    /// of icons does not hide itself under the first one.
+    fn add_reply(&mut self, page: usize, parent: usize, text: &str) {
+        let text = text.trim();
+        if text.is_empty() {
+            self.say_error("comment reply: the words to answer with");
+            return;
+        }
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let Ok(marks) = session.annotations(page) else {
+            self.say_error("comment reply: the page's annotations could not be read");
+            return;
+        };
+        let Some(pdf_core::document::Annotation::Note { rect, .. }) =
+            marks.iter().find(|mark| mark.index == parent).map(|mark| &mark.annotation)
+        else {
+            self.say_error("comment reply: that mark is not a note any more.");
+            return;
+        };
+        let rect = pdf_core::document::Rect {
+            left: rect.left + 14.0,
+            top: rect.top + 14.0,
+            right: rect.right + 14.0,
+            bottom: rect.bottom + 14.0,
+        };
+        match session.reply_note(page, parent, rect, text.to_string(), MARKUP_INK) {
+            Ok(_) => {
+                if let Some(doc) = &mut self.tab_mut().doc {
+                    doc.rendered_is_stale();
+                }
+                // The panel's rows are a snapshot: the reply just changed every
+                // index after it. Re-read them the way a removal does.
+                if let Ok(rows) = pagify_shell::comments::comments(&session) {
+                    let rows = pagify_shell::comments::thread_rows(rows);
+                    if let Some(panel) = self.tab_mut().panels.comments.as_mut() {
+                        panel.rows = rows;
+                    }
+                }
+                self.say_info(
+                    "reply added in the thread — it is a PDF reply annotation, written into \
+                     the file when the document is saved.",
+                );
+            }
+            Err(e) => self.say_error(format!("comment reply: {e}")),
         }
     }
 

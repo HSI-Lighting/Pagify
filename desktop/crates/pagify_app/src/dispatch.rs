@@ -226,6 +226,9 @@ impl crate::PagifyApp {
             | Effect::RunListMarks
             | Effect::RunRemoveMark(_)
             | Effect::RunNote(_)
+            | Effect::ShowCommentThreads
+            | Effect::RunComment(_)
+            | Effect::RunCommentReply(_)
             | Effect::ReportShortcuts => self.apply_text(effect),
             Effect::UndoRedo { .. }
             | Effect::SetPointer(_)
@@ -823,6 +826,9 @@ impl crate::PagifyApp {
             Effect::RunListMarks => self.list_marks(),
             Effect::RunRemoveMark(n) => self.remove_mark(n),
             Effect::RunNote(text) => self.add_note(text),
+            Effect::ShowCommentThreads => self.show_comment_threads(),
+            Effect::RunComment(text) => self.add_comment(text),
+            Effect::RunCommentReply(text) => self.add_comment_reply(&text),
             Effect::ReportShortcuts => self.report_shortcuts(),
             other => unreachable!("apply_text was handed {other:?}"),
         }

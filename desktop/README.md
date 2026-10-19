@@ -259,13 +259,13 @@ expanded the `~`.
 
 ### Not done, and honestly so
 
-- **Twenty-eight verbs are named and not built** (`verbs::PLANNED`) — 26 of
+- **Twenty-seven verbs are named and not built** (`verbs::PLANNED`) — 25 of
   the 209 ribbon buttons across the tabs answer "planned for <phase>, and not
   built yet". Most of Form's authoring tools (15 of that tab's 22 buttons that
   create fields rather than fill them), five PagiSign, three Convert, one View
   (Assistant), and one each on Home and Accessibility.
   Seventeen of those verbs are the Form-authoring block, which is **out of
-  scope for now** — the rest have a tiered plan in
+  scope for now** — the rest are Tier C/D work (engine or service) planned in
   `docs/PLANNED_BUTTONS.md`. Nothing is greyed out; the answer appears under
   the command bar when the button is pressed.
 - **Sharing is local, not online.** `email` and `sendreview` draft a message in
@@ -305,15 +305,16 @@ expanded the `~`.
   never written into the page, and the choice lives in `settings.json`.
 - **There is no AI tab.** The mockup's Assistant is a single planned button
   (View tab), not an empty tab waiting for a feature.
-- **`comment` is still a no-op word.** `redact`, `certify`/`sign`, `note`,
-  `stamp`, `callout` and the Comments panel all work; `comment` itself is
-  reserved for *threaded* review comments and says it is planned. The thread
-  model is PDF-native — a note plus `/IRT` reply annotations, so other readers
-  show the thread too. **The read half is built**: a thread another application
-  made is read from the file's `/IRT` links and the Comments panel indents the
-  replies under the note they answer, including after this program's own save.
-  Creating a reply is the part that needs engine work — PDFium reads `/IRT` but
-  has no setter for one — and is recorded in `docs/PLANNED_BUTTONS.md`.
+- **Threaded review comments are the PDF's own.** `comment <words>` starts a
+  thread at the top-left of the page, bare `comment` opens the Comments panel
+  where replies are indented under the note they answer, and
+  `comment reply <words>` (or the panel's Reply button) answers the note the
+  panel last picked. Each reply is a PDF reply annotation (`/IRT`), so a reader
+  that is not Pagify shows the thread too — and a thread another application
+  made is read back the same way. PDFium reads `/IRT` but cannot write one, so
+  saving appends the one reference it cannot write as an extra revision; a
+  document whose password is being kept or changed refuses that save rather
+  than appending a plaintext revision.
 - **Notarization and code signing have not been run** — they need credentials.
   The scripts are written and the ordering is right; they have not been executed.
 - **Printing is Windows-only.** It has no ribbon or File-tab button; ⌘P/Ctrl+P
@@ -338,7 +339,7 @@ view       page <n|next|prev|first|last>   zoom <percent|in|out|fit|width|actual
 organize   extract <pages> <file>   import <file> [pages]   deletepage <pages>   insertpage   movepage <pages> <before>
 share      email   emailattach   sharelink   sendreview   trackreviews   cloudstorage
 files      portfolio — the document's embedded files: extract, remove or add one
-review     highlight   note <text>
+review     highlight   note <text>   comment [<text>]   comment reply <text>
 measure    calibrate <distance> [unit]   pagescale   measure <distance|area>
 automate   record [name]   stop   replay <script.json>   clearhistory
 edit       undo redo

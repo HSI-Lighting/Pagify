@@ -4,12 +4,12 @@
 tree clean at:** `de3531e` ("plan: the remaining planned buttons, form field
 authoring dropped by decision") · Local version `0.1.63`.
 
-**Tier B is built except `comment`.** `crossref`, `transitions`, `calcorder`,
-`emailattach` and `toolsettings` are commands now and are in the
-[Built](#built-on-this-branch-do-not-redo) table. One verb remains in
-`verbs::PLANNED`: `comment`, whose **PDF-native reply-thread model is
-decided** but which needs the engine work recorded in
-[Remaining plan](#remaining-plan-1-verb--0-buttons) — scheduled, not dropped.
+**Tier B is built, `comment` included.** `crossref`, `transitions`,
+`calcorder`, `emailattach`, `toolsettings` and `comment` are commands now and
+are in the [Built](#built-on-this-branch-do-not-redo) table; the threaded
+comments model is PDF-native (`/IRT` replies) and its write half is the
+save-time appended revision described below. Everything still in
+`verbs::PLANNED` is the dropped form-authoring block or Tier C/D work.
 
 Every ribbon button runs a word, and every word left in `verbs::PLANNED`
 (`crates/pagify_shell/src/verbs.rs`) answers "planned for <phase>, and not
@@ -39,6 +39,7 @@ source of intent.
 | `calcorder` | Form | reports the fields in `/AcroForm`'s `/CO` calculation order **from the file on disk**; "no calculation order" when there is none. Read-only |
 | `emailattach` | Share | drafts a message with the document's file attached — `xdg-email --attach` on Linux, Mail through AppleScript on macOS. Windows has no attach-capable command line, so the draft opens and the file is selected in the file manager, and both say it was not attached |
 | `toolsettings` | Form | the one stored preference: highlight fillable fields while filling — a wash over the boxes a click can fill, drawn over the page and never written into it, kept in `settings.json` |
+| `comment` | Comment | threaded review comments, PDF-native: `comment <words>` starts a thread (a note), bare `comment` opens the Comments panel where replies indent under their note, `comment reply <words>` or the panel's Reply button answers the picked note. A reply is a `/IRT` reply annotation; the one reference PDFium cannot write is appended to the saved file. A thread another application made reads back as one — see [below](#threaded-comments-the-write-half) |
 
 Those three reports are the read halves of what this plan called Tier B's
 first three items. The write halves — creating an internal link, writing a
@@ -71,89 +72,56 @@ These 17 verbs stay in `PLANNED` and must keep answering as planned:
 `formdesigner` · `createform` · `editxfa` · `pagetemplates` · `javascript`
 (Form/Convert)
 
-That covers 17 of the 28 remaining verbs and 17 of the 26 remaining buttons.
+That covers 17 of the 27 remaining verbs and 17 of the 25 remaining buttons.
 Do not remove them from `PLANNED`, do not add half-implemented verbs for them.
 
 ---
 
-## Remaining plan: 1 verb · 0 buttons
+## Threaded comments: the write half
 
-One planned word is left, and it has no ribbon button of its own — the
-Comments panel's button runs `managecomments`, which is built.
+`comment`'s read half landed first (see the Built table and the read-path
+paragraph that used to live here). The write half is now built too, and it is
+worth knowing how, because the reason it needed engine work is not obvious:
 
-### `comment` — model decided: PDF-native reply threads
+- **PDFium reads `/IRT` but cannot write one.** `FPDFAnnot_GetLinkedAnnot`
+  resolves the reference; `FPDFAnnot_SetStringValue` writes strings only, and
+  there is no API for a dictionary *reference*. So a reply is created through
+  PDFium like any note, and the one reference it cannot hold is appended to
+  the saved file:
+  - when a reply is created, both annotations are given a unique `/NM` name
+    (a parent that has one keeps it) and the relation `(page, reply name,
+    parent name)` is kept in the document session;
+  - `save_incremental` and `save_full_copy` call `PdfiumDocument::
+    patch_reply_links`, which parses the bytes PDFium just produced, makes the
+    two named annotations indirect objects (PDFium writes `/Annots` as inline
+    dictionaries), rewrites the reply's dictionary with `/IRT <parent ref>`,
+    and appends it as one revision with `pdf_core::pdf::File::append_revision`.
+    Everything PDFium wrote stays where it is, so the same signature honesty
+    rule as every other appended edit applies: the revision is after the
+    covered range, and the file says so.
+  - failure closes the save rather than writing a file that claims an
+    attachment it does not have: a named annotation not found, a
+    cross-reference stream instead of a plain table, or a document whose
+    password is being kept or changed (the appended revision would be
+    plaintext) all refuse with a message.
+- **Undo/redo:** adding a reply is the ordinary `AddAnnotation` command, so it
+  is one undo step; removing a reply drops its pending relation, and undo of
+  that removal puts the reply back as a reply (the relation is read back from
+  the session's record).
+- **UI:** the Comments panel's Reply button opens a reply window (the same
+  target `comment reply <words>` uses); replies are indented under their note
+  with `↳`; the panel re-reads its rows after an add, as it does after a
+  removal.
 
-**Decision (this session):** `comment` is **not** dropped and **not** an alias
-of `note`; a thread is PDF annotations — a root note plus `/IRT` replies — not
-a sidecar file. Recorded here so the work starts from a decision rather than
-repeating it.
+Tests: a reply threaded before a save and after a reopen, a removed reply
+saving without its link, both `comment` words and `help comment`, the reply
+window through the real window (Reply → type → Add), and the dispatch path
+for `comment <words>` / `comment reply <words>` / bare `comment`.
 
-**Step 1 — the read — is built.** `Annotation::Note` carries `reply_to`, read
-from the file's `/IRT` link through `FPDFAnnot_GetLinkedAnnot` and resolved to
-the parent annotation by its `/NM` name (or by subtype, rectangle and words
-when it is unnamed — PDFium hands back a *fresh wrapper* for the linked
-annotation, so its handle is never pointer-equal to the page's own;
-measured). `pagify_shell::comments::thread_rows` groups the list into threads,
-the Comments panel indents replies under the note they answer, and the link
-survives this engine's own save and reopen. Tests: a hand-written `/IRT` file
-read back as a thread, a save round trip, the grouping's ordering/cycle/absent
-parent cases, and the panel through the real window.
-
-**Why the write half is not written yet.** The pinned PDFium (chromium/7881)
-can *read* a reply link, but its public annotation API has **no setter** for
-dictionary references: `FPDFAnnot_SetStringValue` writes strings only, and
-there is no `/IRT` (or generic dictionary) writer.
-
-The model, so the next session does not have to choose again:
-
-- **A thread is a text annotation plus replies.** The root is an ordinary
-  `/Subtype /Text` annotation (what `note` already makes). A reply is a text
-  annotation whose `/IRT` names the annotation it answers. No separate file, no
-  sidecar — other readers (Acrobat, Preview, Firefox) show the thread too,
-  which is the test of whether it is really threaded.
-- **Identity comes from annotation object numbers**, which move when a page
-  gains or loses annotations (the architecture's standing hazard): a thread is
-  re-read from the page after every edit, never held across one, exactly as
-  `foreign_marks` does.
-- **The panel groups by root, oldest first**, with the root's words and each
-  reply indented under it. `trackreviews`' Comments panel keeps listing marks;
-  `comment` is where a thread is read and answered.
-
-The engine work the write half needs, in the order it should be done:
-
-1. ~~**Read**~~ — done, above. (The model variant is `Annotation::Note`: a PDF
-   `/Text` annotation is a note in this engine, and that is what a reply is.)
-2. **Write:** PDFium cannot set `/IRT`, so a created reply needs a raw
-   dictionary edit. The least invasive route is a **save-time appended
-   revision**: annotations are created through PDFium as they are today (a
-   reply starts as an ordinary text annotation, tagged with a unique `/NM`),
-   and after PDFium writes the save, `pdf_core::pdf::File::append_revision` adds
-   one revision that replaces each tagged annotation's object dictionary with
-   the same one plus `/IRT <parent ref>`. That keeps the live PDFium document
-   in charge of the bytes it wrote and appends only the one reference it
-   cannot write.
-   - **A reply appended after a save still leaves the file broken the same way
-     any later edit does**: the signature covers the bytes it covered, and the
-     appended revision says so. Document that rather than hide it.
-   - The append path must be byte-safe (`append_revision` already is) and must
-     refuse rather than guess when the tagged annotation cannot be found — the
-     file may have been rewritten between the save and the patch.
-3. **Undo/redo:** adding a reply is a `Command` like every other annotation;
-   the tag and the pending `/IRT` relation belong to the document session, not
-   to the app, so the save patch is deterministic.
-4. **UI:** the Comments panel gains replies (indented under their root) and a
-   Reply box; `comment` on a page with a selected note opens it; `comment
-   <words>` starts a new thread root (the same annotation `note` makes, so the
-   answer can point at `note` for the root and reserve `comment` for threads
-   that have replies).
-
-Step 1 is committed; the next commit is step 2 (the write) alone, and steps
-3–4 with it.
+---
 
 ### Tier C — needs engine work (non-form)
 
-- **`comment` replies (write half)** — the save-time `/IRT` appended revision
-  described above. The read half is worth doing first.
 - **`autotag`** (Accessibility): writing a `/StructTreeRoot` from page text and
   layout — the reader exists (Tags panel), the writer does not.
 - **`add3d`**, **media**: 3D and audio/video annotations. PDFium's creation
@@ -187,8 +155,8 @@ the easy part; tests are the contract. A word leaves `PLANNED` only with:
    or the matching domain test),
 3. an app test for the line it says (`crates/pagify_app/src/tests.rs`; `said(&app)` helper),
 4. a UI test if it opens a window (`crates/pagify_app/src/ui_tests.rs`),
-5. `help`/README/this file updated, including the planned counts (28 verbs /
-   26 buttons now),
+5. `help`/README/this file updated, including the planned counts (27 verbs /
+   25 buttons now),
 6. every suite run, no new failures, one commit pushed.
 
 The three reports show the shape a read-only verb takes: a shell module that
@@ -209,8 +177,8 @@ From `desktop/`:
 export PAGIFY_PDFIUM_LIB="$PWD/third_party/pdfium/pdfium-linux-x64/lib/libpdfium.so"
 export XDG_CONFIG_HOME="$PWD/target/audit/test-config"   # isolates the real ~/.config/Pagify
 mkdir -p "$XDG_CONFIG_HOME"
-cargo test -p pagify_shell --no-fail-fast     # 809 passed, 0 failed, 37 ignored
-cargo test -p pagify_app --no-fail-fast       # 995 passed, exactly 12 known failures, 15 ignored
+cargo test -p pagify_shell --no-fail-fast     # 814 passed, 0 failed, 37 ignored
+cargo test -p pagify_app --no-fail-fast       # 1000 passed, exactly 12 known failures, 15 ignored
 cargo check --workspace --all-targets         # clean
 ```
 

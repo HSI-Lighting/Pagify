@@ -616,6 +616,15 @@ pub enum Verb {
     Reflow,
     /// A note anchored where the pointer last was.
     Note(String),
+    /// A threaded review comment.
+    ///
+    /// `comment <words>` starts a thread exactly where `note` would put a
+    /// note — a thread's first mark is a note, so the two cannot disagree
+    /// about where it is. Bare `comment` opens the list the threads are in.
+    Comment { text: Option<String> },
+    /// `comment reply <words>`: answer the note the Comments panel last
+    /// picked, as a reply in the PDF's own thread.
+    CommentReply(String),
 
     // Measurement — phase 9.
     /// Arm the two-point calibration pick.
@@ -1048,8 +1057,6 @@ pub const REFUSED: &[Refusal] = &[
 
 /// Verbs that are Pagify's, are named, and are not built yet.
 const PLANNED: &[(&str, &str, &str)] = &[
-    ("comment", "a later phase", "threaded review comments"),
-
     // The ribbon, from here down. Every button on it runs a command, and a
     // button whose command was not a word would answer `unknown command` —
     // which reads as a broken button rather than as an unbuilt feature.
@@ -1202,7 +1209,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "extract", "import", "deletepage", "delpage", "insertpage", "movepage",
         "replacepage", "interleave", "toimage", "tohtml", "split", "wordcount", "blankdoc",
         "combine",
-        "highlight", "hl", "note", "calibrate", "cal", "pagescale", "measure",
+        "highlight", "hl", "note", "comment", "calibrate", "cal", "pagescale", "measure",
         "find", "findnext", "fn", "findprev", "fp", "replace", "spelling", "bookmark",
         "articlebox", "weblinks", "jointext", "reflow",
         "record", "stop", "endrecord", "replay", "pick", "textlayer", "whytext", "snapshot",
@@ -1284,6 +1291,19 @@ pub fn help_text(topic: Option<&str>) -> Vec<String> {
                         .into(),
                 ]
             }
+            "comment" => {
+                return vec![
+                    "comment — threaded review comments, kept in the PDF itself: the first \
+                     mark in a thread is a note, and every answer is a reply annotation \
+                     pointing at it (/IRT), so a reader that is not Pagify shows the thread \
+                     too. `comment <words>` starts a thread at the top-left of the page; bare \
+                     `comment` opens the Comments panel, where replies are indented under the \
+                     note they answer; press Reply there, or `comment reply <words>` answers \
+                     the note the panel last picked. Saving appends the /IRT links PDFium \
+                     cannot write."
+                        .into(),
+                ]
+            }
             "toolsettings" => {
                 return vec![
                     "toolsettings — opens the Form tab's Tool Settings. One setting so far: \
@@ -1331,7 +1351,9 @@ pub fn help_text(topic: Option<&str>) -> Vec<String> {
         "picking    pick <x,y>   — supplies a click to a waiting tool, so fillet and".into(),
         "           trim can be scripted and recorded as well as clicked".into(),
         "help       about   shortcuts   quickstart   reportissue".into(),
-        "planned    comment — and the ribbon's unbuilt buttons, whose words name their phase".into(),
+        "comment    comment [words]   comment reply <words> — start a thread, open".into(),
+        "           the thread list, or answer the note the list last picked".into(),
+        "planned    the ribbon's unbuilt buttons, whose words name their phase".into(),
         "drawing    every SIMLUX command — line, polyline, trim, fillet, offset, … — with the same aliases".into(),
         "           `help <verb>` explains any word that means something different here.".into(),
         "".into(),
@@ -2096,6 +2118,29 @@ fn parse_marks_and_misc(head: &str, rest: &[&str], tail: &str) -> Option<Result<
                 Ok(Verb::Note(text))
             }
         }
+        // The Comment tab's word: start a thread, open the list of them, or
+        // answer the note the list last picked. A reply is a PDF reply
+        // annotation (`/IRT`), so another reader shows the thread too.
+        "comment" => match rest.split_first() {
+            None => Ok(Verb::Comment { text: None }),
+            Some((word, _)) if word.eq_ignore_ascii_case("reply") => {
+                let text = rest[1..].join(" ").trim().to_string();
+                if text.is_empty() {
+                    Err("usage: comment reply <what it says>".into())
+                } else {
+                    Ok(Verb::CommentReply(text))
+                }
+            }
+            Some(_) => {
+                let text = rest.join(" ");
+                let text = text.trim();
+                if text.is_empty() {
+                    Ok(Verb::Comment { text: None })
+                } else {
+                    Ok(Verb::Comment { text: Some(text.to_string()) })
+                }
+            }
+        },
 
         "calibrate" | "cal" => match (rest.first(), rest.get(1)) {
             (Some(distance), unit) => match distance.parse::<f64>() {
@@ -2737,6 +2782,56 @@ mod manage_comments_tests {
             PLANNED.iter().all(|(v, _, _)| *v != "managecomments"),
             "`managecomments` is still in the planned table"
         );
+    }
+}
+
+#[cfg(test)]
+mod comment_thread_tests {
+    use super::*;
+
+    /// The last planned word becomes real: parse it, and it is not planned.
+    #[test]
+    fn comment_parses_and_is_not_planned() {
+        assert_eq!(parse("comment"), Some(Ok(Verb::Comment { text: None })));
+        assert_eq!(
+            parse("comment check the third line"),
+            Some(Ok(Verb::Comment { text: Some("check the third line".into()) }))
+        );
+        assert_eq!(
+            parse("comment reply agreed, fixing it"),
+            Some(Ok(Verb::CommentReply("agreed, fixing it".into())))
+        );
+        assert!(
+            parse("comment reply").is_some_and(|parsed| parsed.is_err()),
+            "`comment reply` with no words parsed as something"
+        );
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "comment"),
+            "`comment` is still in the planned table"
+        );
+        assert!(
+            claimed_tokens().contains(&"comment"),
+            "the word is not claimed, so the kernel could shadow it"
+        );
+    }
+
+    /// `help comment` says what a thread is and how it reaches the file, so
+    /// the answer is not just "no help".
+    #[test]
+    fn help_comment_explains_the_thread_model() {
+        let text = help_text(Some("comment")).join("\n");
+        assert!(text.contains("threaded review comments"), "{text}");
+        assert!(text.contains("/IRT"), "{text}");
+        assert!(text.contains("comment reply <words>"), "{text}");
+    }
+
+    /// The top-level help still mentions the word and no longer calls it
+    /// planned.
+    #[test]
+    fn the_help_list_does_not_call_comment_planned() {
+        let text = help_text(None).join("\n");
+        assert!(text.contains("comment reply"), "{text}");
+        assert!(!text.contains("planned    comment"), "{text}");
     }
 }
 
