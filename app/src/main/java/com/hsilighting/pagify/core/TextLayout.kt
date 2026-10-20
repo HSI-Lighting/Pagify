@@ -360,18 +360,21 @@ fun Annotation.Text.rebuilt(
 ): Annotation.Text {
     val anchor = path.firstOrNull() ?: Offset.Zero
     val size = sizePoints.coerceIn(MINIMUM_TEXT_POINTS, MAXIMUM_TEXT_POINTS)
+    // Words Helvetica cannot draw go into the file as ÿ, so a face that can
+    // draw them wins over one that cannot.
+    val face = BundledFonts.fontFor(font, text)
     // A caption that gained a second line straightens: stacked arcs curl into
     // each other, and there is no answer for where the second one sits. The bend
     // is remembered, so losing the extra line brings it back.
     val bend = if (text.contains('\n')) 0f else curveDegrees
     return copy(
         text = text,
-        font = font,
+        font = face,
         sizePoints = size,
         curveDegrees = curveDegrees,
         color = color,
         frame = frame,
-        path = curvedBaseline(anchor, text.captionLines().first(), font, size, bend),
+        path = curvedBaseline(anchor, text.captionLines().first(), face, size, bend),
     )
 }
 

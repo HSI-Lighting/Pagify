@@ -498,21 +498,32 @@ fun textMarkFromJson(json: String, pageIndex: Int): Annotation.Text? = try {
         val point = points.getJSONObject(at)
         Offset(point.getDouble("x").toFloat(), point.getDouble("y").toFloat())
     }
+    // By the file first. Every bundled font goes over the wire under the
+    // standard-14 name it most resembles, so the name alone brought an Arabic
+    // caption back as Helvetica — and the next save wrote its letters as ÿ.
+    val asset = o.optString("fontAsset")
+    val named = PdfFont.entries.firstOrNull {
+        if (asset.isEmpty()) it.asset == null && it.wireName == o.getString("font") else it.asset == asset
+    } ?: PdfFont.HELVETICA
     if (path.isEmpty()) {
         null
     } else {
-        Annotation.Text(
+        val caption = Annotation.Text(
             id = o.getLong("id"),
             pageIndex = pageIndex,
             text = o.getString("text"),
             path = path,
-            font = PdfFont.entries.firstOrNull { it.wireName == o.getString("font") }
-                ?: PdfFont.HELVETICA,
+            font = named,
             sizePoints = o.getDouble("size").toFloat(),
             color = o.getLong("argb"),
             frame = TextFrame.entries.firstOrNull { it.name == o.optString("textFrame") }
                 ?: TextFrame.None,
         )
+        // A standard-14 caption holding words it cannot draw is one that round
+        // trip already broke. Picked up in a face that can draw them, on a line
+        // rebuilt for that face, so moving it once writes it back properly.
+        val face = if (named.isEmbedded) named else BundledFonts.fontFor(named, caption.text)
+        if (face == named) caption else caption.rebuilt(font = face)
     }
 } catch (_: org.json.JSONException) {
     null

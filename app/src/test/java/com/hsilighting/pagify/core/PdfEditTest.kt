@@ -321,6 +321,33 @@ class PdfEditTest {
     }
 
     @Test
+    fun `a saved caption comes back in the font it was written in, not the one it is named after`() {
+        // Every bundled font goes over the wire under the standard-14 name it
+        // most resembles — Noto Sans Arabic as "Helvetica" — so reading the name
+        // alone brought an Arabic caption back as Helvetica: loose letters
+        // running backwards on screen, and ÿ in the file on the next save.
+        val blob = Annotation.Text(
+            id = 5L,
+            pageIndex = 0,
+            text = "Hi",
+            path = straightBaseline(Offset(10f, 20f), "Hi", PdfFont.HELVETICA, 12f),
+            font = PdfFont.HELVETICA,
+            sizePoints = 12f,
+            color = AnnotationColors.RED,
+        ).textWireJson(withRestore = false)
+
+        PdfFont.entries.forEach { font ->
+            // Exactly the two fields textWireJson writes for this font. Built by
+            // hand because laying out a bundled font needs the native shaper.
+            val stored = JSONObject(blob.toString()).apply {
+                put("font", font.wireName)
+                font.asset?.let { put("fontAsset", it) }
+            }
+            assertEquals(font, textMarkFromJson(stored.toString(), pageIndex = 0)?.font)
+        }
+    }
+
+    @Test
     fun `the stored blob is also the annotation the engine writes`() {
         // The engine parses it as a command payload, so it has to carry the
         // fields the engine needs — a blob that only the app could read failed

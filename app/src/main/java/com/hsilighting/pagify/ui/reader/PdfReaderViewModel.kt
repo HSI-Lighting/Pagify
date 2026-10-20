@@ -37,6 +37,7 @@ import com.hsilighting.pagify.core.AnnotationEdit
 import com.hsilighting.pagify.core.AnnotationStore
 import com.hsilighting.pagify.core.AnnotationTool
 import com.hsilighting.pagify.core.BitmapPools
+import com.hsilighting.pagify.core.BundledFonts
 import com.hsilighting.pagify.core.CaptureExport
 import com.hsilighting.pagify.core.CaptureFill
 import com.hsilighting.pagify.core.CaptureFormat
@@ -1134,6 +1135,8 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         if (text.isBlank()) return
 
         val state = _state.value
+        // Arabic typed with Helvetica still selected goes into the file as ÿ.
+        val font = BundledFonts.fontFor(state.textFont, text)
         addAnnotation(
             Annotation.Text(
                 id = 0L,
@@ -1148,12 +1151,12 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
                 path = curvedBaseline(
                     anchor = pending.path.first(),
                     text = text,
-                    font = state.textFont,
+                    font = font,
                     sizePoints = state.textSizePoints,
                     degrees = if (pending.bends) state.textCurveDegrees else 0f,
                 ),
                 curveDegrees = if (pending.bends) state.textCurveDegrees else 0f,
-                font = state.textFont,
+                font = font,
                 sizePoints = state.textSizePoints,
                 color = state.penColor,
 frame = pending.frame,
@@ -1224,7 +1227,11 @@ frame = pending.frame,
         // A caption you have just written is the one in hand: the ribbon's size,
         // font, bend and colour act on it straight away, which is the whole
         // reason for picking one up at all.
-        if (withId is Annotation.Text) _state.update { it.copy(selectedTextId = withId.id) }
+        // Its font too, which may not be the one that was selected: the ribbon
+        // shows what the caption in hand *is*.
+        if (withId is Annotation.Text) {
+            _state.update { it.copy(selectedTextId = withId.id, textFont = withId.font) }
+        }
         refreshAnnotations()
 
         // The count is what distinguishes "the gesture never reached the tool"
@@ -1355,6 +1362,10 @@ frame = pending.frame,
                 savedTextPages.remove(id)
                 committedMarkIds.remove(id)
                 invalidateRenderedPages()
+                // The unsaved count is derived from savedTextPages, which just
+                // changed. Without this a single move left it at zero: no dot on
+                // Save, and Save itself answered "No changes to save."
+                refreshAnnotations()
             } catch (t: CancellationException) {
                 throw t
             } catch (t: Throwable) {
