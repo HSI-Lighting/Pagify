@@ -1074,7 +1074,13 @@ impl crate::PagifyApp {
                     // asked-for size and simply gets softer, which is the right
                     // trade. `texture_for` applies that cap.
                     let device_scale = raster_scale(zoom * ctx.pixels_per_point());
-                    if let Some((texture, exact)) = self.page_texture(ctx, page, zoom, (w, h), device_scale) {
+                    let picture = self.page_texture(ctx, page, zoom, (w, h), device_scale);
+                    // **With the render worker, a page with no picture yet is still a page**:
+                    // paper where it will be, and everything on it (the zoom's anchor, the
+                    // pointer, the pending tool) works while its picture is made — which for
+                    // a drawing of 700,000 lines is three seconds, no longer spent on the UI
+                    // thread. Without the worker, as before, no picture is no page.
+                    if picture.is_some() || self.render_state.async_render {
                         // **The page's true size at this zoom, not the
                         // texture's.** The raster is quantised so that a pinch
                         // does not re-render sixty times a second; drawing it at
@@ -1094,20 +1100,24 @@ impl crate::PagifyApp {
                         // fractional one — a half-pixel offset is a resample of its own.
                         // (Clicks still go by `rect`, the true size; they differ by under
                         // a pixel.)
-                        let drawn = if exact {
-                            let ppp = ctx.pixels_per_point();
-                            let at = egui::pos2((origin.x * ppp).round() / ppp, (origin.y * ppp).round() / ppp);
-                            let [tw, th] = texture.size();
-                            egui::Rect::from_min_size(at, egui::vec2(tw as f32 / ppp, th as f32 / ppp))
+                        if let Some((texture, exact)) = &picture {
+                            let drawn = if *exact {
+                                let ppp = ctx.pixels_per_point();
+                                let at = egui::pos2((origin.x * ppp).round() / ppp, (origin.y * ppp).round() / ppp);
+                                let [tw, th] = texture.size();
+                                egui::Rect::from_min_size(at, egui::vec2(tw as f32 / ppp, th as f32 / ppp))
+                            } else {
+                                rect
+                            };
+                            ui.painter().image(
+                                texture.id(),
+                                drawn,
+                                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                egui::Color32::WHITE,
+                            );
                         } else {
-                            rect
-                        };
-                        ui.painter().image(
-                            texture.id(),
-                            drawn,
-                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                            egui::Color32::WHITE,
-                        );
+                            ui.painter().rect_filled(rect, 0.0, egui::Color32::WHITE);
+                        }
 
                         let view = PageView { origin, scale: zoom };
                         self.draw_detail_overlay(ctx, ui, page, view, rect, device_scale);
@@ -1425,6 +1435,7 @@ impl crate::PagifyApp {
             tab.zoom_settle.zoom_changed_at = now;
         }
         self.collect_renders(ctx);
+        self.collect_facts();
     }
 
     /// Prefetch the neighbouring pages and evict rasters for the ones the
@@ -1467,7 +1478,9 @@ impl crate::PagifyApp {
             // The same quantised scale the draw uses. Prefetching at the raw
             // zoom would warm a texture the next frame does not ask for.
             let device_scale = raster_scale(zoom * ctx.pixels_per_point());
-            self.warm_texture(ctx, target, device_scale);
+            if !self.warm_exact(ctx, target, zoom) {
+                self.warm_texture(ctx, target, device_scale);
+            }
         }
 
         // Evict rasters for pages nowhere near the window.
@@ -1529,7 +1542,11 @@ impl crate::PagifyApp {
     /// rather than as something hidden — so the mark has to be visible, has to
     /// sit where the thing was, and has to be the way back.
     pub(crate) fn draw_lock_badges(&mut self, ui: &mut egui::Ui, page: usize, view: PageView) {
-        let items = self.locked_items_on(page);
+        let Some(items) = self.locked_items_now(page) else {
+            // A page is being drawn. Badges can wait for it; the window cannot.
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(150));
+            return;
+        };
         if items.is_empty() {
             return;
         }
@@ -1921,6 +1938,21 @@ impl crate::PagifyApp {
         // the whole gesture only once a drag actually starts, not while
         // just hovering.
         let no_click_tool_armed = self.tab_mut().tool.as_ref().map_or(true, |t| t.kind.wants_selection());
+        // **From what the facts worker has read, never from the engine.** Asking it
+        // made the first hover over a heavy page a wait of seconds (see
+        // [`crate::page_facts`]); until the page is read the pointer is an arrow. Asked
+        // for with a tool in hand too: Edit Text and Edit Object want the page's weight.
+        let facts = self.page_facts(ui.ctx(), page);
+        if self.render_state.async_render {
+            if let Some(facts) = facts.filter(|_| no_click_tool_armed) {
+                if facts.link_at(at) {
+                    ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
+                } else if facts.word_at(at) {
+                    ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Text);
+                }
+            }
+            return;
+        }
         let hovering_link = no_click_tool_armed
             && (self.foreign_at(page, at).is_some_and(|n| self.link_uri_at(page, n).is_some())
                 || self.internal_link_at(page, at).is_some());

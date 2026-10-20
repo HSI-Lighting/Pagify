@@ -25,6 +25,7 @@ mod instance;
 mod logo;
 mod os_clipboard;
 mod overlay;
+mod page_facts;
 mod edit;
 mod panels;
 mod picking;
@@ -1188,6 +1189,9 @@ struct RenderState {
     /// The thread that renders pages off the UI thread, started on first use —
     /// see [`RenderWorker`].
     renders: Option<RenderWorker>,
+    /// The thread that reads what the pointer needs to know about a page — see
+    /// [`page_facts`]. Started on first use.
+    facts: Option<page_facts::FactsWorker>,
     /// Whether pages are rendered off the UI thread at all. On everywhere but
     /// in the tests, where a render that lands on some later frame would make
     /// every test that looks at what was drawn depend on timing; the tests that
@@ -2706,14 +2710,25 @@ const WHOLE_PAGE_BUDGET_PIXELS: f32 = 24.0 * 1024.0 * 1024.0;
 const SLOT_WHOLE: u8 = 0;
 const SLOT_DETAIL: u8 = 1;
 const SLOT_EXACT: u8 = 2;
+/// A thumbnail for the rail. Its own slot, for the same reason: it must not supersede
+/// the page's picture, nor be superseded by it.
+const SLOT_THUMB: u8 = 3;
 
 fn slot_kind(crop: &Option<pdf_core::document::Rect>, step: u32) -> u8 {
     match (crop, step >= EXACT_STEP_BASE) {
         (Some(_), _) => SLOT_DETAIL,
+        (None, _) if step >= THUMB_STEP_BASE => SLOT_THUMB,
         (None, true) => SLOT_EXACT,
         (None, false) => SLOT_WHOLE,
     }
 }
+
+/// A thumbnail's step is this plus its width in pixels. **Above [`EXACT_STEP_BASE`]'s
+/// whole range**, so "an exact picture" means `EXACT_STEP_BASE..THUMB_STEP_BASE`:
+/// check for a thumbnail first. Rendered by the worker like any page — the rail drew
+/// them on the UI thread, and a drawing of 700,000 lines takes 2-3 s to draw however
+/// small it is drawn.
+const THUMB_STEP_BASE: u32 = 1 << 22;
 
 /// Pictures at or above this step are **exact** ones: the step is this plus the
 /// picture's width in pixels, and they are held in `DocCaches::exact`, not
@@ -4513,7 +4528,7 @@ impl PagifyApp {
                 pagify_shell::session_log::SessionLog::start()
             }, },
             prefs_state: PrefsState { ortho: false, defaults: tools::Defaults::default(), draw_fill: false, snaps: SnapSet::defaults(), grid_pt: 0.0, },
-            render_state: RenderState { renders: None, async_render: !cfg!(test), render_stats: RenderStats::default(), },
+            render_state: RenderState { renders: None, facts: None, async_render: !cfg!(test), render_stats: RenderStats::default(), },
             ui_state: UiState { show_thumbs: true, organize_open: false, show_layers: false, command_open: false, errors_said: 0, },
             clipboard_state: ClipboardState { object_clipboard: None, paste_count: 0, page_clipboard: None, paste_ghost: None, clipboard_dir: if cfg!(test) {
                 static APPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -10589,6 +10604,24 @@ impl PagifyApp {
         items
     }
 
+    /// [`Self::locked_items_on`] for the frame that draws the badges: **never waits for
+    /// the engine.** `None` means a page is being drawn and the answer is not known
+    /// yet — nothing is kept, and the caller asks again shortly. (The ordinary one
+    /// stood the window still for as long as a heavy page took to render: 3 s.)
+    /// Without the render worker — the tests — it is the ordinary one.
+    fn locked_items_now(&self, page: usize) -> Option<Vec<pdf_core::document::LockedItem>> {
+        if !self.render_state.async_render {
+            return Some(self.locked_items_on(page));
+        }
+        let doc = self.tab().doc.as_ref()?;
+        if let Some(held) = doc.caches.locked.borrow().get(&page) {
+            return Some(held.clone());
+        }
+        let items = doc.session.try_locked_items_on(page)?;
+        doc.caches.locked.borrow_mut().insert(page, items.clone());
+        Some(items)
+    }
+
     /// Lock the selected text, from the right-click menu.
     ///
     /// Goes through `lock_area` over the selection's own bounds — the words
@@ -14653,19 +14686,30 @@ impl PagifyApp {
         frame: (f32, f32),
         device_scale: f32,
     ) -> Option<(egui::TextureHandle, bool)> {
-        if self.render_state.async_render && !self.zoom_is_moving(ctx) {
+        if self.render_state.async_render {
+            let moving = self.zoom_is_moving(ctx);
             let max_side = (ctx.input(|i| i.max_texture_side) as f32).min(pdf_core::render::bitmap::MAX_DIMENSION_PX as f32);
             if let Some((px_w, _)) = exact_page_px(frame.0, frame.1, zoom, ctx.pixels_per_point(), max_side) {
-                if let Some(texture) = self.exact_texture(ctx, page, frame.0, px_w) {
-                    return Some((texture, true));
+                if !moving {
+                    if let Some(texture) = self.exact_texture(ctx, page, frame.0, px_w) {
+                        return Some((texture, true));
+                    }
                 }
-                // On its way. Not a second picture asked for meanwhile: the one the page
-                // already has, stretched for the moment.
+                // On its way, or the zoom is still moving (a page's first frames count:
+                // the zoom settles into the window). Not a second picture asked for
+                // meanwhile — **not a quantised one either, even when there is nothing
+                // to show**: that was a second render of the same page at nearly the
+                // same size (1501 px, then 1465), and on a drawing of 700,000 lines
+                // each is 2-3 s of the one lock. What the page already has is drawn,
+                // stretched for the moment, and the page is paper if it has nothing.
                 let rotation = self.tab().view_state.rotation as u8;
                 let step = pdf_core::render::cache::quantise_zoom(device_scale);
-                if let Some((held, _)) = self.tab().doc.as_ref().and_then(|d| stand_in_for(d, page, step, rotation)) {
-                    return Some((held, false));
-                }
+                return self
+                    .tab()
+                    .doc
+                    .as_ref()
+                    .and_then(|d| stand_in_for(d, page, step, rotation))
+                    .map(|(held, _)| (held, false));
             }
         }
         self.texture_for(ctx, page, device_scale).map(|texture| (texture, false))
@@ -14692,6 +14736,28 @@ impl PagifyApp {
             session,
         });
         None
+    }
+
+    /// The prefetch of a page that will be drawn from an **exact** picture: ask for
+    /// that one. Asking for a quantised picture, as the prefetch did, made a second
+    /// render of every page once it came into view and asked for its exact one — on a
+    /// drawing of 700,000 lines, 2-3 s of the one lock for a picture nobody draws from.
+    /// `false` when the page will not be drawn exact (no worker, or the page is past a
+    /// whole-page picture's size), and the caller warms a quantised one.
+    fn warm_exact(&mut self, ctx: &egui::Context, page: usize, zoom: f32) -> bool {
+        if !self.render_state.async_render {
+            return false;
+        }
+        let moving = self.zoom_is_moving(ctx);
+        let Some((frame_w, frame_h)) = self.tab().doc.as_ref().and_then(|d| d.strip.frame_of(page)) else { return false };
+        let max_side = (ctx.input(|i| i.max_texture_side) as f32).min(pdf_core::render::bitmap::MAX_DIMENSION_PX as f32);
+        let Some((px_w, _)) = exact_page_px(frame_w, frame_h, zoom, ctx.pixels_per_point(), max_side) else { return false };
+        // While the zoom moves, nothing: the picture asked for would be for a size it is
+        // about to leave. The next frame after it settles asks.
+        if !moving {
+            let _ = self.exact_texture(ctx, page, frame_w, px_w);
+        }
+        true
     }
 
     /// Ask for a page's texture without waiting for it — the prefetch of the
@@ -14752,6 +14818,19 @@ impl PagifyApp {
             let [width, height] = image.size;
             let rotation = done.rotation as u8;
             match done.crop {
+                None if done.step >= THUMB_STEP_BASE => {
+                    let handle = ctx.load_texture(
+                        format!("thumb{}", done.page),
+                        image,
+                        // Mipmapped, so the stretch during a drag, and a bitmap a little
+                        // larger than it is shown, are averaged rather than aliased.
+                        egui::TextureOptions {
+                            mipmap_mode: Some(egui::TextureFilter::Linear),
+                            ..egui::TextureOptions::LINEAR
+                        },
+                    );
+                    doc.caches.thumbs.insert(done.page, handle);
+                }
                 None if done.step >= EXACT_STEP_BASE => {
                     let handle = ctx.load_texture(
                         format!("exact{}", done.page),
@@ -14869,27 +14948,28 @@ impl PagifyApp {
         // taken from the one it stops on.
         if async_render {
             let stand_in = stand_in_for(doc, page, zoom_step, rotation as u8);
-            if stand_in.is_some() || !may_block {
-                // A page held only as its thumbnail is asked for at once: there is
-                // no earlier picture of it for a zoom in motion to be drawn from.
-                let only_a_thumbnail = stand_in.as_ref().is_some_and(|(_, thumbnail)| *thumbnail);
-                if !moving || only_a_thumbnail {
-                    let (doc_id, epoch, session) = (doc.id, doc.render_epoch, doc.session.clone());
-                    self.ask_for_render(ctx, RenderJob {
-                        doc: doc_id,
-                        epoch,
-                        page,
-                        step: zoom_step,
-                        rotation,
-                        scale: quantised,
-                        crop: None,
-                        session,
-                    });
-                }
-                return stand_in.map(|(texture, _)| texture);
+            // A page held only as its thumbnail is asked for at once: there is no
+            // earlier picture of it for a zoom in motion to be drawn from. **Nor is a
+            // page held as nothing at all** — its first look. That used to be rendered
+            // right here, on the UI thread, "as it always was"; for a drawing of
+            // 700,000 lines that is a window that does not answer for three seconds.
+            // It is asked of the worker instead, and the page is paper until it comes.
+            let only_a_thumbnail_or_nothing = stand_in.as_ref().map_or(true, |(_, thumbnail)| *thumbnail);
+            let _ = may_block;
+            if !moving || only_a_thumbnail_or_nothing {
+                let (doc_id, epoch, session) = (doc.id, doc.render_epoch, doc.session.clone());
+                self.ask_for_render(ctx, RenderJob {
+                    doc: doc_id,
+                    epoch,
+                    page,
+                    step: zoom_step,
+                    rotation,
+                    scale: quantised,
+                    crop: None,
+                    session,
+                });
             }
-            // Nothing at all to draw yet — the first look at this page — so it
-            // is rendered now, as it always was.
+            return stand_in.map(|(texture, _)| texture);
         }
         let doc = self.tab_mut().doc.as_mut()?;
         // A refusal must not mean a blank page. The ceilings above should make
@@ -14981,7 +15061,9 @@ impl PagifyApp {
         // already held is stretched for the moment, and made sharp the instant
         // the pointer is released.
         let dragging = ctx.input(|i| i.pointer.any_down());
+        let async_render = self.render_state.async_render;
         let doc = self.tab_mut().doc.as_mut()?;
+        let mut held = None;
         if let Some(existing) = doc.caches.thumbs.get(&page) {
             let have = existing.size()[0] as u32;
             let right_size = have.abs_diff(width_px) <= 6;
@@ -14989,9 +15071,28 @@ impl PagifyApp {
             if right_size || (dragging && usable_meanwhile) {
                 return Some(existing.clone());
             }
+            held = Some(existing.clone());
         }
         let (width_pt, _) = doc.strip.size_of(page)?;
         let scale = width_px as f32 / width_pt.max(1.0);
+        if async_render {
+            // **By the worker, not here.** This was a render on the UI thread for every
+            // page in the rail: opening a drawing of 700,000 lines stood the window
+            // still for nine seconds. What is held, at whatever size, is shown meanwhile.
+            let (doc_id, epoch, session) = (doc.id, doc.render_epoch, doc.session.clone());
+            self.ask_for_render(ctx, RenderJob {
+                doc: doc_id,
+                epoch,
+                page,
+                step: THUMB_STEP_BASE + width_px,
+                rotation: Rotation::None,
+                scale,
+                crop: None,
+                session,
+            });
+            return held;
+        }
+        let doc = self.tab_mut().doc.as_mut()?;
         let raster = doc.session.render_page(page, scale).ok()?;
         let handle = ctx.load_texture(
             format!("thumb{page}"),
@@ -15152,12 +15253,18 @@ impl RenderWorker {
                     let mut newest: Vec<RenderJob> = Vec::new();
                     for job in batch.into_iter().rev() {
                         let same = |n: &RenderJob| {
-                            n.doc == job.doc && n.page == job.page && n.crop.is_some() == job.crop.is_some()
+                            n.doc == job.doc
+                                && n.page == job.page
+                                && n.crop.is_some() == job.crop.is_some()
+                                && (n.step >= THUMB_STEP_BASE) == (job.step >= THUMB_STEP_BASE)
                         };
                         if !newest.iter().any(same) {
                             newest.push(job);
                         }
                     }
+                    // The pages first, then the rail's thumbnails: a thumbnail of a
+                    // heavy page is as long a wait for the lock as the page itself.
+                    newest.sort_by_key(|j| j.step >= THUMB_STEP_BASE);
                     for job in newest {
                         let started = std::time::Instant::now();
                         // A refusal must not mean a blank page: smaller, as the
@@ -15257,6 +15364,18 @@ fn stand_in_for(doc: &Doc, page: usize, step: u32, rotation: u8) -> Option<(egui
         .min_by_key(|((_, s, _), _)| if *s >= step { *s - step } else { (step - *s) * 2 })
         .map(|(_, texture)| texture.clone());
     if let Some(texture) = nearest {
+        return Some((texture, false));
+    }
+    // The page's exact picture, from the zoom before: a whole page at a size near this
+    // one, far sharper than its thumbnail. (A page drawn exact is never asked for as a
+    // quantised one as well, so this is all it has while the zoom moves.)
+    if let Some(texture) = doc
+        .caches
+        .exact
+        .iter()
+        .find(|((p, _, r), _)| *p == page && *r == rotation)
+        .map(|(_, texture)| texture.clone())
+    {
         return Some((texture, false));
     }
     // The thumbnail is of the page upright, so only a view that is upright.
@@ -17218,6 +17337,8 @@ mod nudge_tests;
 mod marquee_tests;
 #[cfg(test)]
 mod object_hover_tests;
+#[cfg(test)]
+mod page_facts_tests;
 #[cfg(test)]
 mod text_style_tests;
 

@@ -156,6 +156,27 @@ pub fn with_session<T>(
     contained(|| f(session))
 }
 
+/// [`with_session`] that does not wait: `None` at once if something else holds the
+/// lock — typically a page render, which holds it for as long as the page takes to
+/// draw (2-3 s for a drawing of 700,000 lines).
+///
+/// For a read the UI thread makes on every frame and can do without for a frame
+/// or two. Anything the user asked for goes through [`with_session`].
+pub fn try_with_session<T>(
+    handle: i64,
+    f: impl FnOnce(&mut DocumentSession) -> Result<T>,
+) -> Option<Result<T>> {
+    let mut guard = match sessions().try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return None,
+    };
+    let Some(session) = guard.get_mut(&handle) else {
+        return Some(Err(PdfError::InvalidHandle(handle)));
+    };
+    Some(contained(|| f(session)))
+}
+
 /// Run engine code with a panic turned into an error.
 ///
 /// **A crafted document must not end the program.** The JNI and C boundaries
@@ -305,6 +326,38 @@ mod tests {
 
         let result = with_session(handle, |_| Ok(()));
         assert!(matches!(result, Err(PdfError::InvalidHandle(h)) if h == handle));
+    }
+
+    /// **A read that must not wait gives up at once while a render holds the lock**, and
+    /// works when nothing does. The UI thread reads the lock badges this way on every
+    /// frame; waiting was a frozen window for as long as a heavy page took to draw.
+    #[test]
+    fn a_read_that_does_not_wait_gives_up_while_the_lock_is_held() {
+        let handle = insert_fake(1);
+        let (taken, got) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            exclusive(|| {
+                taken.send(()).ok();
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            })
+        });
+        got.recv().expect("the holder never took the lock");
+        let started = std::time::Instant::now();
+        assert!(try_with_session(handle, |_| Ok(())).is_none(), "it waited for the lock instead of giving up");
+        assert!(started.elapsed() < std::time::Duration::from_millis(200), "it waited {:?}", started.elapsed());
+        holder.join().expect("holder");
+
+        // Free now — other tests share the lock, so allow for one of them having it.
+        let mut answered = None;
+        for _ in 0..500 {
+            answered = try_with_session(handle, |s| Ok(s.document.page_count()));
+            if answered.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(matches!(answered, Some(Ok(1))), "{answered:?}");
+        remove(handle);
     }
 
     #[test]

@@ -183,6 +183,19 @@ impl Session {
         .unwrap_or_default()
     }
 
+    /// [`Self::locked_items_on`] that gives up at once if the engine is busy (a page
+    /// is being drawn): `None`, and ask again. For the badges, which are drawn on
+    /// every frame and can wait one out.
+    pub fn try_locked_items_on(&self, page_index: usize) -> Option<Vec<pdf_core::document::LockedItem>> {
+        registry::try_with_session(self.handle, |s| {
+            Ok(s.document
+                .as_document_mut()
+                .and_then(|d| d.locked_items_on(page_index).ok())
+                .unwrap_or_default())
+        })
+        .map(|read| read.unwrap_or_default())
+    }
+
     /// Every locked page's original, decrypted and verified. Writes nothing —
     /// the caller puts them back through the command stack so undo works.
     pub fn open_lock(&self, passcode: &[u8]) -> Result<Vec<(usize, Vec<u8>)>> {

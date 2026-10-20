@@ -939,10 +939,18 @@ pub(crate) fn async_harness(path: &str) -> Harness<'static, PagifyApp> {
 }
 
 pub(crate) fn harness_60fps(path: &str, asynchronous: bool) -> Harness<'static, PagifyApp> {
+    let mut h = harness_60fps_cold(path, asynchronous);
+    h.run_steps(30);
+    h
+}
+
+/// [`harness_60fps`] before its first frame: the document is open and nothing has been
+/// drawn, for a test of what the first frames do.
+pub(crate) fn harness_60fps_cold(path: &str, asynchronous: bool) -> Harness<'static, PagifyApp> {
     let mut app = PagifyApp::new(Some(path));
     assert!(app.tab().doc.is_some(), "{path} did not open");
     app.render_state.async_render = asynchronous;
-    let mut h = Harness::builder()
+    Harness::builder()
         .with_size(egui::vec2(1400.0, 1000.0))
         .with_step_dt(1.0 / 60.0)
         .build_ui_state(
@@ -951,9 +959,21 @@ pub(crate) fn harness_60fps(path: &str, asynchronous: bool) -> Harness<'static, 
                 app.ui(ui, &mut frame);
             },
             app,
-        );
-    h.run_steps(30);
-    h
+        )
+}
+
+/// Step frames until the first page has a picture to be drawn from — its exact one, or
+/// a quantised one — or give up. A page's first look is paper while the worker makes it.
+pub(crate) fn until_the_page_has_a_picture(h: &mut Harness<'static, PagifyApp>) {
+    for _ in 0..600 {
+        let doc = h.state().tab().doc.as_ref().expect("doc");
+        if !doc.caches.exact.is_empty() || !doc.caches.textures.is_empty() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        h.run_steps(1);
+    }
+    panic!("the page never got a picture");
 }
 
 /// Step frames until the worker's answer has been put on screen, or give up.
@@ -1032,13 +1052,12 @@ fn heavy_pdf(rects: usize) -> Vec<u8> {
 #[test]
 fn a_zoom_does_not_render_on_the_ui_thread_while_it_moves_and_lands_once_it_stops() {
     let mut h = async_harness(&fixture("two-column.pdf"));
+    // The first look at a page is paper while the worker makes its picture — it is
+    // never made on the UI thread — so the zoom starts once the page has one.
+    until_the_page_has_a_picture(&mut h);
     let before = h.state().render_state.render_stats;
-    // The first look at a page is drawn from its thumbnail while the page
-    // itself is rendered, or — with no thumbnail to show — rendered at once.
-    assert!(
-        before.on_ui_thread + before.requested >= 1,
-        "the page was never rendered at all: {before:?}"
-    );
+    assert!(before.requested >= 1, "the page was never rendered at all: {before:?}");
+    assert_eq!(before.on_ui_thread, 0, "the first look was rendered on the UI thread");
 
     let centre = h.state().tab().view_state.viewport_rect.expect("the page was never drawn").center();
     h.input_mut().events.push(egui::Event::PointerMoved(centre));
@@ -1051,10 +1070,14 @@ fn a_zoom_does_not_render_on_the_ui_thread_while_it_moves_and_lands_once_it_stop
     let during = h.state().render_state.render_stats;
     assert_eq!(during.on_ui_thread, before.on_ui_thread, "a zoom step rendered on the UI thread");
     assert_eq!(during.requested, before.requested, "a render was started while the zoom was still moving");
-    assert!(
-        !h.state().tab().doc.as_ref().expect("doc").caches.textures.is_empty(),
-        "the page has nothing to draw meanwhile"
-    );
+    {
+        // Its exact picture, from the zoom before, is what it is drawn from meanwhile.
+        let doc = h.state().tab().doc.as_ref().expect("doc");
+        assert!(
+            !doc.caches.textures.is_empty() || !doc.caches.exact.is_empty(),
+            "the page has nothing to draw meanwhile"
+        );
+    }
 
     // Stopped: after the settle window a render is asked for, off this
     // thread, and lands.
@@ -1070,6 +1093,7 @@ fn a_zoom_does_not_render_on_the_ui_thread_while_it_moves_and_lands_once_it_stop
 #[test]
 fn the_page_is_drawn_from_what_is_held_until_the_right_picture_arrives() {
     let mut h = async_harness(&fixture("two-column.pdf"));
+    until_the_page_has_a_picture(&mut h);
     let ctx = h.ctx.clone();
     let held = h.state_mut().texture_for(&ctx, 0, 1.0).expect("a page");
     let before = h.state().render_state.render_stats;
@@ -1106,6 +1130,7 @@ fn the_page_is_drawn_from_what_is_held_until_the_right_picture_arrives() {
 #[test]
 fn a_render_started_before_an_edit_is_never_put_on_screen() {
     let mut h = async_harness(&fixture("two-column.pdf"));
+    until_the_page_has_a_picture(&mut h);
     let ctx = h.ctx.clone();
     let _ = h.state_mut().texture_for(&ctx, 0, 1.0).expect("a page");
     let before = h.state().render_state.render_stats;
@@ -1272,6 +1297,106 @@ fn zoom_frame_times_on_a_real_file() {
             h.state().render_state.render_stats
         );
     }
+}
+
+/// Not a test: a measurement. What the UI-thread side of the session costs
+/// per page when nothing else holds the lock, then the frame times of a
+/// hover / scroll / zoom session with the render worker busy.
+///
+/// ```text
+/// PAGIFY_PDFIUM_LIB=<pdfium> PAGIFY_BENCH_PDF=<file.pdf> PAGIFY_TRACE_LOCK=1 \
+///   cargo test -p pagify_app --release hover_scroll_zoom_frame_times -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore]
+fn hover_scroll_zoom_frame_times_on_a_real_file() {
+    let Some(path) = std::env::var_os("PAGIFY_BENCH_PDF") else { return };
+    let path = path.to_string_lossy().into_owned();
+    {
+        let h = harness_60fps(&path, false);
+        let doc = h.state().tab().doc.as_ref().expect("doc");
+        let n = doc.page_count;
+        let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
+        for page in 0..n {
+            let t = std::time::Instant::now();
+            let scale = doc.session.page_scale(page).ok();
+            let a = ms(t);
+            let t = std::time::Instant::now();
+            let annots = doc.session.annotations(page).map(|v| v.len()).ok();
+            let b = ms(t);
+            let t = std::time::Instant::now();
+            let links = doc.session.internal_links(page).map(|v| v.len()).ok();
+            let c = ms(t);
+            let t = std::time::Instant::now();
+            let chars = doc.session.characters(page).map(|c| c.len()).ok();
+            let d = ms(t);
+            println!(
+                "page {page}: page_scale {a:.0} ms {scale:?}; annotations {b:.0} ms {annots:?}; internal_links {c:.0} ms {links:?}; characters {d:.0} ms {chars:?}"
+            );
+        }
+    }
+
+    let opened = std::time::Instant::now();
+    let mut h = harness_60fps(&path, true);
+    println!("open + 30 frames: {:.0?}, {:?}", opened.elapsed(), h.state().render_state.render_stats);
+    let vp = h.state().tab().view_state.viewport_rect.expect("the page was never drawn");
+    let mut slow: Vec<String> = Vec::new();
+    let mut frames = 0usize;
+    let mut step = |h: &mut Harness<'static, PagifyApp>, phase: &str, n: usize, slow: &mut Vec<String>| {
+        let before = h.state().render_state.render_stats;
+        let t = std::time::Instant::now();
+        h.run_steps(1);
+        let took = t.elapsed();
+        if took > std::time::Duration::from_millis(50) {
+            let now = h.state().render_state.render_stats;
+            slow.push(format!(
+                "{phase} frame {n}: {took:.0?} (applied +{}, requested +{})",
+                now.applied - before.applied,
+                now.requested - before.requested
+            ));
+        }
+        let _ = n;
+    };
+    // Hover sweep over the strip while the first renders are in flight.
+    for n in 0..120 {
+        let f = n as f32 / 120.0;
+        let at = egui::pos2(vp.left() + vp.width() * (0.2 + 0.6 * f), vp.top() + vp.height() * (0.1 + 0.8 * ((n % 30) as f32 / 30.0)));
+        h.input_mut().events.push(egui::Event::PointerMoved(at));
+        std::thread::sleep(std::time::Duration::from_millis(16));
+        step(&mut h, "hover-open", n, &mut slow);
+        frames += 1;
+    }
+    // Scroll down the document.
+    for n in 0..60 {
+        h.input_mut().events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -120.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: Default::default(),
+        });
+        std::thread::sleep(std::time::Duration::from_millis(16));
+        step(&mut h, "scroll", n, &mut slow);
+        frames += 1;
+    }
+    // Zoom out to several pages in view, then sweep the pointer over them.
+    for n in 0..8 {
+        h.input_mut().events.push(egui::Event::Zoom(0.8));
+        std::thread::sleep(std::time::Duration::from_millis(16));
+        step(&mut h, "zoom-out", n, &mut slow);
+        frames += 1;
+    }
+    for n in 0..200 {
+        let f = n as f32 / 200.0;
+        let at = egui::pos2(vp.left() + vp.width() * (0.1 + 0.8 * ((n % 40) as f32 / 40.0)), vp.top() + vp.height() * (0.1 + 0.8 * f));
+        h.input_mut().events.push(egui::Event::PointerMoved(at));
+        std::thread::sleep(std::time::Duration::from_millis(16));
+        step(&mut h, "hover-zoomed-out", n, &mut slow);
+        frames += 1;
+    }
+    for line in &slow {
+        println!("        {line}");
+    }
+    println!("{} slow frames of {frames}; {:?}", slow.len(), h.state().render_state.render_stats);
 }
 
 /// Which pictures of a page are thrown away: all but the nearest few.

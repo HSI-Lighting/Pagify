@@ -73,6 +73,11 @@ pub(crate) struct DocCaches {
     pub(super) drawn_words: Option<((usize, u64, u64), Vec<pdf_core::document::RecognisedWord>)>,
     /// What a click on a page can pick — see [`crate::PagifyApp::page_hits`].
     pub(super) hits: std::cell::RefCell<Option<((usize, u64, u64), std::rc::Rc<PageHits>)>>,
+    /// What the pointer needs to know about each page it has been over, read by the
+    /// facts worker — see [`crate::page_facts`]. One per page, each good only while the
+    /// document's `render_epoch` and undo generation are what they were when it was
+    /// read (checked where it is used, and the whole map is emptied by `invalidate`).
+    pub(super) facts: std::collections::HashMap<usize, std::sync::Arc<crate::page_facts::PageFacts>>,
 }
 
 /// A page's words, pictures and shapes as a click finds them, read once for the page
@@ -123,6 +128,7 @@ impl DocCaches {
         self.internal_links = None;
         self.drawn_words = None;
         self.hits.get_mut().take();
+        self.facts.clear();
     }
 
     /// Drop the whole-page textures and the detail crop for pages that have
@@ -136,6 +142,7 @@ impl DocCaches {
     pub(super) fn evict_outside(&mut self, keep_from: usize, keep_to: usize) {
         self.textures.retain(|(page, _, _), _| *page >= keep_from && *page < keep_to);
         self.exact.retain(|(page, _, _), _| *page >= keep_from && *page < keep_to);
+        self.facts.retain(|page, _| *page >= keep_from && *page < keep_to);
         if self.detail.as_ref().is_some_and(|d| d.page < keep_from || d.page >= keep_to) {
             self.detail = None;
         }
@@ -165,6 +172,14 @@ impl crate::PagifyApp {
     /// This page's characters, extracted once and kept.
     pub(crate) fn characters(&mut self, page: usize) -> Option<&pagify_shell::reader::Characters> {
         let doc = self.tab_mut().doc.as_mut()?;
+        // Already read by the facts worker — on a heavy page that is the difference
+        // between a drag starting at once and a wait of a second.
+        let facts_have_it = doc.caches.facts.get(&page).is_some_and(|f| {
+            f.epoch == doc.render_epoch && f.generation == doc.session.undo_generation() && f.characters.is_some()
+        });
+        if facts_have_it {
+            return doc.caches.facts.get(&page).and_then(|f| f.characters.as_ref());
+        }
         if doc.caches.text.as_ref().map(|(p, _)| *p) != Some(page) {
             let chars = doc.session.characters(page).ok()?;
             doc.caches.text = Some((page, chars));
@@ -203,30 +218,7 @@ impl crate::PagifyApp {
     pub(crate) fn foreign_marks(&mut self, page: usize) -> &[(usize, Vec<pdf_core::document::Rect>)] {
         let Some(doc) = self.tab_mut().doc.as_mut() else { return &[] };
         if doc.caches.foreign.as_ref().map(|(p, _)| *p) != Some(page) {
-            use pdf_core::document::Annotation as A;
-            let marks = doc.session
-                .annotations(page)
-                .ok()
-                .unwrap_or_default()
-                .iter()
-                .enumerate()
-                .filter_map(|(n, m)| {
-                    let rects = match &m.annotation {
-                        A::Highlight { rects, .. }
-                        | A::Underline { rects, .. }
-                        | A::StrikeOut { rects, .. }
-                        | A::Squiggly { rects, .. } => rects.clone(),
-                        A::Note { rect, .. } => vec![*rect],
-                        A::Image { rect, .. } => vec![*rect],
-                        A::Link { rect, .. } => vec![*rect],
-                        // Ink and Fill are this engine's own markup, tracked
-                        // live in `markup::Layer` rather than hit-tested here;
-                        // text is page content rather than an annotation.
-                        A::Ink { .. } | A::Text { .. } | A::Fill { .. } => return None,
-                    };
-                    Some((n + 1, rects))
-                })
-                .collect();
+            let marks = crate::page_facts::foreign_rects(&doc.session.annotations(page).ok().unwrap_or_default());
             doc.caches.foreign = Some((page, marks));
         }
         doc.caches.foreign.as_ref().map(|(_, m)| m.as_slice()).unwrap_or(&[])
@@ -367,6 +359,17 @@ impl crate::PagifyApp {
             if held == stamp {
                 return Some(weight);
             }
+        }
+        // Counted already by the facts worker: no wait, and no page parsed again.
+        if let Some(weight) = doc
+            .caches
+            .facts
+            .get(&page)
+            .filter(|f| f.epoch == stamp.1 && f.generation == stamp.2)
+            .and_then(|f| f.weight)
+        {
+            doc.caches.weight.set(Some((stamp, weight)));
+            return Some(weight);
         }
         let weight = doc.session.page_scale(page).ok()?;
         doc.caches.weight.set(Some((stamp, weight)));
