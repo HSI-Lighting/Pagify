@@ -142,8 +142,8 @@ android {
         // is to uninstall — which takes the user's data with it. Every APK that
         // goes to a phone somebody is already using gets a higher number here
         // than the one before it.
-        versionCode = 17
-        versionName = "0.1.15"
+        versionCode = 18
+        versionName = "0.1.16"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
