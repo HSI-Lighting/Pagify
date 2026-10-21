@@ -1,6 +1,7 @@
 use super::ui_tests::{fixture, harness, harness_from};
 use super::*;
 use egui_kittest::kittest::Queryable;
+use eframe::App as _;
 use egui_kittest::Harness;
 
 /// One page: width, height, and its lines as (x, y from the top, text).
@@ -72,6 +73,34 @@ fn painted_current_match(h: &Harness<'static, PagifyApp>) -> Vec<egui::Rect> {
             _ => None,
         })
         .collect()
+}
+
+/// Frames with real time between them, as the app has: the render worker is a
+/// real thread, and `async_harness` is the app's own (`async_render` on).
+fn settle(h: &mut Harness<'static, PagifyApp>, frames: usize) {
+    for _ in 0..frames {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        h.run_steps(1);
+    }
+}
+
+/// `async_harness`, at the display scale Windows is set to.
+fn async_harness_at(path: &str, ppp: f32) -> Harness<'static, PagifyApp> {
+    let mut app = PagifyApp::new(Some(path));
+    app.render_state.async_render = true;
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1400.0, 1000.0))
+        .with_pixels_per_point(ppp)
+        .with_step_dt(1.0 / 60.0)
+        .build_ui_state(
+            |ui, app: &mut PagifyApp| {
+                let mut frame = eframe::Frame::_new_kittest();
+                app.ui(ui, &mut frame);
+            },
+            app,
+        );
+    settle(&mut h, 30);
+    h
 }
 
 fn assert_match_in_view(h: &Harness<'static, PagifyApp>, what: &str) {
@@ -244,6 +273,54 @@ fn middle_of_the_window_pt(h: &Harness<'static, PagifyApp>) -> f32 {
 
 fn thirty_pages() -> Vec<Page> {
     (0..30).map(|_| (612.0, 792.0, vec![(72.0, 400.0, "a line in the middle")])).collect()
+}
+
+/// **Reported from use: "a word searched for is highlighted in the document
+/// but the view does not go to the page it is on — in a long document that
+/// is not intuitive."** One match, low on page 20 of 30, found from a view at
+/// the top and from one already part-way in, at every zoom mode.
+#[test]
+fn find_in_a_long_document_takes_the_view_to_the_matchs_page() {
+    let pages = || -> Vec<Page> {
+        (0..30)
+            .map(|i| {
+                let mut lines = vec![(72.0, 400.0, "a line in the middle")];
+                if i == 19 {
+                    lines.push((72.0, 700.0, "the zebra is here"));
+                }
+                (612.0, 792.0, lines)
+            })
+            .collect()
+    };
+    for (ppp, mode) in [1.0f32, 1.5].into_iter().flat_map(|p| [ZoomMode::Fit, ZoomMode::Width, ZoomMode::Factor(1.0)].map(move |m| (p, m))) {
+        for (start, enter) in [(1usize, false), (15, false), (1, true), (15, true)] {
+            let what = format!("scale {ppp}, {mode:?}, searching from page {start}, {}", if enter { "Enter" } else { "Find button" });
+            let mut h = async_harness_at(&written("long-find", &pages()), ppp);
+            h.state_mut().tab_mut().view_state.zoom = mode;
+            settle(&mut h, 20);
+            h.state_mut().act(Verb::Page(PageTarget::Number(start)));
+            settle(&mut h, 20);
+            h.state_mut().submit("replace");
+            settle(&mut h, 10);
+            h.state_mut().tab_mut().panels.find_replace.as_mut().expect("the panel").find = "zebra".into();
+            settle(&mut h, 10);
+
+            if enter {
+                h.get_all_by_role(egui::accesskit::Role::TextInput)
+                    .find(|n| n.value().as_deref() == Some("zebra"))
+                    .expect("the Find field")
+                    .focus();
+                settle(&mut h, 10);
+                h.key_press(egui::Key::Enter);
+            } else {
+                h.get_by_role_and_label(egui::accesskit::Role::Button, "Find").click();
+            }
+            settle(&mut h, 40);
+
+            assert_eq!(h.state().tab().view_state.page, 19, "{what}: the view did not go to page 20");
+            assert_match_in_view(&h, &what);
+        }
+    }
 }
 
 /// **Reported from use: "the page shifts after editing", and the same when
