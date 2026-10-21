@@ -1723,6 +1723,25 @@ impl crate::PagifyApp {
     ) {
         let response = ui.interact(rect, egui::Id::new(("page", page)), egui::Sense::click_and_drag());
 
+        // The middle button pans whatever tool is held. That is the CAD
+        // convention and it costs nothing to honour: it is a button no other
+        // gesture here uses, so panning never has to be *selected*, and a tool
+        // in progress is not disturbed by moving the paper under it.
+        //
+        // **First of all, before anything can take the press for its own:** the
+        // object tool, a placed picture or signature and a paste in hand each
+        // take the pointer whole and return, and none of them asks which button
+        // it was — a middle drag over Edit Object's selection moved the thing
+        // instead of the paper. A pan is not a click, so it also does not end
+        // the rail's page selection or apply an open Edit Text box.
+        if let Some(by) = Self::held_pointer_delta(ui, &response, egui::PointerButton::Middle) {
+            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grabbing);
+            if by != egui::Vec2::ZERO {
+                self.pan(by);
+            }
+            return;
+        }
+
         // **Pressing on the page ends the rail's page selection.** Pages picked
         // in the thumbnail rail stay selected until Escape, and Ctrl+C and Delete
         // give them priority over everything else. Reported from use: Edit Object
@@ -1889,27 +1908,15 @@ impl crate::PagifyApp {
         // enough of a signal for a mode that stops selection working: the
         // symptom is "text is not selectable any more", which reads as a broken
         // program rather than as the wrong tool being held.
-        // The middle button pans whatever tool is held. That is the CAD
-        // convention and it costs nothing to honour: it is a button no other
-        // gesture here uses, so panning never has to be *selected*, and a tool
-        // in progress is not disturbed by moving the paper under it.
-        let middle = response.dragged_by(egui::PointerButton::Middle);
-        if middle {
-            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grabbing);
-            self.pan(response.drag_delta());
-            return;
-        }
-
         if self.tab_mut().pointer == pagify_shell::verbs::PointerMode::Pan {
+            // The paper follows the pointer from the press — see
+            // `held_pointer_delta`. `dragged()` waited for 6 px of movement.
+            let held = Self::held_pointer_delta(ui, &response, egui::PointerButton::Primary);
             ui.output_mut(|o| {
-                o.cursor_icon = if response.dragged() {
-                    egui::CursorIcon::Grabbing
-                } else {
-                    egui::CursorIcon::Grab
-                }
+                o.cursor_icon = if held.is_some() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab }
             });
-            if response.dragged() {
-                self.pan(response.drag_delta());
+            if let Some(by) = held.filter(|by| *by != egui::Vec2::ZERO) {
+                self.pan(by);
             }
             self.tab_mut().selection.text_drag = None;
             self.tab_mut().selection.drag_from = None;
@@ -1927,6 +1934,31 @@ impl crate::PagifyApp {
             return;
         }
         self.page_drag(ui, &response, view, page, at);
+    }
+
+    /// How far the pointer moved this frame, while `button` — pressed on this
+    /// page — is still down; `None` when it is not.
+    ///
+    /// **A pan must not wait for egui to call the press a drag.** The page
+    /// senses clicks as well as drags, so `dragged()` stays false until the
+    /// pointer has moved `max_click_dist` (6 px) or been held 0.8 s, and its
+    /// `drag_delta` begins only then: the paper sat still under the pointer
+    /// and then jumped, which read as "click, hold a moment, then it pans".
+    /// `is_pointer_button_down_on` is true from the press frame. The press
+    /// frame's own movement is the pointer arriving, not the hand moving.
+    fn held_pointer_delta(
+        ui: &egui::Ui,
+        response: &egui::Response,
+        button: egui::PointerButton,
+    ) -> Option<egui::Vec2> {
+        if !response.is_pointer_button_down_on() {
+            return None;
+        }
+        ui.input(|i| {
+            i.pointer
+                .button_down(button)
+                .then(|| if i.pointer.button_pressed(button) { egui::Vec2::ZERO } else { i.pointer.delta() })
+        })
     }
 
     /// A pointing hand over a link, a text cursor over words — the same

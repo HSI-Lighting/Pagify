@@ -4560,6 +4560,111 @@ fn hand_mode_actually_moves_the_page() {
     );
 }
 
+/// Press `button` at `from`, then move by each of `steps` in turn, letting the
+/// app run after each, and say how far the view had scrolled down after every
+/// step. The button is let go at the end.
+fn hold_and_move(
+    h: &mut Harness<'static, PagifyApp>,
+    button: egui::PointerButton,
+    from: egui::Pos2,
+    steps: &[egui::Vec2],
+) -> Vec<f32> {
+    use egui::Event;
+    let press = |pos, down| Event::PointerButton { pos, button, pressed: down, modifiers: Default::default() };
+    let start = h.state().tab().view_state.scroll_offset.y;
+    h.input_mut().events.push(Event::PointerMoved(from));
+    h.run_steps(1);
+    h.input_mut().events.push(press(from, true));
+    h.run_steps(1);
+    let (mut at, mut scrolled) = (from, Vec::new());
+    for step in steps {
+        at += *step;
+        h.input_mut().events.push(Event::PointerMoved(at));
+        h.run_steps(2);
+        scrolled.push(h.state().tab().view_state.scroll_offset.y - start);
+    }
+    h.input_mut().events.push(press(at, false));
+    h.run_steps(3);
+    scrolled
+}
+
+/// **Reported from use: "the pan starts a few milliseconds after the middle
+/// button is pressed — click and hold a moment, then it pans. Not intuitive."**
+/// The page senses clicks as well as drags, so egui does not call a press a
+/// drag until the pointer has gone 6 px (`max_click_dist`) or been held for
+/// 0.8 s — and the pan read `dragged()`. Those first pixels were thrown away:
+/// the paper sat still under the pointer and then jumped. The pan now follows
+/// the pointer from the press (`is_pointer_button_down_on`).
+fn assert_pans_from_the_first_pixel(scrolled: &[f32], what: &str) {
+    let up = |n: f32| n; // the pointer goes up, so the page goes down by as much
+    assert!(
+        (scrolled[0] - up(3.0)).abs() < 0.6,
+        "{what}: 3 px of movement moved the view {} px — the first pixels are lost ({scrolled:?})",
+        scrolled[0]
+    );
+    assert!((scrolled[1] - up(5.0)).abs() < 0.6, "{what}: 5 px moved it {} ({scrolled:?})", scrolled[1]);
+    assert!(
+        (scrolled[2] - up(105.0)).abs() < 1.0,
+        "{what}: 105 px of movement moved the view {} — the pan lost some of the way ({scrolled:?})",
+        scrolled[2]
+    );
+}
+
+fn small_then_large() -> [egui::Vec2; 3] {
+    [egui::vec2(0.0, -3.0), egui::vec2(0.0, -2.0), egui::vec2(0.0, -100.0)]
+}
+
+#[test]
+fn the_middle_button_pans_from_the_first_pixel() {
+    let mut h = harness("pages-ladder.pdf");
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(4.0);
+    h.run_steps(3);
+    let scrolled = hold_and_move(&mut h, egui::PointerButton::Middle, egui::pos2(1000.0, 500.0), &small_then_large());
+    assert_pans_from_the_first_pixel(&scrolled, "middle button");
+}
+
+#[test]
+fn hand_mode_pans_from_the_first_pixel() {
+    let mut h = harness("pages-ladder.pdf");
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(4.0);
+    h.state_mut().submit("hand");
+    h.run_steps(3);
+    let scrolled = hold_and_move(&mut h, egui::PointerButton::Primary, egui::pos2(1000.0, 500.0), &small_then_large());
+    assert_pans_from_the_first_pixel(&scrolled, "hand");
+}
+
+/// The object tool, a placed picture or signature and a paste in hand each
+/// take the pointer and return before the middle button was looked at, so a
+/// middle drag with Edit Object in hand panned nothing (and could move what it
+/// was over).
+#[test]
+fn the_middle_button_pans_with_edit_object_in_hand() {
+    let mut h = harness("pages-ladder.pdf");
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(4.0);
+    h.state_mut().submit("editobject");
+    h.run_steps(3);
+    let scrolled = hold_and_move(&mut h, egui::PointerButton::Middle, egui::pos2(1000.0, 500.0), &small_then_large());
+    assert_pans_from_the_first_pixel(&scrolled, "middle button, Edit Object");
+}
+
+/// Following the pointer from the press must not make a pan out of a press that
+/// goes nowhere: a hand click, or a middle press-and-release, moves nothing.
+#[test]
+fn a_press_that_does_not_move_pans_nothing() {
+    for (button, hand) in [(egui::PointerButton::Middle, false), (egui::PointerButton::Primary, true)] {
+        let mut h = harness("pages-ladder.pdf");
+        h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(4.0);
+        if hand {
+            h.state_mut().submit("hand");
+        }
+        h.run_steps(3);
+        let before = h.state().tab().view_state.scroll_offset;
+        let held = hold_and_move(&mut h, button, egui::pos2(1000.0, 500.0), &[egui::Vec2::ZERO; 3]);
+        assert_eq!(held, vec![0.0; 3], "{button:?}: holding still moved the view");
+        assert_eq!(h.state().tab().view_state.scroll_offset, before, "{button:?}: a press that went nowhere panned");
+    }
+}
+
 #[test]
 fn dragging_over_text_selects_it() {
     let mut h = harness("text-lines.pdf");
