@@ -415,7 +415,7 @@ impl crate::PagifyApp {
                 self.save(None);
             }
             Effect::SaveFileAs(path) => {
-                self.save(Some(path));
+                self.save_as(path);
             }
             Effect::SaveAsDialog => self.save_as_dialog(),
             Effect::SaveShareCopy(path) => self.save_share_copy(path),

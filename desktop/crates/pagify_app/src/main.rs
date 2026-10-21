@@ -9766,10 +9766,35 @@ impl PagifyApp {
 
         match dialog.save_file() {
             Some(path) => {
-                self.save(Some(path));
+                self.save_as(path);
             }
             None => self.say_info("nothing chosen."),
         }
+    }
+
+    /// Save As: write the file, then make it the one that is open. A person who
+    /// saves under a new name expects to carry on editing *that* file — the tab,
+    /// the next Save and Recent all follow it. The undo history, view and
+    /// selection are untouched; only the name the document is saved under moves.
+    ///
+    /// Kept apart from `save` on purpose: "save a secured copy" also writes to
+    /// another path, and there the original is meant to stay the open file.
+    fn save_as(&mut self, dest: PathBuf) -> SaveOutcome {
+        let outcome = self.save(Some(dest.clone()));
+        if outcome != SaveOutcome::Done {
+            return outcome;
+        }
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            return outcome;
+        };
+        session.set_path(dest.clone());
+        let page_count = session.page_count().unwrap_or(0);
+        self.library_state.recent.record(&dest, page_count, pagify_shell::recent::now());
+        if !cfg!(test) {
+            self.library_state.recent.save();
+        }
+        self.cmd.prompt_mut().document = dest.file_name().map(|n| n.to_string_lossy().into_owned());
+        outcome
     }
 
     /// Ask where to write a copy for sending, offering `<name> (for sharing).pdf`
@@ -17412,6 +17437,8 @@ mod looks_rotated_tests;
 
 #[cfg(test)]
 mod redaction_wiring_tests;
+#[cfg(test)]
+mod save_as_tests;
 
 #[cfg(test)]
 mod lock_wiring_tests;

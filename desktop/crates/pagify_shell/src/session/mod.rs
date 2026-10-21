@@ -425,7 +425,9 @@ pub struct PageTextSnapshot {
 /// An open document. Owns its registry entry for as long as it lives.
 pub struct Session {
     handle: i64,
-    path: PathBuf,
+    /// Where the document is saved to. Changes only through [`Session::set_path`]
+    /// (Save As), so it sits behind a lock: the session is shared as an `Arc`.
+    path: std::sync::Mutex<PathBuf>,
     /// The undo history's change counter — the history's own, shared out, so it
     /// can be read without the registry lock. See [`Session::undo_generation`].
     generation: std::sync::Arc<std::sync::atomic::AtomicU64>,

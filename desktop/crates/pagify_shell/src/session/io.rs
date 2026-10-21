@@ -39,10 +39,17 @@ impl Session {
         })?;
 
         let generation = registry::with_session(handle, |s| Ok(s.history.generation_counter()))?;
-        Ok(Session { handle, path, generation })
+        Ok(Session { handle, path: std::sync::Mutex::new(path), generation })
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
+    pub fn path(&self) -> PathBuf {
+        self.path.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Make `path` the file this document is saved to from now on — Save As,
+    /// after the file has been written. PDFium keeps reading what it has not
+    /// loaded yet from the file it was opened from; only the name changes.
+    pub fn set_path(&self, path: PathBuf) {
+        *self.path.lock().unwrap_or_else(|e| e.into_inner()) = path;
     }
 }

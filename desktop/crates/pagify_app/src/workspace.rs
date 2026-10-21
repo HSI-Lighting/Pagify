@@ -175,7 +175,7 @@ impl crate::PagifyApp {
                 if self.tab_mut().ribbon == Tab::File {
                     self.tab_mut().ribbon = Tab::Home;
                 }
-                self.library_state.recent.record(session.path(), page_count, pagify_shell::recent::now());
+                self.library_state.recent.record(&session.path(), page_count, pagify_shell::recent::now());
                 if !cfg!(test) {
                     self.library_state.recent.save();
                 }

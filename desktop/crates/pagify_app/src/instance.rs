@@ -568,7 +568,7 @@ impl PagifyApp {
         let wanted = real(path);
         self.tabs
             .iter()
-            .position(|t| t.doc.as_ref().is_some_and(|d| real(d.session.path()) == wanted))
+            .position(|t| t.doc.as_ref().is_some_and(|d| real(&d.session.path()) == wanted))
     }
 }
 
