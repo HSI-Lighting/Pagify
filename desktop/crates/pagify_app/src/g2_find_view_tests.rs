@@ -367,6 +367,91 @@ fn narrowing_the_page_area_does_not_move_the_reader_in_width_zoom() {
     }
 }
 
+// -- Find's highlight does not outlive the search ---------------------------
+
+/// Every wash a search leaves on the page: the amber of the current match and
+/// of the others, and the blue of the selection the current match becomes.
+fn find_washes(h: &Harness<'static, PagifyApp>) -> usize {
+    let washes = [
+        egui::Color32::from_rgba_unmultiplied(0xFF, 0xC1, 0x07, 150),
+        egui::Color32::from_rgba_unmultiplied(0xFF, 0xC1, 0x07, 70),
+        egui::Color32::from_rgba_unmultiplied(0x4C, 0xC9, 0xF0, 90),
+    ];
+    h.output()
+        .shapes
+        .iter()
+        .filter(|s| matches!(&s.shape, egui::Shape::Rect(r) if washes.contains(&r.fill)))
+        .count()
+}
+
+/// The panel open and "the" found: two matches, so the current one and
+/// another are both on the page's washes.
+fn searched_in_the_panel(name: &str) -> Harness<'static, PagifyApp> {
+    let mut h = open_text_pdf(name, &three_text_pages());
+    h.state_mut().submit("replace");
+    h.run_steps(2);
+    h.state_mut().tab_mut().panels.find_replace.as_mut().expect("the panel").find = "the".into();
+    h.run_steps(2);
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Find").click();
+    h.run_steps(4);
+    assert!(find_washes(&h) > 0, "setup: the search painted nothing, so nothing here could be cleared");
+    h
+}
+
+fn nothing_of_the_search_is_left(h: &Harness<'static, PagifyApp>, how: &str) {
+    assert_eq!(find_washes(h), 0, "{how}: the page still shows the search");
+    assert!(h.state().tab().panels.find_hits.is_empty(), "{how}: the matches were kept");
+    assert!(h.state().tab().selection.text_selection.is_none(), "{how}: the match is still selected");
+}
+
+/// **Reported from use: "the text stays highlighted after it is found; it
+/// shouldn't once the search and replace window is closed."**
+#[test]
+fn closing_the_search_panel_takes_its_highlight_off_the_page() {
+    let mut h = searched_in_the_panel("close-button");
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Close").click();
+    h.run_steps(4);
+    assert!(h.state().tab().panels.find_replace.is_none(), "setup: the Close button left the panel open");
+    nothing_of_the_search_is_left(&h, "Close button");
+}
+
+#[test]
+fn escape_closes_the_search_panel_and_its_highlight() {
+    let mut h = searched_in_the_panel("escape-panel");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(4);
+    assert!(h.state().tab().panels.find_replace.is_none(), "setup: Escape left the panel open");
+    nothing_of_the_search_is_left(&h, "Escape with the panel open");
+}
+
+/// A `find` typed in the command box has no window to close: Escape, which
+/// stops whatever is under way, is what puts its highlight down.
+#[test]
+fn escape_puts_down_the_highlight_of_a_find_from_the_command_box() {
+    let mut h = open_text_pdf("escape-command", &three_text_pages());
+    h.state_mut().submit("find the");
+    h.run_steps(4);
+    assert!(find_washes(&h) > 0, "setup: the search painted nothing");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(4);
+    nothing_of_the_search_is_left(&h, "Escape after a command-box find");
+}
+
+/// Only the match's own selection goes: words the reader selected afterwards
+/// are theirs.
+#[test]
+fn closing_the_panel_leaves_a_selection_that_is_not_the_match() {
+    let mut h = searched_in_the_panel("own-selection");
+    let theirs = 5..10;
+    let (_, match_range) = h.state().tab().panels.find_hits[h.state().tab().panels.find_at].clone();
+    assert_ne!(match_range, theirs, "setup: the selection must differ from the match");
+    h.state_mut().tab_mut().selection.text_selection = Some(theirs.clone());
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Close").click();
+    h.run_steps(4);
+    assert_eq!(h.state().tab().selection.text_selection, Some(theirs), "their own selection was taken away");
+    assert!(h.state().tab().panels.find_hits.is_empty(), "the matches were kept");
+}
+
 /// The restore must only answer a change, never a scroll.
 #[test]
 fn an_ordinary_scroll_is_not_undone_by_the_view_restore() {

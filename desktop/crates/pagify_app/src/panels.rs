@@ -312,6 +312,7 @@ impl crate::PagifyApp {
         }
 
         if done {
+            self.clear_find_highlight();
             return;
         }
         self.tab_mut().panels.find_replace = Some(panel);

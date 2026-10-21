@@ -7723,6 +7723,19 @@ impl PagifyApp {
         self.go_to_hit(next);
     }
 
+    /// Put down what a search left on the page: the matches, and the selection
+    /// the current match became. A selection that is no longer the match is the
+    /// reader's own and stays. Called when the Search & Replace window closes
+    /// and by Escape, which is also what ends a `find` typed in the command box.
+    fn clear_find_highlight(&mut self) {
+        let tab = self.tab_mut();
+        let current = tab.panels.find_hits.get(tab.panels.find_at).map(|(_, range)| range.clone());
+        if current.is_some() && tab.selection.text_selection == current {
+            tab.selection.text_selection = None;
+        }
+        tab.panels.find_hits.clear();
+    }
+
     fn go_to_hit(&mut self, index: usize) {
         let Some((page, range)) = self.tab_mut().panels.find_hits.get(index).cloned() else { return };
         self.tab_mut().panels.find_at = index;
@@ -10147,6 +10160,7 @@ impl PagifyApp {
         // Escape means "stop what you are doing", and being left in Hand
         // afterwards is not stopping.
         self.tab_mut().pointer = Default::default();
+        self.clear_find_highlight();
         if self.clipboard_state.paste_ghost.take().is_some() {
             self.say_info("nothing was pasted.");
         }
