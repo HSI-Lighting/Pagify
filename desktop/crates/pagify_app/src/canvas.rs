@@ -1734,7 +1734,18 @@ impl crate::PagifyApp {
         // it was — a middle drag over Edit Object's selection moved the thing
         // instead of the paper. A pan is not a click, so it also does not end
         // the rail's page selection or apply an open Edit Text box.
-        if let Some(by) = Self::held_pointer_delta(ui, &response, egui::PointerButton::Middle) {
+        //
+        // **Hand pans here too, for a second reason.** On the frame a drag is
+        // decided, `interact_signatures` and `interact_placed_images` read the
+        // page's annotations from the engine on the UI thread — 343 ms and
+        // 264 ms on a 243,000-object page, 1.3 s with the render lock — and
+        // take the drag for themselves when it starts on a picture. Measured
+        // (`ui_tests::pan_frame_times_on_a_real_file`): one 1.3 s frame at the
+        // start of every Hand drag, where the middle button's worst was 1.6 ms.
+        let hand = self.tab_mut().pointer == pagify_shell::verbs::PointerMode::Pan;
+        let held = Self::held_pointer_delta(ui, &response, egui::PointerButton::Middle)
+            .or_else(|| hand.then(|| Self::held_pointer_delta(ui, &response, egui::PointerButton::Primary)).flatten());
+        if let Some(by) = held {
             ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grabbing);
             if by != egui::Vec2::ZERO {
                 self.pan(by);
@@ -1908,16 +1919,11 @@ impl crate::PagifyApp {
         // enough of a signal for a mode that stops selection working: the
         // symptom is "text is not selectable any more", which reads as a broken
         // program rather than as the wrong tool being held.
-        if self.tab_mut().pointer == pagify_shell::verbs::PointerMode::Pan {
-            // The paper follows the pointer from the press — see
-            // `held_pointer_delta`. `dragged()` waited for 6 px of movement.
-            let held = Self::held_pointer_delta(ui, &response, egui::PointerButton::Primary);
-            ui.output_mut(|o| {
-                o.cursor_icon = if held.is_some() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab }
-            });
-            if let Some(by) = held.filter(|by| *by != egui::Vec2::ZERO) {
-                self.pan(by);
-            }
+        if hand {
+            // The pan itself is at the top of this function, where nothing can
+            // take the press first. What is left is the cursor, and a press
+            // that went nowhere, which is still a click.
+            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grab);
             self.tab_mut().selection.text_drag = None;
             self.tab_mut().selection.drag_from = None;
             if !response.clicked() {

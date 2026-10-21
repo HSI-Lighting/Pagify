@@ -4665,6 +4665,104 @@ fn a_press_that_does_not_move_pans_nothing() {
     }
 }
 
+/// **Reported from use (0.1.93): the middle button pans at once, the Hand tool
+/// still starts late.** The Hand branch sat after `interact_signatures` and
+/// `interact_placed_images`, which on the frame a drag is decided read the
+/// page's annotations from the engine — on the UI thread, uncached, behind
+/// the render lock (seconds on a 240,000-object page) — and which take the
+/// drag for themselves when it starts on a picture. Hand now pans before
+/// either is asked, as the middle button does.
+#[test]
+fn hand_pans_from_a_press_that_starts_on_a_placed_picture() {
+    let mut h = harness("two-column.pdf");
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(2.0);
+    h.run_steps(3);
+    // On the page point under the middle of the window, so it is on screen
+    // wherever the zoom left the scroll.
+    let viewport = h.state().tab().view_state.viewport_rect.expect("the page was never drawn");
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
+    let rgba: Vec<u8> = [200u8, 60, 60, 255].repeat(16);
+    h.state_mut().place_image_at(0, view.to_page(viewport.center()), rgba, 4, 4).expect("placed");
+    h.state_mut().submit("hand");
+    h.run_steps(3);
+
+    let marks = |h: &mut Harness<'static, PagifyApp>| {
+        h.state_mut().tab_mut().doc.as_ref().expect("open").session.placed_image_marks(0).expect("marks")
+    };
+    let before = marks(&mut h).remove(0);
+    let from = screen_centre(&mut h, before.rect);
+    assert!(viewport.contains(from), "setup: the picture is off screen at {from:?} ({viewport:?})");
+
+    let scrolled = hold_and_move(&mut h, egui::PointerButton::Primary, from, &small_then_large());
+    assert_pans_from_the_first_pixel(&scrolled, "hand, from a placed picture");
+    let after = marks(&mut h).remove(0);
+    assert_eq!(
+        (before.rect.left, before.rect.top),
+        (after.rect.left, after.rect.top),
+        "a Hand drag that began on the picture moved the picture"
+    );
+    assert!(h.state().tab().selection.placed_image_selected.is_none(), "a Hand drag selected the picture");
+}
+
+/// Not a test: a measurement of the report above. The frames of a Hand drag
+/// and of a middle-button drag on a real, heavy page, and what the two
+/// annotation reads cost on it.
+///
+/// ```text
+/// PAGIFY_PDFIUM_LIB=<pdfium> PAGIFY_BENCH_PDF=<file.pdf> \
+///   cargo test -p pagify_app --release pan_frame_times -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore]
+fn pan_frame_times_on_a_real_file() {
+    let Some(path) = std::env::var_os("PAGIFY_BENCH_PDF") else { return };
+    let path = path.to_string_lossy().into_owned();
+    let settle = |h: &mut Harness<'static, PagifyApp>| {
+        for _ in 0..150 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            h.run_steps(1);
+        }
+    };
+    for (name, button, hand) in [
+        ("hand", egui::PointerButton::Primary, true),
+        ("middle", egui::PointerButton::Middle, false),
+    ] {
+        let mut h = harness_60fps(&path, true);
+        if hand {
+            h.state_mut().submit("hand");
+        }
+        settle(&mut h);
+        if hand {
+            let session = &h.state().tab().doc.as_ref().expect("open").session;
+            let t = std::time::Instant::now();
+            let _ = session.image_signature_marks(0);
+            println!("image_signature_marks(0): {:.1?}", t.elapsed());
+            let t = std::time::Instant::now();
+            let _ = session.placed_image_marks(0);
+            println!("placed_image_marks(0):    {:.1?}", t.elapsed());
+        }
+        let centre = h.state().tab().view_state.viewport_rect.expect("the page was never drawn").center();
+        let press = |pos, down| egui::Event::PointerButton { pos, button, pressed: down, modifiers: Default::default() };
+        let mut frames: Vec<(String, std::time::Duration)> = Vec::new();
+        let mut run = |h: &mut Harness<'static, PagifyApp>, what: String, event: egui::Event| {
+            h.input_mut().events.push(event);
+            let t = std::time::Instant::now();
+            h.run_steps(1);
+            frames.push((what, t.elapsed()));
+        };
+        run(&mut h, "move".into(), egui::Event::PointerMoved(centre));
+        run(&mut h, "press".into(), press(centre, true));
+        for i in 1..=20 {
+            run(&mut h, format!("drag step {i}"), egui::Event::PointerMoved(centre - egui::vec2(0.0, 3.0 * i as f32)));
+        }
+        run(&mut h, "release".into(), press(centre - egui::vec2(0.0, 60.0), false));
+        let over: Vec<String> =
+            frames.iter().filter(|(_, d)| *d > std::time::Duration::from_millis(50)).map(|(w, d)| format!("{w} {d:.0?}")).collect();
+        let longest = frames.iter().map(|(_, d)| *d).max().unwrap_or_default();
+        println!("{name:>6}: longest frame {longest:.1?}, over 50 ms: {over:?}");
+    }
+}
+
 #[test]
 fn dragging_over_text_selects_it() {
     let mut h = harness("text-lines.pdf");
