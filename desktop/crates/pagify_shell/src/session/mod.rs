@@ -43,6 +43,7 @@ mod history;
 mod security;
 mod typing;
 mod markup;
+mod turned;
 mod runs;
 mod pages;
 mod annotate;
@@ -431,6 +432,8 @@ pub struct Session {
     /// The undo history's change counter — the history's own, shared out, so it
     /// can be read without the registry lock. See [`Session::undo_generation`].
     generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Each page's frame, once read: see [`Session::frame`].
+    frames: std::sync::Mutex<std::collections::HashMap<usize, pdf_core::document::frame::Frame>>,
 }
 
 impl Session {

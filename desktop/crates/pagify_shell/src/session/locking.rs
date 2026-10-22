@@ -32,6 +32,7 @@ impl Session {
         outlined_fonts: &[&[u8]],
     ) -> Result<pdf_core::document::RedactionReport> {
         let catalogue = merged_catalogue(outlined_fonts);
+        let area = self.frame(page_index).rect_back(area);
         registry::with_session(self.handle, |s| {
             s.document
                 .as_document_mut()
@@ -88,7 +89,9 @@ impl Session {
         require_complete: bool,
     ) -> Result<pdf_core::document::RedactionReport> {
         let catalogue = merged_catalogue(outlined_fonts);
-        let request = pdf_core::document::Redaction::over(page_index, shapes.to_vec())
+        let f = self.frame(page_index);
+        let shapes: Vec<pdf_core::document::Rect> = shapes.iter().map(|r| f.rect_back(*r)).collect();
+        let request = pdf_core::document::Redaction::over(page_index, shapes)
             .ok_or(pdf_core::PdfError::InvalidArgument("nothing to lock".into()))?;
         let request = pdf_core::document::Redaction { require_complete, ..request };
         registry::with_session(self.handle, |s| {
@@ -138,7 +141,10 @@ impl Session {
 
     /// Every image on a page, for offering one as something to lock.
     pub fn images_on(&self, page_index: usize) -> Result<Vec<pdf_core::document::PageImage>> {
-        registry::with_session(self.handle, |s| s.document.images_on(page_index))
+        let mut images = registry::with_session(self.handle, |s| s.document.images_on(page_index))?;
+        let f = self.frame(page_index);
+        images.iter_mut().for_each(|i| f.page_image(i));
+        Ok(images)
     }
 
     /// Take one image off its page and seal it. Returns the id naming the seal.
@@ -174,26 +180,34 @@ impl Session {
     /// the vault lives beside the writes, even though asking what is in it does
     /// not change anything.
     pub fn locked_items_on(&self, page_index: usize) -> Vec<pdf_core::document::LockedItem> {
-        registry::with_session(self.handle, |s| {
+        let mut items: Vec<pdf_core::document::LockedItem> = registry::with_session(self.handle, |s| {
             Ok(s.document
                 .as_document_mut()
                 .and_then(|d| d.locked_items_on(page_index).ok())
                 .unwrap_or_default())
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+        let f = self.frame(page_index);
+        items.iter_mut().for_each(|i| f.locked(i));
+        items
     }
 
     /// [`Self::locked_items_on`] that gives up at once if the engine is busy (a page
     /// is being drawn): `None`, and ask again. For the badges, which are drawn on
     /// every frame and can wait one out.
     pub fn try_locked_items_on(&self, page_index: usize) -> Option<Vec<pdf_core::document::LockedItem>> {
-        registry::try_with_session(self.handle, |s| {
+        let mut items: Vec<pdf_core::document::LockedItem> = registry::try_with_session(self.handle, |s| {
             Ok(s.document
                 .as_document_mut()
                 .and_then(|d| d.locked_items_on(page_index).ok())
                 .unwrap_or_default())
         })
-        .map(|read| read.unwrap_or_default())
+        .map(|read| read.unwrap_or_default())?;
+        // Never waits: a frame that is not known and cannot be read now means
+        // the badges are not drawn this frame, as when the engine is busy.
+        let f = self.try_frame(page_index)?;
+        items.iter_mut().for_each(|i| f.locked(i));
+        Some(items)
     }
 
     /// Every locked page's original, decrypted and verified. Writes nothing —

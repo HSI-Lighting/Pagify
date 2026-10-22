@@ -9,13 +9,18 @@ use super::*;
 impl Session {
     /// What a page draws, in the order it draws it — bottom first.
     pub fn drawn_objects(&self, page_index: usize) -> Result<Vec<pdf_core::document::DrawnObject>> {
-        registry::with_session(self.handle, |s| s.document.drawn_objects(page_index))
+        let mut objects = registry::with_session(self.handle, |s| s.document.drawn_objects(page_index))?;
+        let f = self.frame(page_index);
+        objects.iter_mut().for_each(|d| f.drawn(d));
+        Ok(objects)
     }
 
     /// Some of a page's pictures and shapes, lifted into a one-page clip of
     /// their own operators — see [`pdf_core::document::Document::lift_objects`].
     pub fn lift_objects(&self, page_index: usize, objects: &[usize]) -> Result<pdf_core::document::Lifted> {
-        registry::with_session(self.handle, |s| s.document.lift_objects(page_index, objects))
+        let mut lifted = registry::with_session(self.handle, |s| s.document.lift_objects(page_index, objects))?;
+        self.frame(page_index).lifted(&mut lifted);
+        Ok(lifted)
     }
 
     /// Resize one thing about a point — see
@@ -28,6 +33,8 @@ impl Session {
         sx: f32,
         sy: f32,
     ) -> Result<()> {
+        let f = self.frame(page);
+        let (anchor, (sx, sy)) = (f.point_back(anchor), if f.swaps_axes() { (sy, sx) } else { (sx, sy) });
         registry::with_session(self.handle, |s| s.document.scale_object(page, object, anchor, sx, sy))
     }
 
@@ -54,7 +61,11 @@ impl Session {
         object: usize,
         up: bool,
     ) -> Result<Option<pdf_core::document::DrawnObject>> {
-        registry::with_session(self.handle, |s| s.document.stacking_neighbour(page_index, object, up))
+        let mut found = registry::with_session(self.handle, |s| s.document.stacking_neighbour(page_index, object, up))?;
+        if let Some(d) = found.as_mut() {
+            self.frame(page_index).drawn(d);
+        }
+        Ok(found)
     }
 
     /// Put one thing at the front or the back of a page's drawing order.

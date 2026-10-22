@@ -17377,6 +17377,8 @@ mod marquee_tests;
 #[cfg(test)]
 mod object_hover_tests;
 #[cfg(test)]
+mod turned_page_tests;
+#[cfg(test)]
 mod page_facts_tests;
 #[cfg(test)]
 mod text_style_tests;

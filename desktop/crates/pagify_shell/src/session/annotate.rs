@@ -57,10 +57,9 @@ impl Session {
 
     /// The characters on a page, unpacked for selection.
     pub fn characters(&self, page: usize) -> Result<crate::reader::Characters> {
-        registry::with_session(self.handle, |s| {
-            let raw = s.document.page(page)?.characters()?;
-            Ok(crate::reader::Characters::new(raw))
-        })
+        let mut raw = registry::with_session(self.handle, |s| s.document.page(page)?.characters())?;
+        self.frame(page).characters(&mut raw);
+        Ok(crate::reader::Characters::new(raw))
     }
 
     /// Every page's size, for laying out the continuous strip.

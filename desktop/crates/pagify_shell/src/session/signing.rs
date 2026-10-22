@@ -15,6 +15,8 @@ impl Session {
         from: pdf_core::document::Point,
         to: pdf_core::document::Point,
     ) -> Result<()> {
+        let f = self.frame(page);
+        let (from, to) = (f.point_back(from), f.point_back(to));
         registry::with_session(self.handle, |s| {
             s.document
                 .as_document_mut()
@@ -25,6 +27,7 @@ impl Session {
 
     /// Draw a box around something, as a form is filled in by hand.
     pub fn stamp_box(&self, page: usize, area: pdf_core::document::Rect) -> Result<()> {
+        let area = self.frame(page).rect_back(area);
         registry::with_session(self.handle, |s| {
             s.document
                 .as_document_mut()
@@ -53,13 +56,13 @@ impl Session {
         width: f32,
         name: &str,
     ) -> Result<()> {
+        let ink = pdf_core::document::Annotation::Ink { strokes, color, width }.unturned(self.frame(page));
         registry::with_session(self.handle, |s| {
             let doc = s
                 .document
                 .as_document_mut()
                 .ok_or(pdf_core::PdfError::Unsupported("editing this document"))?;
-            let index =
-                doc.add_annotation(page, &pdf_core::document::Annotation::Ink { strokes, color, width })?;
+            let index = doc.add_annotation(page, &ink)?;
             doc.mark_as_signature(page, index, name)
         })
     }
@@ -112,17 +115,19 @@ impl Session {
             Err(_) => crate::signatures::composite_onto(&rgba, [255, 255, 255]),
         };
 
+        // Written in the engine's frame: the picture's pixels are turned the
+        // other way, so that once the page turns it reads upright.
+        let f = self.frame(page);
+        let image = pdf_core::document::Annotation::Image { rect, rgba: flattened, width, height }.unturned(f);
+        let alpha = pdf_core::document::frame::turn_pixels(&rgba, width, height, (4 - f.turns()) % 4).0;
         registry::with_session(self.handle, |s| {
             let doc = s
                 .document
                 .as_document_mut()
                 .ok_or(pdf_core::PdfError::Unsupported("editing this document"))?;
-            let index = doc.add_annotation(
-                page,
-                &pdf_core::document::Annotation::Image { rect, rgba: flattened, width, height },
-            )?;
+            let index = doc.add_annotation(page, &image)?;
             doc.mark_as_signature(page, index, name)?;
-            doc.remember_image_alpha(page, index, rgba)
+            doc.remember_image_alpha(page, index, alpha)
         })
     }
 
@@ -154,7 +159,10 @@ impl Session {
         &self,
         page: usize,
     ) -> Result<Vec<pdf_core::document::ImageSignatureMark>> {
-        registry::with_session(self.handle, |s| s.document.image_signature_marks(page))
+        let mut marks = registry::with_session(self.handle, |s| s.document.image_signature_marks(page))?;
+        let f = self.frame(page);
+        marks.iter_mut().for_each(|m| f.image_mark(&mut m.rect, &mut m.rgba, &mut m.width, &mut m.height));
+        Ok(marks)
     }
 
     /// The plain pictures placed on a page — see [`pdf_core::document::
@@ -163,7 +171,10 @@ impl Session {
         &self,
         page: usize,
     ) -> Result<Vec<pdf_core::document::PlacedImageMark>> {
-        registry::with_session(self.handle, |s| s.document.placed_image_marks(page))
+        let mut marks = registry::with_session(self.handle, |s| s.document.placed_image_marks(page))?;
+        let f = self.frame(page);
+        marks.iter_mut().for_each(|m| f.image_mark(&mut m.rect, &mut m.rgba, &mut m.width, &mut m.height));
+        Ok(marks)
     }
 
     /// The signatures placed on a page, as opposed to any other ink on it.
@@ -171,7 +182,10 @@ impl Session {
         &self,
         page: usize,
     ) -> Result<Vec<pdf_core::document::SignatureMark>> {
-        registry::with_session(self.handle, |s| s.document.signature_marks(page))
+        let mut marks = registry::with_session(self.handle, |s| s.document.signature_marks(page))?;
+        let f = self.frame(page);
+        marks.iter_mut().for_each(|m| f.signature(m));
+        Ok(marks)
     }
 
     /// Burn a page's placed signatures into the page. Returns how many.

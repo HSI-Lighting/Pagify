@@ -14,8 +14,9 @@ impl Session {
         colour: pdf_core::document::Color,
         width: f32,
     ) -> Result<crate::commit::Committed> {
+        let frame = self.frame(page);
         registry::with_session(self.handle, |s| {
-            crate::commit::commit_page(s, page, layer, colour, width)
+            crate::commit::commit_page(s, page, layer, colour, width, frame)
         })
     }
 

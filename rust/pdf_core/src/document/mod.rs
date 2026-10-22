@@ -11,6 +11,7 @@ pub mod sensitive;
 pub mod sensitivity;
 pub mod blank;
 pub mod classify;
+pub mod frame;
 pub mod glyphs;
 pub mod layout;
 pub mod search;

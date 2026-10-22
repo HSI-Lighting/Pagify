@@ -49,13 +49,19 @@ impl Session {
 
     /// Every run of text on a page, in the order the file stores them.
     pub fn text_runs(&self, page: usize) -> Result<Vec<pdf_core::document::TextRun>> {
-        registry::with_session(self.handle, |s| s.document.text_runs(page))
+        let mut runs = registry::with_session(self.handle, |s| s.document.text_runs(page))?;
+        let f = self.frame(page);
+        runs.iter_mut().for_each(|r| f.text_run(r));
+        Ok(runs)
     }
 
     /// Every text object's bounding rect, without its words — see
     /// [`pdf_core::document::Document::text_run_rects`].
     pub fn text_run_rects(&self, page: usize) -> Result<Vec<(usize, pdf_core::document::Rect)>> {
-        registry::with_session(self.handle, |s| s.document.text_run_rects(page))
+        let mut rects = registry::with_session(self.handle, |s| s.document.text_run_rects(page))?;
+        let f = self.frame(page);
+        rects.iter_mut().for_each(|(_, r)| *r = f.rect(*r));
+        Ok(rects)
     }
 
     /// One run, by object number, words included — see
@@ -65,7 +71,11 @@ impl Session {
         page: usize,
         object: usize,
     ) -> Result<Option<pdf_core::document::TextRun>> {
-        registry::with_session(self.handle, |s| s.document.text_run_at(page, object))
+        let mut run = registry::with_session(self.handle, |s| s.document.text_run_at(page, object))?;
+        if let Some(run) = run.as_mut() {
+            self.frame(page).text_run(run);
+        }
+        Ok(run)
     }
 
     /// Full runs, words included, for just the given objects — see
@@ -75,7 +85,10 @@ impl Session {
         page: usize,
         wanted: &std::collections::HashSet<usize>,
     ) -> Result<Vec<pdf_core::document::TextRun>> {
-        registry::with_session(self.handle, |s| s.document.text_runs_some(page, wanted))
+        let mut runs = registry::with_session(self.handle, |s| s.document.text_runs_some(page, wanted))?;
+        let f = self.frame(page);
+        runs.iter_mut().for_each(|r| f.text_run(r));
+        Ok(runs)
     }
 
     /// Everything the paragraph detector reads about one page's text, in one
@@ -94,13 +107,22 @@ impl Session {
     /// of only outlines has tens of thousands of them, and the walk that lists
     /// them is the slowest of the four.
     pub fn page_text_snapshot(&self, page: usize) -> Result<PageTextSnapshot> {
-        registry::with_session(self.handle, |s| {
+        let mut snapshot = registry::with_session(self.handle, |s| {
             let runs = s.document.text_runs_unfiltered(page)?;
             let styles = s.document.run_styles(page)?;
             let faces = s.document.run_font_names(page)?;
             let shapes = if runs.is_empty() { Vec::new() } else { s.document.drawn_shapes(page)? };
             Ok(PageTextSnapshot { runs, styles, faces, shapes })
-        })
+        })?;
+        // Carried into the displayed frame after the one lock, so the detector
+        // sees level text on a sheet that is drawn sideways and turned upright.
+        let f = self.frame(page);
+        if !f.is_identity() {
+            snapshot.runs.iter_mut().for_each(|r| f.text_run(r));
+            snapshot.styles.values_mut().for_each(|st| f.run_style(st));
+            snapshot.shapes.iter_mut().for_each(|d| f.drawn(d));
+        }
+        Ok(snapshot)
     }
 
     /// How many objects a page holds and how many of them are text, **counted

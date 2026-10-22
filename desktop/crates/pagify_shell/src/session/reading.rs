@@ -61,7 +61,7 @@ impl Session {
         outlined_fonts: &[&[u8]],
     ) -> Result<Option<Vec<pdf_core::document::RecognisedWord>>> {
         let Some(catalogue) = merged_catalogue(outlined_fonts) else { return Ok(None) };
-        registry::with_session(self.handle, |s| {
+        let found = registry::with_session(self.handle, |s| {
             let page = s.document.page(index)?;
             if page.classify()?.kind != pdf_core::document::PageTextKind::Outlined {
                 return Ok(None);
@@ -72,7 +72,8 @@ impl Session {
             } else {
                 Ok(None)
             }
-        })
+        })?;
+        Ok(self.words_shown(index, found))
     }
 
     /// The font program a run is drawn with, when the document carries one.
@@ -111,7 +112,10 @@ impl Session {
         &self,
         page: usize,
     ) -> Result<std::collections::HashMap<usize, pdf_core::document::RunStyle>> {
-        registry::with_session(self.handle, |s| s.document.run_styles(page))
+        let mut styles = registry::with_session(self.handle, |s| s.document.run_styles(page))?;
+        let f = self.frame(page);
+        styles.values_mut().for_each(|st| f.run_style(st));
+        Ok(styles)
     }
 
     /// What the page draws some runs with beyond font, size and colour —
@@ -139,19 +143,32 @@ impl Session {
         object: usize,
         by: pdf_core::document::Point,
     ) -> Result<()> {
+        let (x, y) = self.frame(page).vector_back((by.x, by.y));
+        let by = pdf_core::document::Point { x, y };
         registry::with_session(self.handle, |s| s.document.move_object(page, object, by))
     }
 
     /// The area one page object covers.
     pub fn object_bounds(&self, page: usize, object: usize) -> Result<pdf_core::document::Rect> {
-        registry::with_session(self.handle, |s| s.document.object_bounds(page, object))
+        let bounds = registry::with_session(self.handle, |s| s.document.object_bounds(page, object))?;
+        Ok(self.frame(page).rect(bounds))
     }
 
     /// One path object's own ink — see [`pdf_core::document::Document::
     /// object_outline`] for why this is for hit-testing a click against the
     /// actual shape rather than its bounding box.
     pub fn object_outline(&self, page: usize, object: usize) -> Result<Vec<Vec<(f32, f32)>>> {
-        registry::with_session(self.handle, |s| s.document.object_outline(page, object))
+        let mut outline = registry::with_session(self.handle, |s| s.document.object_outline(page, object))?;
+        let f = self.frame(page);
+        if !f.is_identity() {
+            for ring in &mut outline {
+                for p in ring.iter_mut() {
+                    let q = f.point(pdf_core::document::Point { x: p.0, y: p.1 });
+                    *p = (q.x, q.y);
+                }
+            }
+        }
+        Ok(outline)
     }
 
     /// The words a page *draws*, whatever else is on it.
@@ -174,7 +191,7 @@ impl Session {
         outlined_fonts: &[&[u8]],
     ) -> Result<Option<Vec<pdf_core::document::RecognisedWord>>> {
         let Some(catalogue) = merged_catalogue(outlined_fonts) else { return Ok(None) };
-        registry::with_session(self.handle, |s| {
+        let found = registry::with_session(self.handle, |s| {
             let page = s.document.page(index)?;
             let words = page.recognise_outlined_words(&catalogue)?;
             if words.is_empty() {
@@ -185,7 +202,8 @@ impl Session {
             } else {
                 Ok(None)
             }
-        })
+        })?;
+        Ok(self.words_shown(index, found))
     }
 
     /// The annotations already on a page.
@@ -196,12 +214,23 @@ impl Session {
         &self,
         page: usize,
     ) -> Result<Vec<pdf_core::document::IndexedAnnotation>> {
-        registry::with_session(self.handle, |s| s.document.annotations(page))
+        let marks = registry::with_session(self.handle, |s| s.document.annotations(page))?;
+        let f = self.frame(page);
+        if f.is_identity() {
+            return Ok(marks);
+        }
+        Ok(marks
+            .into_iter()
+            .map(|m| pdf_core::document::IndexedAnnotation { index: m.index, annotation: m.annotation.turned(f) })
+            .collect())
     }
 
     /// The links on a page that go to another page of this document — see
     /// [`pdf_core::document::Document::internal_links`].
     pub fn internal_links(&self, page: usize) -> Result<Vec<pdf_core::document::InternalLink>> {
-        registry::with_session(self.handle, |s| s.document.internal_links(page))
+        let mut links = registry::with_session(self.handle, |s| s.document.internal_links(page))?;
+        let f = self.frame(page);
+        links.iter_mut().for_each(|l| f.link(l));
+        Ok(links)
     }
 }

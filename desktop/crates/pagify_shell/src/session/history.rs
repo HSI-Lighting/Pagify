@@ -6,16 +6,30 @@
 use super::*;
 
 impl Session {
+    /// Runs a command given in the **displayed** frame (see `turned.rs`): it is
+    /// carried back to the engine's own before it is run, and the history holds
+    /// it in that frame.
     pub fn execute(&self, command: pdf_core::command::Command) -> Result<pdf_core::engine::EditState> {
-        registry::with_session(self.handle, |s| pdf_core::engine::execute(s, command))
+        let changes_frames = command.changes_frames();
+        let command = self.unturned(command);
+        let done = registry::with_session(self.handle, |s| pdf_core::engine::execute(s, command));
+        if changes_frames {
+            self.forget_frames();
+        }
+        done
     }
 
     pub fn undo(&self) -> Result<(bool, pdf_core::engine::EditState)> {
-        registry::with_session(self.handle, pdf_core::engine::undo)
+        let done = registry::with_session(self.handle, pdf_core::engine::undo);
+        // Any undo might be the undo of a page turn.
+        self.forget_frames();
+        done
     }
 
     pub fn redo(&self) -> Result<(bool, pdf_core::engine::EditState)> {
-        registry::with_session(self.handle, pdf_core::engine::redo)
+        let done = registry::with_session(self.handle, pdf_core::engine::redo);
+        self.forget_frames();
+        done
     }
 
     /// How many times the document's own command history has changed — a

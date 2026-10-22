@@ -34,6 +34,7 @@
 //! module can carry its own escape hatch if that is ever wanted.
 
 pub mod history;
+pub mod turned;
 
 pub use history::CommandHistory;
 

@@ -39,7 +39,7 @@ impl Session {
         })?;
 
         let generation = registry::with_session(handle, |s| Ok(s.history.generation_counter()))?;
-        Ok(Session { handle, path: std::sync::Mutex::new(path), generation })
+        Ok(Session { handle, path: std::sync::Mutex::new(path), generation, frames: Default::default() })
     }
 
     pub fn path(&self) -> PathBuf {

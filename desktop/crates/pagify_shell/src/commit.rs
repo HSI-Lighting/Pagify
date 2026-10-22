@@ -523,6 +523,7 @@ pub fn commit_page(
     layer: &Layer,
     colour: Color,
     width: f32,
+    frame: pdf_core::document::frame::Frame,
 ) -> Result<Committed> {
     // Reading and writing are split because `annotations` lives on `Document`
     // and the mutators on `DocumentMut`, and the two borrows cannot overlap.
@@ -536,7 +537,7 @@ pub fn commit_page(
         doc.text_mark_restore(page, CARRIER_ID).ok()
     };
 
-    let doomed = previous_markup_indices(&*session.document, page, layer.space(), previous_blob)?;
+    let doomed = previous_markup_indices(&*session.document, page, layer.space(), previous_blob, frame)?;
     let (blob, skipped) = to_blob(layer);
     let filled = filled_handles(layer);
 
@@ -614,13 +615,17 @@ pub fn commit_page(
                         fill_color: pen,
                         stroke_color: pen,
                         width: pen_width,
-                    },
+                    }
+                    .unturned(frame),
                 )?;
             }
         }
 
         strokes_written += outline.len();
-        doc.add_annotation(page, &Annotation::Ink { strokes: outline, color: pen, width: pen_width })?;
+        doc.add_annotation(
+            page,
+            &Annotation::Ink { strokes: outline, color: pen, width: pen_width }.unturned(frame),
+        )?;
 
         for tri in &arrow_fills {
             let ring: Vec<PdfPoint> = tri
@@ -632,7 +637,8 @@ pub fn commit_page(
                 .collect();
             doc.add_annotation(
                 page,
-                &Annotation::Fill { outline: ring, fill_color: pen, stroke_color: pen, width: pen_width },
+                &Annotation::Fill { outline: ring, fill_color: pen, stroke_color: pen, width: pen_width }
+                    .unturned(frame),
             )?;
         }
     }
@@ -679,6 +685,7 @@ fn previous_markup_indices(
     page: usize,
     space: PageSpace,
     previous_blob: Option<String>,
+    frame: pdf_core::document::frame::Frame,
 ) -> Result<Vec<usize>> {
     let Some(previous) = previous_blob else { return Ok(Vec::new()) };
     let Ok(Some(stored)) = from_blob(&previous) else {
@@ -724,7 +731,10 @@ fn previous_markup_indices(
 
     let mut doomed = Vec::new();
     for indexed in doc.annotations(page)? {
-        match &indexed.annotation {
+        // The page's annotations are in the engine's frame, the layer's strokes
+        // in the displayed one the app draws in.
+        let shown = indexed.annotation.clone().turned(frame);
+        match &shown {
             Annotation::Ink { strokes, .. }
                 if !strokes.is_empty()
                     && strokes.iter().all(|s| ours.iter().any(|o| same_stroke(s, o))) =>

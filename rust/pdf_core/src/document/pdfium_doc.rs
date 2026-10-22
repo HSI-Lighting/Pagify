@@ -1494,7 +1494,7 @@ impl Document for PdfiumDocument {
             // producer that writes `1 Tf` and puts the size in the matrix, the
             // bare one made that ratio 1 and a requested 9 pt a `9 Tf` under a
             // 9x matrix.
-            size: text_object.scaled_font_size().value,
+            size: effective_size(&text_object, page_turns(&page)),
             color: colour,
         }))
     }
@@ -1560,7 +1560,7 @@ impl Document for PdfiumDocument {
                 text: words,
                 rect: Rect { left, top, right, bottom },
                 origin,
-                size: text_object.scaled_font_size().value,
+                size: effective_size(&text_object, page_turns(&page)),
                 color: colour,
             });
         }
@@ -3822,7 +3822,7 @@ impl PdfiumDocument {
                 // `vertical_scale` doc for the producer that makes this
                 // matter: `1 Tf` with the real size baked into the matrix,
                 // which `unscaled_font_size` alone would report as "1pt".
-                size: text_object.scaled_font_size().value,
+                size: effective_size(&text_object, page_turns(&page)),
                 color: colour,
             });
         }
@@ -3885,6 +3885,50 @@ impl PdfiumDocument {
 /// proved. At 1,500 objects the per-object read costs about 66 ms; the datasheet's
 /// pages (883, 1,488 and 1,394 objects) stay on PDFium's own call.
 const LINEAR_TEXT_READ_FROM: usize = 1500;
+
+/// A text object's size as drawn: `Tf` times the matrix's vertical scale.
+///
+/// **A quarter turn zeroes the matrix's `d`**, and `scaled_font_size` is
+/// `Tf * d`, so text set on its side reports a size of 0, and the app takes 0 to
+/// mean "sideways": it copies such words as a picture and keeps them out of the
+/// paragraph editor. That stays true, with one correction: **text that the page's
+/// own `/Rotate` brings level is not sideways as shown.** A sheet drawn sideways
+/// and turned upright (every CAD plot) is made of such text, and it has to have
+/// the size it is drawn at. Only that case is changed, so every size that was
+/// read before is read the same.
+fn effective_size(text: &pdfium_render::prelude::PdfPageTextObject, page_turns: u8) -> f32 {
+    let scaled = text.scaled_font_size().value;
+    if scaled.abs() > 1e-4 || page_turns % 4 == 0 {
+        return scaled;
+    }
+    match text.matrix() {
+        Ok(m) => {
+            let along = m.a().hypot(m.b());
+            if along < 1e-6 {
+                return scaled;
+            }
+            // The text's direction in the top-left frame, carried through the turn.
+            let (x, y) = crate::document::frame::Frame::new(page_turns, 0.0, 0.0)
+                .vector((m.a() / along, 0.0 - m.b() / along));
+            if (x - 1.0).abs() < 1e-3 && y.abs() < 1e-3 {
+                text.unscaled_font_size().value * m.c().hypot(m.d())
+            } else {
+                scaled
+            }
+        }
+        Err(_) => scaled,
+    }
+}
+
+/// A page's own `/Rotate`, in quarter turns clockwise.
+fn page_turns(page: &pdfium_render::prelude::PdfPage) -> u8 {
+    match page.rotation() {
+        Ok(PdfPageRenderRotation::Degrees90) => 1,
+        Ok(PdfPageRenderRotation::Degrees180) => 2,
+        Ok(PdfPageRenderRotation::Degrees270) => 3,
+        _ => 0,
+    }
+}
 
 /// Below this, in PDF points, a text object's bounding box is treated as
 /// having no area at all — the "nothing to have clicked on" rule

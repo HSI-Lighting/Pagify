@@ -8,12 +8,13 @@ use super::*;
 impl Session {
     /// A page's crop box, in page points with a top-left origin.
     pub fn page_crop(&self, index: usize) -> Result<pdf_core::document::Rect> {
-        registry::with_session(self.handle, |s| {
+        let crop = registry::with_session(self.handle, |s| {
             s.document
                 .as_document_mut()
                 .ok_or(pdf_core::PdfError::Unsupported("reading this document's boundaries"))
                 .and_then(|d| d.page_crop(index))
-        })
+        })?;
+        Ok(self.frame(index).rect(crop))
     }
 
     /// Copy pages within this document, inserting the copies at `at`.

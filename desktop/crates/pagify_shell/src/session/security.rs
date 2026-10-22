@@ -15,6 +15,7 @@ impl Session {
         at: pdf_core::document::Point,
         size: f32,
     ) -> Result<()> {
+        let at = self.frame(page_index).point_back(at);
         registry::with_session(self.handle, |s| {
             s.document
                 .as_document_mut()
@@ -62,6 +63,7 @@ impl Session {
         area: pdf_core::document::Rect,
         colour: pdf_core::document::Color,
     ) -> Result<()> {
+        let area = self.frame(page_index).rect_back(area);
         registry::with_session(self.handle, |s| {
             s.document
                 .as_document_mut()
@@ -72,7 +74,10 @@ impl Session {
 
     /// Things on a page somebody would not want to send out.
     pub fn sensitive_on(&self, page_index: usize) -> Result<Vec<pdf_core::document::SensitiveOnPage>> {
-        registry::with_session(self.handle, |s| s.document.sensitive_on(page_index))
+        let mut found = registry::with_session(self.handle, |s| s.document.sensitive_on(page_index))?;
+        let f = self.frame(page_index);
+        found.iter_mut().for_each(|x| f.sensitive(x));
+        Ok(found)
     }
 
     /// What this document carries that is not on its pages.
