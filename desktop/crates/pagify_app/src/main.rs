@@ -15,6 +15,7 @@
 mod canvas;
 mod caches;
 mod dispatch;
+mod in_place;
 mod mac_open;
 mod nudge;
 mod update;
