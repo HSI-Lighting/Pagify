@@ -1072,6 +1072,10 @@ impl crate::PagifyApp {
                     // trade. `texture_for` applies that cap.
                     let device_scale = raster_scale(zoom * ctx.pixels_per_point());
                     let picture = self.page_texture(ctx, page, zoom, (w, h), device_scale);
+                    // **Under an edited paragraph the page is drawn without its old words**,
+                    // so they do not show through the new ones. Nothing here once the box is
+                    // as the page has it, or on a page too heavy to be drawn again for it.
+                    let textless = self.textless_for(ctx, page, zoom, (w, h));
                     // **With the render worker, a page with no picture yet is still a page**:
                     // paper where it will be, and everything on it (the zoom's anchor, the
                     // pointer, the pending tool) works while its picture is made — which for
@@ -1097,7 +1101,14 @@ impl crate::PagifyApp {
                         // fractional one — a half-pixel offset is a resample of its own.
                         // (Clicks still go by `rect`, the true size; they differ by under
                         // a pixel.)
-                        if let Some((texture, exact)) = &picture {
+                        if let Some(texture) = &textless {
+                            ui.painter().image(
+                                texture.id(),
+                                rect,
+                                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                egui::Color32::WHITE,
+                            );
+                        } else if let Some((texture, exact)) = &picture {
                             let drawn = if *exact {
                                 let ppp = ctx.pixels_per_point();
                                 let at = egui::pos2((origin.x * ppp).round() / ppp, (origin.y * ppp).round() / ppp);
@@ -1117,7 +1128,10 @@ impl crate::PagifyApp {
                         }
 
                         let view = PageView { origin, scale: zoom };
-                        self.draw_detail_overlay(ctx, ui, page, view, rect, device_scale);
+                        // Its sharper tile still shows the old words.
+                        if textless.is_none() {
+                            self.draw_detail_overlay(ctx, ui, page, view, rect, device_scale);
+                        }
                         self.draw_text_highlights(ui.painter(), page, view);
                         if let Some(layer) = self.tab_mut().markup.existing(page) {
                             overlay::draw_layer(

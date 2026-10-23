@@ -1975,6 +1975,36 @@ impl EditingRun {
         now.edit(&self.buffer);
         pagify_shell::line_styles::looks_differ(&now, &self.picked)
     }
+
+    /// Whether an edit actually asks for anything — same words, same style, nothing to
+    /// do. Until it does, the page's own picture is what shows under the box.
+    fn changed(&self) -> bool {
+        let typed = self.buffer.trim();
+        if typed.is_empty() {
+            // Typed away is a deletion — a change, unless there was nothing to delete.
+            return !self.original.trim().is_empty();
+        }
+        let changed_look = pdf_core::document::TextStyle { face: None, ..self.style.clone() }
+            != pdf_core::document::TextStyle { face: None, ..self.was.clone() };
+        let picked_font = self.style.face.is_some();
+        let looks = self.uses_looks() && self.looks_changed();
+        !(typed == self.original.trim() && !changed_look && !picked_font && !looks)
+    }
+
+    /// The page objects the open paragraph draws, and the faux-bold twins that go with
+    /// them — what the picture under the box leaves out. **Lines drawn as shapes are not
+    /// the box's** (it never rewrites them), so they stay on the page. Sorted, once each.
+    fn hidden_objects(&self) -> Vec<usize> {
+        // `frozen` and `twins` may be shorter than `lines` (a paragraph with no twin has
+        // none listed), so a line is looked up in them, not zipped with them.
+        let mut objects: Vec<usize> = (0..self.lines.len())
+            .filter(|line| !self.frozen.get(*line).copied().unwrap_or(false))
+            .flat_map(|line| self.lines[line].0.iter().chain(self.twins.get(line).into_iter().flatten()).copied())
+            .collect();
+        objects.sort_unstable();
+        objects.dedup();
+        objects
+    }
 }
 
 /// Runs a person declared one paragraph by hand — see [`DocTab::joined_groups`].
@@ -2780,11 +2810,21 @@ const SLOT_EXACT: u8 = 2;
 /// A thumbnail for the rail. Its own slot, for the same reason: it must not supersede
 /// the page's picture, nor be superseded by it.
 const SLOT_THUMB: u8 = 3;
+/// The page without the paragraph being retyped ([`PagifyApp::textless_for`]). Its own slot:
+/// it must neither supersede the page's picture nor wait behind it.
+const SLOT_TEXTLESS: u8 = 4;
+
+/// A textless picture's step is this plus its width in pixels. **In the band between the
+/// exact pictures (`EXACT_STEP_BASE` plus a width) and the thumbnails**, so a thumbnail is
+/// still `>= THUMB_STEP_BASE` and an exact picture is still `< TEXTLESS_STEP_BASE`; check
+/// for a textless one before an exact one.
+const TEXTLESS_STEP_BASE: u32 = 1 << 21;
 
 fn slot_kind(crop: &Option<pdf_core::document::Rect>, step: u32) -> u8 {
     match (crop, step >= EXACT_STEP_BASE) {
         (Some(_), _) => SLOT_DETAIL,
         (None, _) if step >= THUMB_STEP_BASE => SLOT_THUMB,
+        (None, _) if step >= TEXTLESS_STEP_BASE => SLOT_TEXTLESS,
         (None, true) => SLOT_EXACT,
         (None, false) => SLOT_WHOLE,
     }
@@ -13344,16 +13384,7 @@ impl PagifyApp {
     /// Whether an edit actually asks for anything — same words, same style,
     /// nothing to do.
     fn edit_has_changes(&self, edit: &EditingRun) -> bool {
-        let typed = edit.buffer.trim();
-        if typed.is_empty() {
-            // Typed away is a deletion — a change, unless there was nothing to delete.
-            return !edit.original.trim().is_empty();
-        }
-        let changed_look = pdf_core::document::TextStyle { face: None, ..edit.style.clone() }
-            != pdf_core::document::TextStyle { face: None, ..edit.was.clone() };
-        let picked_font = edit.style.face.is_some();
-        let looks = edit.uses_looks() && edit.looks_changed();
-        !(typed == edit.original.trim() && !changed_look && !picked_font && !looks)
+        edit.changed()
     }
 
     /// One `SetTextRun` per object per line, exactly the shape
@@ -14841,8 +14872,83 @@ impl PagifyApp {
             scale: px_w as f32 / frame_w.max(1.0),
             crop: None,
             session,
+            hide: None,
         });
         None
+    }
+
+    /// **The page without the paragraph being retyped**, for drawing under the Edit Text box
+    /// once its words change, so the old words do not show through the new ones.
+    ///
+    /// `None`, and nothing held for `page`, when there is nothing to hide: the box is closed
+    /// or on another page, it is drawn lettering, or it is still as the page has it (the
+    /// page's own picture is what shows). `None` as well on a page too heavy to be drawn
+    /// again for it — a textless render holds the one PDFium lock for seconds there — and
+    /// until the first picture is made; the caller keeps its opaque cover meanwhile.
+    ///
+    /// **A picture held for another size is still returned**, stretched, while the right
+    /// one is made (and while the zoom moves, when none is asked for): the old words must
+    /// not show for a moment because the view changed. One for another epoch, other
+    /// objects or another turn is never returned: it is a picture of the page as it was.
+    fn textless_for(&mut self, ctx: &egui::Context, page: usize, zoom: f32, frame: (f32, f32)) -> Option<egui::TextureHandle> {
+        let objects = self
+            .tab()
+            .edit
+            .editing_run
+            .as_ref()
+            .filter(|edit| edit.page == page && !edit.drawn && edit.changed())
+            .map(|edit| edit.hidden_objects())
+            .filter(|objects| !objects.is_empty());
+        let heavy = objects.is_some() && self.page_weight(page).filter(page_is_heavy).is_some();
+        let max_side = (ctx.input(|i| i.max_texture_side) as f32).min(pdf_core::render::bitmap::MAX_DIMENSION_PX as f32);
+        let px_w = exact_page_px(frame.0, frame.1, zoom, ctx.pixels_per_point(), max_side).map(|(px_w, _)| px_w);
+        let (moving, async_render) = (self.zoom_is_moving(ctx), self.render_state.async_render);
+        let rotation = self.tab().view_state.rotation;
+        let doc = self.tab_mut().doc.as_mut()?;
+        let (Some(objects), false, Some(px_w)) = (objects, heavy, px_w) else {
+            if doc.caches.textless.as_ref().is_some_and(|held| held.page == page) {
+                doc.caches.textless = None;
+            }
+            return None;
+        };
+        let step = TEXTLESS_STEP_BASE + px_w;
+        let held = doc
+            .caches
+            .textless
+            .as_ref()
+            .filter(|t| t.page == page && t.objects == objects && t.epoch == doc.render_epoch && t.rotation == rotation as u8)
+            .map(|t| (t.step, t.texture.clone()));
+        if let Some((held_step, texture)) = &held {
+            if *held_step == step {
+                return Some(texture.clone());
+            }
+        }
+        let stand_in = held.map(|(_, texture)| texture);
+        if moving {
+            return stand_in;
+        }
+        let (doc_id, epoch, session) = (doc.id, doc.render_epoch, doc.session.clone());
+        let scale = px_w as f32 / frame.0.max(1.0);
+        if async_render {
+            self.ask_for_render(ctx, RenderJob {
+                doc: doc_id,
+                epoch,
+                page,
+                step,
+                rotation,
+                scale,
+                crop: None,
+                session,
+                hide: Some(objects.into()),
+            });
+            return stand_in;
+        }
+        // No worker (the tests'): drawn here, as `texture_for` draws a page without one.
+        let Ok(raster) = session.render_page_hiding(page, scale, rotation, &objects) else { return stand_in };
+        let texture = ctx.load_texture(format!("textless{page}"), page_to_image(&raster), egui::TextureOptions::LINEAR);
+        self.tab_mut().doc.as_mut()?.caches.textless =
+            Some(crate::caches::Textless { page, objects, epoch, rotation: rotation as u8, step, texture: texture.clone() });
+        Some(texture)
     }
 
     /// The prefetch of a page that will be drawn from an **exact** picture: ask for
@@ -14924,6 +15030,21 @@ impl PagifyApp {
             };
             let [width, height] = image.size;
             let rotation = done.rotation as u8;
+            // The page without the open paragraph, for the editor: kept apart from the
+            // page's own pictures, which it must never be mistaken for.
+            if let Some(objects) = &done.hide {
+                let texture = ctx.load_texture(format!("textless{}", done.page), image, egui::TextureOptions::LINEAR);
+                doc.caches.textless = Some(crate::caches::Textless {
+                    page: done.page,
+                    objects: objects.to_vec(),
+                    epoch: done.epoch,
+                    rotation,
+                    step: done.step,
+                    texture,
+                });
+                self.render_state.render_stats.applied += 1;
+                continue;
+            }
             match done.crop {
                 None if done.step >= THUMB_STEP_BASE => {
                     let handle = ctx.load_texture(
@@ -15074,6 +15195,7 @@ impl PagifyApp {
                     scale: quantised,
                     crop: None,
                     session,
+                    hide: None,
                 });
             }
             return stand_in.map(|(texture, _)| texture);
@@ -15196,6 +15318,7 @@ impl PagifyApp {
                 scale,
                 crop: None,
                 session,
+                hide: None,
             });
             return held;
         }
@@ -15304,6 +15427,9 @@ struct RenderJob {
     /// [`PagifyApp::draw_detail_overlay`].
     crop: Option<pdf_core::document::Rect>,
     session: std::sync::Arc<Session>,
+    /// The page objects to leave out of the picture: this is a textless picture for the
+    /// editor ([`PagifyApp::textless_for`]), not a page picture.
+    hide: Option<std::sync::Arc<[usize]>>,
 }
 
 /// What the worker sends back — already an egui image, because turning a few
@@ -15316,6 +15442,7 @@ struct RenderDone {
     step: u32,
     rotation: Rotation,
     crop: Option<pdf_core::document::Rect>,
+    hide: Option<std::sync::Arc<[usize]>>,
     took: std::time::Duration,
     image: Result<egui::ColorImage, String>,
 }
@@ -15364,6 +15491,7 @@ impl RenderWorker {
                                 && n.page == job.page
                                 && n.crop.is_some() == job.crop.is_some()
                                 && (n.step >= THUMB_STEP_BASE) == (job.step >= THUMB_STEP_BASE)
+                                && n.hide.is_some() == job.hide.is_some()
                         };
                         if !newest.iter().any(same) {
                             newest.push(job);
@@ -15371,7 +15499,7 @@ impl RenderWorker {
                     }
                     // The pages first, then the rail's thumbnails: a thumbnail of a
                     // heavy page is as long a wait for the lock as the page itself.
-                    newest.sort_by_key(|j| j.step >= THUMB_STEP_BASE);
+                    newest.sort_by_key(|j| (j.step >= THUMB_STEP_BASE, j.hide.is_none()));
                     for job in newest {
                         let started = std::time::Instant::now();
                         // A refusal must not mean a blank page: smaller, as the
@@ -15379,9 +15507,10 @@ impl RenderWorker {
                         // refused.
                         let mut scale = job.scale;
                         let raster = loop {
-                            let attempt = match job.crop {
-                                None => job.session.render_page_rotated(job.page, scale, job.rotation),
-                                Some(crop) => job.session.render_page_region(job.page, crop, scale),
+                            let attempt = match (&job.hide, job.crop) {
+                                (Some(hide), _) => job.session.render_page_hiding(job.page, scale, job.rotation, hide),
+                                (None, None) => job.session.render_page_rotated(job.page, scale, job.rotation),
+                                (None, Some(crop)) => job.session.render_page_region(job.page, crop, scale),
                             };
                             match attempt {
                                 Err(_) if scale > 0.08 => scale *= 0.5,
@@ -15396,6 +15525,7 @@ impl RenderWorker {
                             step: job.step,
                             rotation: job.rotation,
                             crop: job.crop,
+                            hide: job.hide.clone(),
                             took: started.elapsed(),
                             image,
                         });
@@ -17624,3 +17754,6 @@ mod copy_group_tests;
 
 #[cfg(test)]
 mod save_size_tests;
+
+#[cfg(test)]
+mod in_place_tests;

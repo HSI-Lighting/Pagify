@@ -78,6 +78,22 @@ pub(crate) struct DocCaches {
     /// document's `render_epoch` and undo generation are what they were when it was
     /// read (checked where it is used, and the whole map is emptied by `invalidate`).
     pub(super) facts: std::collections::HashMap<usize, std::sync::Arc<crate::page_facts::PageFacts>>,
+    /// The page without the paragraph being retyped, drawn under the editor once its words
+    /// change — see [`crate::PagifyApp::textless_for`]. One at a time: only the open
+    /// paragraph has one.
+    pub(crate) textless: Option<Textless>,
+}
+
+/// A picture of `page` with `objects` left out (see [`crate::PagifyApp::textless_for`]),
+/// good only for the document as it was at `epoch` and the view turned `rotation`.
+pub(crate) struct Textless {
+    pub(crate) page: usize,
+    pub(crate) objects: Vec<usize>,
+    pub(crate) epoch: u64,
+    pub(crate) rotation: u8,
+    /// The worker's step for it: [`crate::TEXTLESS_STEP_BASE`] plus its width in pixels.
+    pub(crate) step: u32,
+    pub(crate) texture: egui::TextureHandle,
 }
 
 /// A page's words, pictures and shapes as a click finds them, read once for the page
@@ -129,6 +145,7 @@ impl DocCaches {
         self.drawn_words = None;
         self.hits.get_mut().take();
         self.facts.clear();
+        self.textless = None;
     }
 
     /// Drop the whole-page textures and the detail crop for pages that have

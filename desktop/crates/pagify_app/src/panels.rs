@@ -1539,6 +1539,7 @@ impl crate::PagifyApp {
                         scale: rendered_scale,
                         crop: Some(crop),
                         session,
+                        hide: None,
                     });
                 }
             } else {
