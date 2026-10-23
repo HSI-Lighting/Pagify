@@ -263,19 +263,40 @@ fn each_row_spans_a_line_the_page_draws_with_spaced_letters() {
     each_row_matches_the_page(open_page("inplace-widths-spaced", &[], SPACED));
 }
 
+/// Where the page's own letters of `text` end, in screen px: the box of the last one. **The page's
+/// letters, not the text object's box**, which can run well past them (a table cell's padding).
+fn page_ink_right_px(h: &mut egui_kittest::Harness<'static, PagifyApp>, text: &str) -> f32 {
+    let view = h.state().tab().view_state.last_view.expect("the page was drawn");
+    let chars = h.state_mut().characters(0).expect("characters").clone();
+    let range = chars.find(text.trim()).first().cloned().unwrap_or_else(|| panic!("{text:?} is not in the page's letters"));
+    let last = range.end - 1;
+    let right = chars.line_rects(last..last + 1).first().map_or(0.0, |r| r.right);
+    view.to_screen(AppPoint { x: right as f64, y: 0.0 }).x
+}
+
+/// The last letter (not a space) of row `row` of the editor's text, its right edge on screen.
+fn last_letter_right(galley: &egui::Galley, at: egui::Pos2, row: usize) -> f32 {
+    let placed = &galley.rows[row];
+    let glyph = placed.row.glyphs.iter().rev().find(|g| !g.chr.is_whitespace()).expect("a letter");
+    at.x + placed.pos.x + glyph.pos.x + glyph.advance_width
+}
+
 fn each_row_matches_the_page(app: PagifyApp) {
     let mut h = harness_from(opened(app));
     h.run_steps(3);
     let view = h.state().tab().view_state.last_view.expect("the page was drawn");
-    let edit = h.state().tab().edit.editing_run.as_ref().expect("an editor");
-    let (galley, at) = edit.shown.clone().expect("drawn");
-    for (row, (_, line)) in galley.rows.iter().zip(&edit.lines) {
-        let (first, last) = (row.row.glyphs.first().expect("a letter"), row.row.glyphs.last().expect("a letter"));
-        let (left, right) = (at.x + row.pos.x + first.pos.x, at.x + row.pos.x + last.pos.x + last.advance_width);
+    let (galley, at, lines, buffer) = {
+        let edit = h.state().tab().edit.editing_run.as_ref().expect("an editor");
+        let (galley, at) = edit.shown.clone().expect("drawn");
+        (galley, at, edit.lines.clone(), edit.buffer.clone())
+    };
+    for (row, ((_, line), text)) in lines.iter().zip(buffer.split('\n')).enumerate() {
+        let first = galley.rows[row].row.glyphs.first().expect("a letter");
+        let left = at.x + galley.rows[row].pos.x + first.pos.x;
         let page_left = view.to_screen(AppPoint { x: line.left as f64, y: 0.0 }).x;
-        let page_right = view.to_screen(AppPoint { x: line.right as f64, y: 0.0 }).x;
         assert!((left - page_left).abs() < 1.0, "the line starts at {left}, the page's at {page_left}");
-        assert!((right - page_right).abs() < 1.0, "the line ends at {right}, the page's at {page_right}");
+        let (right, page_right) = (last_letter_right(&galley, at, row), page_ink_right_px(&mut h, text));
+        assert!((right - page_right).abs() < 1.0, "the line's last letter ends at {right}, the page's at {page_right}");
     }
 }
 
@@ -370,4 +391,68 @@ fn a_box_closed_because_the_page_changed_leaves_no_look_behind() {
     assert!(h.state().tab().edit.editing_run.is_none(), "test assumption: the stale box was closed");
     assert!(h.state().tab().edit.settling.is_none(), "unapplied words were kept up as if applied");
     assert!(!settling_now(&mut h, zoom, false));
+}
+
+/// Three lines whose text boxes run 50 pt past their letters, as a table cell's padding does on the
+/// datasheet: a gap, then a trailing space, after the words; the box includes both and the letters neither.
+const PADDED: &str = "BT /F1 10 Tf 100 700 Td [(alpha beta gamma) -5000 ( )] TJ ET\n\
+                      BT /F1 10 Tf 100 688 Td [(delta epsilon zeta) -5000 ( )] TJ ET\n\
+                      BT /F1 10 Tf 100 676 Td [(eta theta iota) -5000 ( )] TJ ET\n";
+
+/// The row must end where the page's *letters* end. Spread to the text object's box instead, the
+/// caret sits past the last letter and a click or a drag lands on letters a few to the left of the
+/// ones pointed at: here, where the datasheet's box ran 24 px past its words.
+#[test]
+fn each_row_ends_where_the_pages_letters_end_not_where_their_box_does() {
+    let mut h = harness_from(opened(open_page("inplace-padded", &[], PADDED)));
+    h.run_steps(3);
+    let view = h.state().tab().view_state.last_view.expect("the page was drawn");
+    let (galley, at, lines, buffer) = {
+        let edit = h.state().tab().edit.editing_run.as_ref().expect("an editor");
+        let (galley, at) = edit.shown.clone().expect("drawn");
+        (galley, at, edit.lines.clone(), edit.buffer.clone())
+    };
+    for (row, ((_, line), text)) in lines.iter().zip(buffer.split('\n')).enumerate() {
+        let (right, ink) = (last_letter_right(&galley, at, row), page_ink_right_px(&mut h, text));
+        let boxed = view.to_screen(AppPoint { x: line.right as f64, y: 0.0 }).x;
+        assert!(boxed - ink > 20.0, "test assumption: the box runs past the letters ({boxed} against {ink})");
+        assert!((right - ink).abs() < 1.0, "the row's last letter ends at {right}; the page's letters end at {ink} (the box at {boxed})");
+    }
+}
+
+/// Whether `shape` is text with a letter in `area` that can be seen. The selection's own highlight
+/// (`highlight`) is part of the same mesh and is meant to show; a letter in any other colour is not.
+fn shows_text_inside(shape: &egui::epaint::Shape, area: egui::Rect, highlight: egui::Color32) -> bool {
+    match shape {
+        egui::epaint::Shape::Text(text) => {
+            area.contains(text.pos)
+                && text.galley.rows.iter().any(|r| r.row.visuals.mesh.vertices.iter().any(|v| v.color.a() > 0 && v.color != highlight))
+        }
+        egui::epaint::Shape::Vec(shapes) => shapes.iter().any(|s| shows_text_inside(s, area, highlight)),
+        _ => false,
+    }
+}
+
+/// egui paints selected letters in the selection's text colour, whatever colour they were given. The
+/// letters of a box that is still the page's own words are given none, so a selection must not bring
+/// them back: they would be drawn over the page's own, a little aside and a little tight.
+#[test]
+fn selecting_in_an_unchanged_box_does_not_show_its_invisible_letters() {
+    let mut h = harness_from(opened(open_page("inplace-selection", &LINES, "")));
+    h.run_steps(3);
+    let (id, letters, area) = {
+        let edit = h.state().tab().edit.editing_run.as_ref().expect("an editor");
+        let (galley, at) = edit.shown.clone().expect("drawn");
+        (egui::Id::new(("run-editor", edit.page, edit.object)), edit.buffer.chars().count(), egui::Rect::from_min_size(at, galley.rect.size()).expand(6.0))
+    };
+    let ctx = h.ctx.clone();
+    let mut state = egui::text_edit::TextEditState::load(&ctx, id).unwrap_or_default();
+    let everything = egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(letters));
+    state.cursor.set_char_range(Some(everything));
+    state.store(&ctx, id);
+    h.run_steps(2);
+    let selected = egui::text_edit::TextEditState::load(&ctx, id).and_then(|s| s.cursor.char_range()).is_some_and(|r| !r.is_empty());
+    assert!(selected, "test assumption: the letters are selected");
+    let highlight = crate::theme::violet().gamma_multiply(0.35);
+    assert!(!h.output().shapes.iter().any(|clipped| shows_text_inside(&clipped.shape, area, highlight)), "the selected letters are painted over the page's own");
 }

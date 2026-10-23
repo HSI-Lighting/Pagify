@@ -102,11 +102,13 @@ pub(crate) fn fit_spacing(natural: f32, target: f32, chars: usize) -> f32 {
     (target - natural) / chars.saturating_sub(1).max(1) as f32
 }
 
-/// `galley` with each row that has a width to fit spread to exactly that wide: `widths[i]`
-/// is row *i*'s target in px, `None` leaves it as laid out. **The first letter stays; each
-/// later one takes its share of the difference** ([`fit_spacing`]), glyph and drawn mesh
-/// alike, so a line set in egui's font ends where the page's line does and the caret and a
-/// click land on the letters the page shows.
+/// `galley` with each row that has a width to fit spread so that **its last letter** (not its last
+/// space) ends exactly `widths[i]` px from the row's start; `None` leaves a row as laid out. The
+/// first letter stays; each later one takes its share of the difference ([`fit_spacing`]), glyph and
+/// drawn mesh alike, so a line set in egui's font ends where the page's letters do and the caret and
+/// a click land on the letters the page shows. **The spaces after the last letter keep their own
+/// width**: a page's text box can run well past its letters (a table cell's padding), and only the
+/// letters are what the person points at.
 pub(crate) fn fit_rows(mut galley: Arc<egui::Galley>, widths: &[Option<f32>]) -> Arc<egui::Galley> {
     let g = Arc::make_mut(&mut galley);
     let mut bounds = Rect::NOTHING;
@@ -114,19 +116,22 @@ pub(crate) fn fit_rows(mut galley: Arc<egui::Galley>, widths: &[Option<f32>]) ->
     for (index, placed) in g.rows.iter_mut().enumerate() {
         if let Some(target) = widths.get(index).copied().flatten().filter(|w| w.is_finite() && *w > 0.0) {
             let row = Arc::make_mut(&mut placed.row);
-            // From the last letter's right edge: the row's own width is rounded up to the pixel.
-            let natural = row.glyphs.last().map_or(row.size.x, |g| g.pos.x + g.advance_width);
-            let spacing = fit_spacing(natural, target, row.glyphs.len());
-            for (letter, glyph) in row.glyphs.iter_mut().enumerate() {
-                let dx = letter as f32 * spacing;
-                glyph.pos.x += dx;
-                if !glyph.uv_rect.is_nothing() {
-                    for vertex in row.visuals.mesh.vertices.iter_mut().skip(glyph.first_vertex as usize).take(4) {
-                        vertex.pos.x += dx;
+            // A row of nothing but spaces has no letters to fit.
+            if let Some(last_letter) = row.glyphs.iter().rposition(|g| !g.chr.is_whitespace()) {
+                // From the last letter's right edge: the row's own width is rounded up to the pixel.
+                let natural = row.glyphs[last_letter].pos.x + row.glyphs[last_letter].advance_width;
+                let spacing = fit_spacing(natural, target, last_letter + 1);
+                for (letter, glyph) in row.glyphs.iter_mut().enumerate() {
+                    let dx = letter.min(last_letter) as f32 * spacing;
+                    glyph.pos.x += dx;
+                    if !glyph.uv_rect.is_nothing() {
+                        for vertex in row.visuals.mesh.vertices.iter_mut().skip(glyph.first_vertex as usize).take(4) {
+                            vertex.pos.x += dx;
+                        }
                     }
                 }
+                row.size.x = row.glyphs.last().map_or(target, |g| g.pos.x + g.advance_width);
             }
-            row.size.x = target;
             row.visuals.mesh_bounds = row.visuals.mesh.vertices.iter().fold(Rect::NOTHING, |r, v| r.union(Rect::from_min_max(v.pos, v.pos)));
         }
         bounds = bounds.union(Rect::from_min_size(placed.pos, placed.row.size));
@@ -275,6 +280,23 @@ mod tests {
         assert!((after.rows[0].row.size.x - (natural + 30.0)).abs() < 0.01, "the row is as wide as asked");
         // The drawn letters moved with their numbers.
         assert!(after.mesh_bounds.right() > before.mesh_bounds.right() + 25.0, "{:?} {:?}", before.mesh_bounds, after.mesh_bounds);
+    }
+
+    #[test]
+    fn a_row_with_trailing_spaces_is_fitted_by_its_last_letter() {
+        let before = laid_out("hello   ");
+        let right_of = |galley: &egui::Galley, last_letter: bool| {
+            let glyphs = &galley.rows[0].row.glyphs;
+            let glyph = if last_letter { glyphs.iter().rev().find(|g| !g.chr.is_whitespace()) } else { glyphs.last() };
+            let glyph = glyph.expect("a glyph");
+            glyph.pos.x + glyph.advance_width
+        };
+        let letters = right_of(&before, true);
+        let after = fit_rows(before.clone(), &[Some(letters + 20.0)]);
+        assert!((right_of(&after, true) - (letters + 20.0)).abs() < 0.01, "the last letter ends at {}", right_of(&after, true));
+        // The spaces after it keep their own width: they are not stretched with the letters.
+        let trailing = |galley: &egui::Galley| right_of(galley, false) - right_of(galley, true);
+        assert!((trailing(&after) - trailing(&before)).abs() < 0.01, "the spaces went from {} to {}", trailing(&before), trailing(&after));
     }
 
     #[test]

@@ -14938,6 +14938,24 @@ impl PagifyApp {
         self.tab().edit.settling.clone()
     }
 
+    /// Where the page's own letters of each line of the open box end: the right edge of the last mark of
+    /// ink in the line's box, in page points. **Not the line's box edge**, which can run well past its
+    /// letters (a table cell's padding): the invisible rows are spread to the letters. Empty - no fit -
+    /// once the words have changed, on a page too heavy to read its letters, and for a box that is not
+    /// edited in place.
+    fn line_ink_rights(&mut self, page: usize) -> Vec<Option<f32>> {
+        let areas: Vec<(f32, f32, f32, f32)> =
+            match self.tab().edit.editing_run.as_ref().filter(|e| e.page == page && e.in_place() && !e.changed()) {
+                Some(edit) => edit.lines.iter().map(|(_, r)| (r.left, r.top, r.right, r.bottom)).collect(),
+                None => return Vec::new(),
+            };
+        if self.page_weight(page).filter(page_is_heavy).is_some() {
+            return Vec::new();
+        }
+        let Some(characters) = self.characters(page) else { return Vec::new() };
+        areas.into_iter().map(|area| characters.ink_right_in(area)).collect()
+    }
+
     /// Whether the page without the open paragraph is held and good for it: this paragraph's
     /// objects, this document as it is, this turn.
     fn textless_ready(&self, page: usize) -> bool {
@@ -15819,6 +15837,7 @@ impl PagifyApp {
         let ready_faces = self.faces_state.box_faces_ready.clone();
 
         let cover = self.editor_cover(page);
+        let ink_rights = self.line_ink_rights(page);
 
         let Some(edit) = self.tab_mut().edit.editing_run.as_mut() else { return };
         if edit.page != page {
@@ -16093,7 +16112,11 @@ impl PagifyApp {
             Vec::new()
         };
         let widths: Vec<Option<f32>> = if in_place_now {
-            edit.lines.iter().map(|(_, line)| Some((line.right - line.left).abs() * view.scale)).collect()
+            edit.lines
+                .iter()
+                .zip(&ink_rights)
+                .map(|((_, line), ink)| ink.map(|ink| (ink - line.left.min(line.right)).max(0.0) * view.scale))
+                .collect()
         } else {
             Vec::new()
         };
@@ -16150,8 +16173,14 @@ impl PagifyApp {
             galley
         };
 
+        let selection_ink = ui.style().visuals.selection.stroke.color;
         {
             let style = ui.style_mut();
+            // egui paints selected letters in the selection's text colour, whatever colour they were
+            // given: while the box is still the page's own words they have none, and must stay unseen.
+            if in_place_now && !edit.changed() {
+                style.visuals.selection.stroke.color = egui::Color32::TRANSPARENT;
+            }
             // Not forced to one colour where the characters have colours of their own.
             // In place the letters carry their own colours (and none, while unchanged): a
             // colour forced over them would draw the page's words twice.
@@ -16216,6 +16245,7 @@ impl PagifyApp {
             }
         }
         ui.style_mut().visuals.override_text_color = None;
+        ui.style_mut().visuals.selection.stroke.color = selection_ink;
 
         // **Handles on the left and right edges: the box is a width to wrap the
         // words to**, so the same words can sit on one line or several. Declared
