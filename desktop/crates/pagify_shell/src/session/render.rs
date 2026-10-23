@@ -103,6 +103,28 @@ impl Session {
         })
     }
 
+    /// The page as [`Self::render_page_rotated`] draws it, with the page objects at
+    /// `hide` left out — the page under a paragraph that is being retyped, so the old
+    /// words do not show through the new ones.
+    ///
+    /// **A read: the document and its history do not change**, and **never cached**:
+    /// which objects are left out is the caller's to key a picture on (the object
+    /// numbers are the ones `text_runs` reports, whatever the page's own turn).
+    /// Refused if any of them is not on the page.
+    pub fn render_page_hiding(
+        &self,
+        index: usize,
+        scale: f32,
+        rotation: Rotation,
+        hide: &[usize],
+    ) -> Result<PageRaster> {
+        let request = RenderRequest { scale, rotation, ..Default::default() };
+        registry::with_session(self.handle, |s| {
+            let bitmap = s.document.render_page_hiding(index, &request, hide)?;
+            Ok(PageRaster { width: bitmap.width, height: bitmap.height, pixels: bitmap.data, from_cache: false })
+        })
+    }
+
     /// Rasterise a page into the cache with no on-screen destination, so a
     /// later scroll onto it resolves to a copy. Phase 2 wires this to the
     /// viewport's neighbours; it is here now because the engine already has it.

@@ -506,6 +506,18 @@ pub trait Document: Send + Sync {
         Ok(self.page(index)?.size())
     }
 
+    /// The page as [`Page::render_into`] draws it, with the page objects at `hide`
+    /// (positions in the page's object list, as [`TextRun::object`] counts them)
+    /// left out.
+    ///
+    /// **A read: the document does not change.** Edit Text puts this under the
+    /// paragraph being retyped so the old words do not show through the new ones.
+    /// Refused, with nothing drawn, if any position is past the last object.
+    /// Form-field contents are not drawn.
+    fn render_page_hiding(&self, _index: usize, _request: &RenderRequest, _hide: &[usize]) -> Result<Bitmap> {
+        Err(PdfError::Unsupported("rendering a page with objects left out"))
+    }
+
     /// Marks already on a page, each with PDFium's index for it.
     ///
     /// Empty by default: a document that cannot report annotations is not an

@@ -949,6 +949,94 @@ impl Document for PdfiumDocument {
         self.page_count
     }
 
+    /// **On a page of its own, thrown away after the picture is made.**
+    /// `FPDF_LoadPage` parses a fresh object list each time, so taking objects off
+    /// that list changes only this load of the page. `FPDFPage_GenerateContent` is
+    /// never called, so nothing is written back into the document either.
+    ///
+    /// Drawn with the flags and the white ground `build_render_config` gives a
+    /// normal render, so the pixels around the hidden objects are the page's own.
+    fn render_page_hiding(&self, index: usize, request: &RenderRequest, hide: &[usize]) -> Result<Bitmap> {
+        use std::ffi::{c_int, c_void};
+
+        self.validate_page_index(index)?;
+        let page_number = c_int::try_from(index)
+            .map_err(|_| PdfError::InvalidArgument(format!("page index {index} is out of range")))?;
+        let (mut w, mut h) = self.page_size(index)?.pixel_size(request.scale);
+        if request.rotation.swaps_axes() {
+            std::mem::swap(&mut w, &mut h);
+        }
+        let too_big = || PdfError::InvalidArgument("that page is too large to draw at this scale".into());
+        let (width, height) = (c_int::try_from(w).map_err(|_| too_big())?, c_int::try_from(h).map_err(|_| too_big())?);
+        // Allocated (and its size checked) before the page is touched.
+        let mut scratch = Bitmap::new(w, h, bitmap::PDFIUM_OUTPUT_ORDER)?;
+        let stride = c_int::try_from(scratch.stride).map_err(|_| too_big())?;
+        let rotate: c_int = match request.rotation {
+            Rotation::None => 0,
+            Rotation::Clockwise90 => 1,
+            Rotation::Clockwise180 => 2,
+            Rotation::Clockwise270 => 3,
+        };
+        // `fpdfview.h`, and the same two flags `build_render_config` ends up with.
+        const FPDF_ANNOT: c_int = 0x01;
+        const FPDF_RENDER_LIMITEDIMAGECACHE: c_int = 0x200;
+        const FPDF_BITMAP_BGRA: c_int = 4;
+        let mut flags = FPDF_RENDER_LIMITEDIMAGECACHE;
+        if request.render_annotations {
+            flags |= FPDF_ANNOT;
+        }
+
+        let raw = RawPage::open(self.document.handle(), page_number)?;
+        let bindings = pdfium()?.bindings();
+        // Safety: `raw` is a page loaded for this call and closed when it drops; every
+        // object handle below comes from it and is used before that; `scratch` outlives
+        // the PDFium bitmap that borrows its bytes, which is destroyed first.
+        unsafe {
+            let count = bindings.FPDFPage_CountObjects(raw.handle);
+            // Every position is found before anything is taken off, so a bad one
+            // leaves nothing half-done, and one named twice is removed once.
+            let mut objects: Vec<FPDF_PAGEOBJECT> = Vec::with_capacity(hide.len());
+            for &position in hide {
+                let object = c_int::try_from(position)
+                    .ok()
+                    .filter(|p| *p < count)
+                    .map(|p| bindings.FPDFPage_GetObject(raw.handle, p))
+                    .filter(|o| !o.is_null())
+                    .ok_or_else(|| PdfError::InvalidArgument(format!("page {index} has no object {position}")))?;
+                if !objects.contains(&object) {
+                    objects.push(object);
+                }
+            }
+            for object in objects {
+                if bindings.FPDFPage_RemoveObject(raw.handle, object) == 0 {
+                    return Err(PdfError::Pdfium("could not take an object off the page".into()));
+                }
+                bindings.FPDFPageObj_Destroy(object);
+            }
+
+            let target = bindings.FPDFBitmap_CreateEx(
+                width,
+                height,
+                FPDF_BITMAP_BGRA,
+                scratch.data.as_mut_ptr().cast::<c_void>(),
+                stride,
+            );
+            if target.is_null() {
+                return Err(PdfError::InvalidBitmap("PDFium could not use the bitmap".into()));
+            }
+            bindings.FPDFBitmap_FillRect(target, 0, 0, width, height, 0xFFFF_FFFF_u32 as _);
+            bindings.FPDF_RenderPageBitmap(target, raw.handle, 0, 0, width, height, rotate, flags);
+            bindings.FPDFBitmap_Destroy(target);
+        }
+
+        let mut out = Bitmap::new(w, h, PixelOrder::Rgba)?;
+        {
+            let mut target = RenderTarget::from_bitmap(&mut out)?;
+            target.copy_from(&scratch)?;
+        }
+        Ok(out)
+    }
+
     fn as_document_mut(&mut self) -> Option<&mut dyn DocumentMut> {
         Some(self)
     }
