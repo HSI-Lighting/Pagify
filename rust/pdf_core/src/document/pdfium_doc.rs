@@ -218,6 +218,11 @@ pub struct PdfiumDocument {
     /// once per word of one font — measured at +2.9 s on a whole-page copy before
     /// this was kept.
     mended_fonts: std::sync::Mutex<HashMap<u64, Option<Vec<u8>>>>,
+    /// The font dictionary's object number of each typing font this document has had
+    /// written for it, by [`crate::pdf::embed::program_hash`] - so an edit on another
+    /// page points at the copy an earlier one made. Checked against the file before it
+    /// is trusted (an undo may have taken the object out).
+    typing_font_objects: std::sync::Mutex<HashMap<String, u32>>,
     /// Fonts a caller has offered for typing characters the document's own
     /// fonts cannot spell.
     ///
@@ -789,6 +794,7 @@ impl PdfiumDocument {
             dirty: false,
             vault: std::sync::Mutex::new(None),
             mended_fonts: std::sync::Mutex::new(HashMap::new()),
+            typing_font_objects: std::sync::Mutex::new(HashMap::new()),
             already_secured: password.is_some_and(|p| !p.is_empty()),
             remove_password: false,
             secure_plus: false,
@@ -8210,6 +8216,24 @@ fn font_to_unicode(
             return Ok((Swapped { resource: face.resource.clone(), face: face.display.clone() }, encoded));
         }
 
+        // **Nor is it written again for a face the document already holds**, whichever edit
+        // wrote it. The marker a typing font carries (`/PagifyProgram`) says it is this very
+        // program, so a different font of the same name, or an object an undo has since taken
+        // out, is never mistaken for it: those fall through and are written afresh.
+        let program = embed::program_hash(font_bytes);
+        let existing = self.page_fonts(file, page).unwrap_or(crate::pdf::Dict(Vec::new()));
+        if let Some((resource, _)) = existing.0.iter().find(|(_, font)| is_typing_font(file, font, &program)) {
+            return Ok((Swapped { resource: resource.clone(), face: key }, encoded));
+        }
+        let held = self.typing_font_objects.lock().ok().and_then(|held| held.get(&program).copied());
+        if let Some(font) =
+            held.filter(|font| is_typing_font(file, &crate::pdf::Object::Reference(*font, 0), &program))
+        {
+            let resource = fresh_typing_resource(&existing, batch);
+            batch.faces.push(EmbeddedFace { key: key.clone(), resource: resource.clone(), font, display: key.clone() });
+            return Ok((Swapped { resource, face: key }, encoded));
+        }
+
         let first = match batch.next_object {
             Some(next) => next,
             None => file.next_object_number()?,
@@ -8223,15 +8247,7 @@ fn font_to_unicode(
         // A name nothing on the page, and nothing this batch has embedded, is
         // using. Numbered rather than fixed because a page can end up with more
         // than one of ours.
-        let existing = self.page_fonts(file, page).unwrap_or(crate::pdf::Dict(Vec::new()));
-        let mut resource = b"PagifyType".to_vec();
-        for suffix in 1..=64u32 {
-            let candidate = format!("PagifyType{suffix}").into_bytes();
-            if existing.get(&candidate).is_none() && !batch.faces.iter().any(|face| face.resource == candidate) {
-                resource = candidate;
-                break;
-            }
-        }
+        let resource = fresh_typing_resource(&existing, batch);
 
         batch.added.extend(embedded.objects);
         batch.faces.push(EmbeddedFace {
@@ -8240,6 +8256,9 @@ fn font_to_unicode(
             font: embedded.font,
             display: embedded.name.clone(),
         });
+        if let Ok(mut held) = self.typing_font_objects.lock() {
+            held.insert(program, embedded.font);
+        }
         Ok((Swapped { resource, face: embedded.name }, encoded))
     }
 
@@ -12711,6 +12730,27 @@ fn font_is_vertical(file: &crate::pdf::File<'_>, fonts: &crate::pdf::Dict, name:
     let Some(dict) = font.as_dict() else { return false };
     dict.get(b"Subtype").and_then(Object::as_name) == Some(b"Type0")
         && dict.get(b"Encoding").and_then(Object::as_name).is_some_and(|n| n.ends_with(b"-V"))
+}
+
+/// Whether `font` (a font dictionary, or a reference to one) is a typing font written from
+/// the program hashed `program` - see [`crate::pdf::embed::program_hash`].
+fn is_typing_font(file: &crate::pdf::File<'_>, font: &crate::pdf::Object, program: &str) -> bool {
+    file.resolve(font)
+        .ok()
+        .and_then(|font| font.as_dict().and_then(|dict| dict.get(b"PagifyProgram").cloned()))
+        .is_some_and(|marker| matches!(marker, crate::pdf::Object::Name(name) if name == program.as_bytes()))
+}
+
+/// A resource name no font on the page, and none this batch has written, is using:
+/// `PagifyType1`, `PagifyType2`, and so on. A page can end up with more than one of ours.
+fn fresh_typing_resource(on_page: &crate::pdf::Dict, batch: &EmbedBatch) -> Vec<u8> {
+    for suffix in 1..=64u32 {
+        let candidate = format!("PagifyType{suffix}").into_bytes();
+        if on_page.get(&candidate).is_none() && !batch.faces.iter().any(|face| face.resource == candidate) {
+            return candidate;
+        }
+    }
+    b"PagifyType".to_vec()
 }
 
 /// A run written in a font that is not the one it was drawn in.

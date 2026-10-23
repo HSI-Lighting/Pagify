@@ -211,6 +211,20 @@ pub fn win_ansi(text: &str) -> Option<Vec<u8>> {
     text.chars().map(win_ansi_code).collect()
 }
 
+/// A stable name for a font program: its bytes hashed (FNV-1a, 64 bits) and written in
+/// hex. Written into the font dictionary [`truetype`] makes as `/PagifyProgram`, so a
+/// later edit can tell that a font already in the document **is** this program - and not
+/// merely called the same - and point at it instead of writing it again. Not
+/// `DefaultHasher`: this is stored in files, and must mean the same thing next year.
+pub fn program_hash(bytes: &[u8]) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
 /// Build everything a document needs in order to draw with this font.
 ///
 /// `first` is the first object number free in the file; three are used.
@@ -254,6 +268,7 @@ pub fn truetype(bytes: &[u8], first: u32) -> Result<Embedded> {
     font_dict.set(b"Type", Object::Name(b"Font".to_vec()));
     font_dict.set(b"Subtype", Object::Name(b"TrueType".to_vec()));
     font_dict.set(b"BaseFont", Object::Name(pdf_name.clone().into_bytes()));
+    font_dict.set(b"PagifyProgram", Object::Name(program_hash(bytes).into_bytes()));
     font_dict.set(b"FirstChar", Object::Number(b"32".to_vec()));
     font_dict.set(b"LastChar", Object::Number(b"255".to_vec()));
     font_dict.set(b"Widths", Object::Array(widths));
@@ -353,6 +368,15 @@ fn win_ansi_code(character: char) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
+    /// The hash is written into saved files, so it must mean the same thing for good:
+    /// these are the published FNV-1a 64-bit values.
+    #[test]
+    fn a_program_hash_is_the_same_for_ever() {
+        assert_eq!(program_hash(b""), "cbf29ce484222325");
+        assert_eq!(program_hash(b"a"), "af63dc4c8601ec8c");
+        assert_ne!(program_hash(b"ab"), program_hash(b"ba"));
+    }
+
     use super::*;
 
     #[test]
