@@ -1076,6 +1076,9 @@ impl crate::PagifyApp {
                     // so they do not show through the new ones. Nothing here once the box is
                     // as the page has it, or on a page too heavy to be drawn again for it.
                     let textless = self.textless_for(ctx, page, zoom, (w, h));
+                    // Or, the moment after an edit applied, the typed words over that same page
+                    // until the page's own new picture is there.
+                    let settling = if textless.is_none() { self.settling_for(ctx, page, zoom, picture.is_some()) } else { None };
                     // **With the render worker, a page with no picture yet is still a page**:
                     // paper where it will be, and everything on it (the zoom's anchor, the
                     // pointer, the pending tool) works while its picture is made — which for
@@ -1108,6 +1111,11 @@ impl crate::PagifyApp {
                                 egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                                 egui::Color32::WHITE,
                             );
+                        } else if let Some(look) = &settling {
+                            let whole = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                            ui.painter().image(look.picture.id(), rect, whole, egui::Color32::WHITE);
+                            let at = origin + egui::vec2(look.at_pt.0, look.at_pt.1) * zoom;
+                            ui.painter().with_clip_rect(rect).galley(at, look.galley.clone(), look.ink);
                         } else if let Some((texture, exact)) = &picture {
                             let drawn = if *exact {
                                 let ppp = ctx.pixels_per_point();
@@ -1238,7 +1246,7 @@ impl crate::PagifyApp {
                         // takes every click over them — so the caret could be
                         // given once, by asking for it, and never again by
                         // clicking. Drawn last, it is simply clickable.
-                        self.draw_run_editor(ui, page, view);
+                        self.draw_run_editor(ui, page, view, textless.as_ref());
                         self.draw_new_text_box(ui, page, view);
                     }
                 }

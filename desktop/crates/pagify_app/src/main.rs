@@ -522,6 +522,9 @@ struct EditState {
     editing_run: Option<EditingRun>,
     /// A brand new run being composed — see [`NewTextBox`].
     new_text_box: Option<NewTextBox>,
+    /// The look of the paragraph just applied, held until the page is drawn again - see
+    /// [`in_place::Settling`] and [`PagifyApp::settling_for`].
+    settling: Option<in_place::Settling>,
 }
 
 /// The modal and panel state a tab can have open: search, spelling and its
@@ -994,7 +997,7 @@ impl DocTab {
             calibration: Calibration::default(),
             tool: None,
             view_state: ViewState { page: 0, zoom: ZoomMode::Fit, rotation: Rotation::None, view: None, hover_view: None, viewport_rect: None, anchor_offset: None, last_view: None, scroll_offset: egui::Vec2::ZERO, scroll_pt: 0.0, pan_by: None, scroll_to_pt: None, canvas_pt: egui::vec2(800.0, 600.0), reveal: None, saved_revision: 0, copy_wanted: false, },
-            edit: EditState { editing_run: None, new_text_box: None },
+            edit: EditState { editing_run: None, new_text_box: None, settling: None },
             next_text_id: 0x0100_0000,
             panels: PanelsState { pending_link: None, extract_ask: None, #[cfg(target_os = "windows")] print_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, },
             bookmarked_pages: std::collections::HashSet::new(),
@@ -14893,6 +14896,46 @@ impl PagifyApp {
         None
     }
 
+    /// **The typed words of a paragraph just applied, over the page without its old words**,
+    /// while the page has no picture of its own yet (`has_picture` is false): an edit renders
+    /// the page again, and until that lands the canvas would show the bare paper, or the old
+    /// words. `None` - and let go of - once the page has a picture, the zoom or turn has moved
+    /// (the rows would be misplaced), the box was put away with nothing applied, or
+    /// [`in_place::SETTLE_SECS`] have passed. `None`, and kept, while the box is open: the
+    /// canvas draws that itself.
+    fn settling_for(&mut self, ctx: &egui::Context, page: usize, zoom: f32, has_picture: bool) -> Option<in_place::Settling> {
+        let rotation = self.tab().view_state.rotation as u8;
+        let epoch = self.tab().doc.as_ref()?.render_epoch;
+        let now = ctx.input(|i| i.time);
+        let open = self.tab().edit.editing_run.as_ref().is_some_and(|e| e.page == page);
+        let held = self.tab().edit.settling.as_ref().filter(|s| s.page == page)?;
+        if open {
+            return None;
+        }
+        let over = has_picture
+            || held.epoch == epoch
+            || held.rotation != rotation
+            || (held.zoom - zoom).abs() > 1e-3
+            || now - held.since > in_place::SETTLE_SECS;
+        if over {
+            self.tab_mut().edit.settling = None;
+            return None;
+        }
+        // Still wanted: looked at again in a moment, when the page's picture has not come.
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        self.tab().edit.settling.as_ref().map(|s| in_place::Settling {
+            page: s.page,
+            epoch: s.epoch,
+            zoom: s.zoom,
+            rotation: s.rotation,
+            picture: s.picture.clone(),
+            galley: s.galley.clone(),
+            at_pt: s.at_pt,
+            ink: s.ink,
+            since: s.since,
+        })
+    }
+
     /// Whether the page without the open paragraph is held and good for it: this paragraph's
     /// objects, this document as it is, this turn.
     fn textless_ready(&self, page: usize) -> bool {
@@ -15758,7 +15801,13 @@ impl PagifyApp {
     /// Sized and placed from the run's own box, so what is being typed sits
     /// where what is being replaced sits. A field somewhere else would mean
     /// holding the page in your head while you type.
-    fn draw_run_editor(&mut self, ui: &mut egui::Ui, page: usize, view: PageView) {
+    fn draw_run_editor(&mut self, ui: &mut egui::Ui, page: usize, view: PageView, textless: Option<&egui::TextureHandle>) {
+        let (rotation, epoch, now) = (
+            self.tab().view_state.rotation as u8,
+            self.tab().doc.as_ref().map_or(0, |d| d.render_epoch),
+            ui.ctx().input(|i| i.time),
+        );
+        let mut settle = None;
         // Read once, before the borrow below — app-wide font state, not any
         // one paragraph's own.
         let em_ratio = self.faces_state.editor_face_metrics.map(|m| (m.ascent - m.descent) as f32 / 1000.0);
@@ -16125,6 +16174,23 @@ impl PagifyApp {
             // explicitly.
             let response = ui.put(rect, editor.id(id).frame(egui::Frame::NONE));
             edit.shown = drawn_rows.borrow_mut().take().map(|galley| (galley, rect.min));
+            // Remembered each frame the page-without-the-words is under the typed words, so
+            // that applying them can leave this look up until the page is drawn again.
+            if let (Some(picture), Some((galley, at)), true) =
+                (textless, edit.shown.as_ref(), in_place_now && cover.is_none() && edit.changed())
+            {
+                settle = Some(in_place::Settling {
+                    page,
+                    epoch,
+                    zoom: view.scale,
+                    rotation,
+                    picture: picture.clone(),
+                    galley: galley.clone(),
+                    at_pt: ((at.x - view.origin.x) / view.scale, (at.y - view.origin.y) / view.scale),
+                    ink,
+                    since: now,
+                });
+            }
             // The looks follow the typing: what was typed takes the look before it.
             if edit.buffer != edit.rich.text() {
                 edit.rich.edit(&edit.buffer);
@@ -16203,6 +16269,9 @@ impl PagifyApp {
         // read as a change going live before anyone pressed the button that
         // says "apply this" — reported from use. Escape still leaves
         // whatever was typed here alone.
+        if settle.is_some() {
+            self.tab_mut().edit.settling = settle;
+        }
     }
 
 

@@ -132,6 +132,29 @@ pub(crate) fn unchanged(buffer: &str, original: &str, look_dirty: bool) -> bool 
     typed == original.trim() && !look_dirty
 }
 
+/// The look of an edited paragraph, held after it is applied: **the page's own picture of
+/// the edited page does not exist until it is rendered again**, so for that moment the page
+/// without the old words (`picture`) and the typed words (`galley`) stay up, and nothing
+/// flashes the old text or the bare paper. Good for one zoom and turn of the view.
+pub(crate) struct Settling {
+    pub(crate) page: usize,
+    /// The document's `render_epoch` while the box was open; an applied edit moves it.
+    pub(crate) epoch: u64,
+    pub(crate) zoom: f32,
+    pub(crate) rotation: u8,
+    pub(crate) picture: egui::TextureHandle,
+    pub(crate) galley: Arc<egui::Galley>,
+    /// Where the galley's corner is, in page points from the page's corner.
+    pub(crate) at_pt: (f32, f32),
+    pub(crate) ink: Color32,
+    /// When it was last refreshed, `ctx.input(|i| i.time)`: it is let go of after [`SETTLE_SECS`].
+    pub(crate) since: f64,
+}
+
+/// The longest a settling look is held. A page renders again in well under this; past it
+/// something is wrong with the render and the page's own state is the honest thing to show.
+pub(crate) const SETTLE_SECS: f64 = 3.0;
+
 /// A caret colour that shows on the page behind `ink`: with nothing drawn behind the
 /// editor, dark ink means a light page, so black; pale ink means a dark band, so white.
 pub(crate) fn caret_on(ink: Color32) -> Color32 {

@@ -270,3 +270,73 @@ fn each_row_matches_the_page(app: PagifyApp) {
         assert!((right - page_right).abs() < 1.0, "the line ends at {right}, the page's at {page_right}");
     }
 }
+
+/// The zoom the canvas drew the page at, which is what a settling look is held against.
+fn canvas_zoom(h: &egui_kittest::Harness<'static, PagifyApp>) -> f32 {
+    h.state().tab().view_state.last_view.expect("the page was drawn").scale
+}
+
+/// The box typed in, with its page-without-the-words under it and its look remembered.
+fn typed_and_settled() -> egui_kittest::Harness<'static, PagifyApp> {
+    let mut app = opened(open_page("inplace-settling", &LINES, ""));
+    type_a_letter(&mut app);
+    let mut h = async_from(app);
+    for _ in 0..60 {
+        if textless(h.state()).is_some() {
+            break;
+        }
+        settle(&mut h, 1);
+    }
+    assert!(textless(h.state()).is_some(), "the picture never arrived");
+    settle(&mut h, 3);
+    h
+}
+
+fn settling_now(h: &mut egui_kittest::Harness<'static, PagifyApp>, zoom: f32, has_picture: bool) -> bool {
+    let ctx = h.ctx.clone();
+    h.state_mut().settling_for(&ctx, 0, zoom, has_picture).is_some()
+}
+
+#[test]
+fn after_apply_the_typed_look_stays_until_the_page_is_drawn_again() {
+    let mut h = typed_and_settled();
+    let zoom = canvas_zoom(&h);
+    h.state_mut().apply_editing_page();
+    assert!(h.state().tab().edit.editing_run.is_none(), "test assumption: the box closed");
+    assert!(settling_now(&mut h, zoom, false), "the typed words must stay up while the page has no new picture");
+    // And the frames that follow draw it, until the page's own new picture lands - or, on a
+    // machine too slow for that, until the held look times out (3 s of frames at 60 a second).
+    for _ in 0..250 {
+        if h.state().tab().edit.settling.is_none() {
+            return;
+        }
+        settle(&mut h, 1);
+    }
+    panic!("the typed look was never let go of");
+}
+
+#[test]
+fn a_picture_of_the_page_ends_it() {
+    let mut h = typed_and_settled();
+    let zoom = canvas_zoom(&h);
+    h.state_mut().apply_editing_page();
+    assert!(!settling_now(&mut h, zoom, true), "the page has its own picture again");
+    assert!(h.state().tab().edit.settling.is_none());
+}
+
+#[test]
+fn a_zoom_ends_it() {
+    let mut h = typed_and_settled();
+    let zoom = canvas_zoom(&h);
+    h.state_mut().apply_editing_page();
+    assert!(!settling_now(&mut h, zoom * 1.5, false), "rows drawn for another zoom would be misplaced");
+    assert!(h.state().tab().edit.settling.is_none());
+}
+
+#[test]
+fn a_box_put_away_with_no_edit_leaves_nothing_behind() {
+    let mut h = typed_and_settled();
+    let zoom = canvas_zoom(&h);
+    h.state_mut().tab_mut().edit.editing_run = None;
+    assert!(!settling_now(&mut h, zoom, false), "nothing was applied, so the page is as it was");
+}
