@@ -10,9 +10,6 @@
 //! (so the caret, the selection and a click all land on real letters) but drawn in no
 //! colour. These are the pieces of that which need no window and no document.
 
-// Used by `draw_run_editor` (Task 4 of the in-place plan); until then only the tests are.
-#![allow(dead_code)]
-
 use std::sync::Arc;
 
 use egui::{Color32, Rect};
@@ -85,6 +82,54 @@ pub(crate) fn snap_rows(mut galley: Arc<egui::Galley>, targets: &[RowTarget], le
 /// one letter has no gap, so it takes the whole difference.
 pub(crate) fn fit_spacing(natural: f32, target: f32, chars: usize) -> f32 {
     (target - natural) / chars.saturating_sub(1).max(1) as f32
+}
+
+/// `galley` with each row that has a width to fit spread to exactly that wide: `widths[i]`
+/// is row *i*'s target in px, `None` leaves it as laid out. **The first letter stays; each
+/// later one takes its share of the difference** ([`fit_spacing`]), glyph and drawn mesh
+/// alike, so a line set in egui's font ends where the page's line does and the caret and a
+/// click land on the letters the page shows.
+pub(crate) fn fit_rows(mut galley: Arc<egui::Galley>, widths: &[Option<f32>]) -> Arc<egui::Galley> {
+    let g = Arc::make_mut(&mut galley);
+    let mut bounds = Rect::NOTHING;
+    let mut meshes = Rect::NOTHING;
+    for (index, placed) in g.rows.iter_mut().enumerate() {
+        if let Some(target) = widths.get(index).copied().flatten().filter(|w| w.is_finite() && *w > 0.0) {
+            let row = Arc::make_mut(&mut placed.row);
+            // From the last letter's right edge: the row's own width is rounded up to the pixel.
+            let natural = row.glyphs.last().map_or(row.size.x, |g| g.pos.x + g.advance_width);
+            let spacing = fit_spacing(natural, target, row.glyphs.len());
+            for (letter, glyph) in row.glyphs.iter_mut().enumerate() {
+                let dx = letter as f32 * spacing;
+                glyph.pos.x += dx;
+                if !glyph.uv_rect.is_nothing() {
+                    for vertex in row.visuals.mesh.vertices.iter_mut().skip(glyph.first_vertex as usize).take(4) {
+                        vertex.pos.x += dx;
+                    }
+                }
+            }
+            row.size.x = target;
+            row.visuals.mesh_bounds = row.visuals.mesh.vertices.iter().fold(Rect::NOTHING, |r, v| r.union(Rect::from_min_max(v.pos, v.pos)));
+        }
+        bounds = bounds.union(Rect::from_min_size(placed.pos, placed.row.size));
+        meshes = meshes.union(placed.row.visuals.mesh_bounds.translate(placed.pos.to_vec2()));
+    }
+    g.rect = Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(bounds.right().max(0.0), bounds.bottom().max(0.0)));
+    g.mesh_bounds = meshes;
+    galley
+}
+
+/// Whether a box holding `buffer` asks for nothing over what `original` said: the same
+/// words (their edges aside), and no look changed (`look_dirty`). Typed away entirely is a
+/// change, unless there was nothing to delete. **The one rule** for "the box is still the
+/// page's own text", read by the editor's invisible text, the paper under it and the
+/// picture of the page without it.
+pub(crate) fn unchanged(buffer: &str, original: &str, look_dirty: bool) -> bool {
+    let typed = buffer.trim();
+    if typed.is_empty() {
+        return original.trim().is_empty();
+    }
+    typed == original.trim() && !look_dirty
 }
 
 /// A caret colour that shows on the page behind `ink`: with nothing drawn behind the
@@ -175,6 +220,39 @@ mod tests {
         assert_eq!(fit_spacing(10.0, 12.0, 1), 2.0);
         assert_eq!(fit_spacing(10.0, 12.0, 0), 2.0);
         assert_eq!(fit_spacing(100.0, 90.0, 11), -1.0);
+    }
+
+    #[test]
+    fn a_row_fitted_to_a_width_ends_there_and_keeps_its_start() {
+        let before = laid_out("hello world");
+        let natural = before.rows[0].row.glyphs.last().map(|g| g.pos.x + g.advance_width).expect("letters");
+        let after = fit_rows(before.clone(), &[Some(natural + 30.0)]);
+        let (first, last) = (after.rows[0].row.glyphs.first().expect("a letter"), after.rows[0].row.glyphs.last().expect("a letter"));
+        assert_eq!(first.pos.x, before.rows[0].row.glyphs[0].pos.x, "the first letter does not move");
+        assert!((last.pos.x + last.advance_width - (natural + 30.0)).abs() < 0.01, "the last letter ends at {}", last.pos.x + last.advance_width);
+        assert!((after.rows[0].row.size.x - (natural + 30.0)).abs() < 0.01, "the row is as wide as asked");
+        // The drawn letters moved with their numbers.
+        assert!(after.mesh_bounds.right() > before.mesh_bounds.right() + 25.0, "{:?} {:?}", before.mesh_bounds, after.mesh_bounds);
+    }
+
+    #[test]
+    fn a_row_with_no_width_to_fit_is_left_alone() {
+        let before = laid_out("one
+two");
+        let after = fit_rows(before.clone(), &[None, Some(before.rows[1].row.size.x + 10.0)]);
+        assert_eq!(after.rows[0].row.glyphs[2].pos, before.rows[0].row.glyphs[2].pos);
+        assert!(after.rows[1].row.glyphs[2].pos.x > before.rows[1].row.glyphs[2].pos.x);
+    }
+
+    #[test]
+    fn words_are_unchanged_when_only_the_edges_differ() {
+        assert!(unchanged("alpha beta", "alpha beta", false));
+        assert!(unchanged("alpha beta 
+", "alpha beta", false));
+        assert!(!unchanged("alpha betax", "alpha beta", false));
+        assert!(!unchanged("alpha beta", "alpha beta", true), "a look changed");
+        assert!(!unchanged("", "alpha beta", false), "typed away is a change");
+        assert!(unchanged("", "  ", true), "nothing to delete");
     }
 
     #[test]

@@ -1951,6 +1951,12 @@ struct EditingRun {
     /// drew it and its index in that piece's exact text. `None` for a newline, a
     /// hyphen the box added, and a line the page draws as shapes.
     box_chars: Vec<Option<(usize, usize)>>,
+    /// Each line's baseline, in page points with a top-left origin (the space of `lines`'
+    /// boxes): where the box sets its rows, so they sit on the page's own lines. One per
+    /// line, or none — see [`Self::in_place`].
+    baselines: Vec<f32>,
+    /// The box's text as last drawn: its laid-out rows and where they were on screen.
+    shown: Option<(std::sync::Arc<egui::Galley>, egui::Pos2)>,
     /// Each piece's words as the page draws them: what a piece restyled in place is
     /// written again with.
     piece_texts: std::collections::HashMap<usize, String>,
@@ -1979,16 +1985,24 @@ impl EditingRun {
     /// Whether an edit actually asks for anything — same words, same style, nothing to
     /// do. Until it does, the page's own picture is what shows under the box.
     fn changed(&self) -> bool {
-        let typed = self.buffer.trim();
-        if typed.is_empty() {
-            // Typed away is a deletion — a change, unless there was nothing to delete.
-            return !self.original.trim().is_empty();
-        }
+        !in_place::unchanged(&self.buffer, &self.original, self.look_dirty())
+    }
+
+    /// Whether anything but the words differs from how the box opened: the style, a picked
+    /// font, or a character's look.
+    fn look_dirty(&self) -> bool {
         let changed_look = pdf_core::document::TextStyle { face: None, ..self.style.clone() }
             != pdf_core::document::TextStyle { face: None, ..self.was.clone() };
         let picked_font = self.style.face.is_some();
         let looks = self.uses_looks() && self.looks_changed();
-        !(typed == self.original.trim() && !changed_look && !picked_font && !looks)
+        changed_look || picked_font || looks
+    }
+
+    /// Whether the box can be edited on the page itself — invisible until the words
+    /// change, its rows on the page's own baselines — which needs a baseline for every
+    /// line. Drawn lettering and a box with none keep the paper and the egui layout.
+    fn in_place(&self) -> bool {
+        !self.drawn && !self.lines.is_empty() && self.baselines.len() == self.lines.len()
     }
 
     /// The page objects the open paragraph draws, and the faux-bold twins that go with
@@ -13058,6 +13072,8 @@ impl PagifyApp {
             styled: false,
             line_base: looks.line_base,
             box_chars: looks.box_chars,
+            baselines: Vec::new(),
+            shown: None,
             piece_texts: looks.piece_texts,
             font_objects: looks.font_objects,
         });
@@ -14877,6 +14893,29 @@ impl PagifyApp {
         None
     }
 
+    /// Whether the page without the open paragraph is held and good for it: this paragraph's
+    /// objects, this document as it is, this turn.
+    fn textless_ready(&self, page: usize) -> bool {
+        let Some(edit) = self.tab().edit.editing_run.as_ref().filter(|e| e.page == page && !e.drawn && e.changed()) else {
+            return false;
+        };
+        let Some(doc) = self.tab().doc.as_ref() else { return false };
+        let rotation = self.tab().view_state.rotation as u8;
+        doc.caches.textless.as_ref().is_some_and(|t| {
+            t.page == page && t.objects == edit.hidden_objects() && t.epoch == doc.render_epoch && t.rotation == rotation
+        })
+    }
+
+    /// What covers the page's own words under the open Edit Text box, if anything: **nothing**
+    /// while the box is still the page's own text, and nothing once the page without those
+    /// words is under it ([`Self::textless_for`]); the paper while that is made, and always for
+    /// a box that cannot be edited in place ([`EditingRun::in_place`]).
+    fn editor_cover(&self, page: usize) -> Option<egui::Color32> {
+        let edit = self.tab().edit.editing_run.as_ref().filter(|e| e.page == page)?;
+        let paper = egui::Color32::from_rgb(edit.background.r, edit.background.g, edit.background.b);
+        (!edit.in_place() || (edit.changed() && !self.textless_ready(page))).then_some(paper)
+    }
+
     /// **The page without the paragraph being retyped**, for drawing under the Edit Text box
     /// once its words change, so the old words do not show through the new ones.
     ///
@@ -15728,6 +15767,8 @@ impl PagifyApp {
         // The faces typed into the box that egui can draw this frame.
         let ready_faces = self.faces_state.box_faces_ready.clone();
 
+        let cover = self.editor_cover(page);
+
         let Some(edit) = self.tab_mut().edit.editing_run.as_mut() else { return };
         if edit.page != page {
             return;
@@ -15907,7 +15948,16 @@ impl PagifyApp {
             egui::pos2(top_left.x + edit.box_resize.left_shift_pt * view.scale, bottom_right.y - height),
             egui::vec2(width, height + 6.0 + extra_lines as f32 * row_height),
         );
-        ui.painter().rect_filled(rect.expand(1.0), 0.0, paper);
+        // **Paper only where the box cannot be the page itself.** Unchanged, the page's own
+        // words show and the box draws only its frame and caret; once changed, the page
+        // without them is under it (`textless_for`) and, until that is made, the paper
+        // covers them. A box grown or shrunk by the Size slider is no longer the page's
+        // lines, which its rows are set on, so it keeps the paper.
+        let in_place_now = edit.in_place() && (grow - 1.0).abs() < 1e-3;
+        let cover = if in_place_now { cover } else { Some(paper) };
+        if let Some(cover) = cover {
+            ui.painter().rect_filled(rect.expand(1.0), 0.0, cover);
+        }
         // **Reported from use**: clicking different parts of a page picked up
         // different, sometimes surprising spans of text to edit, with
         // nothing on screen showing the span until typing was already
@@ -15967,6 +16017,42 @@ impl PagifyApp {
             fallback: fallback.clone(),
             ready: ready_faces,
         });
+        // **Each row on the page's own line**, in screen px from the box's corner: where the
+        // line starts, its baseline, how far its letters rise and fall - and, while the box
+        // is still the page's words, how wide the page draws it, so the invisible letters lie
+        // over the page's own and a click or the caret lands where the page shows it - for a
+        // justified paragraph too: only the box's own words are still invisible then.
+        let targets: Vec<in_place::RowTarget> = if in_place_now {
+            let at = |x: f32, y: f32| view.to_screen(AppPoint { x: x as f64, y: y as f64 });
+            edit.lines
+                .iter()
+                .zip(&edit.baselines)
+                .map(|((_, line), baseline)| {
+                    let (top, bottom) = (line.top.min(line.bottom), line.top.max(line.bottom));
+                    let base = at(0.0, *baseline).y - rect.top();
+                    in_place::RowTarget {
+                        left: at(line.left.min(line.right), 0.0).x - rect.left(),
+                        baseline: base,
+                        ascent: (base - (at(0.0, top).y - rect.top())).max(1.0),
+                        descent: ((at(0.0, bottom).y - rect.top()) - base).max(0.0),
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let widths: Vec<Option<f32>> = if in_place_now {
+            edit.lines.iter().map(|(_, line)| Some((line.right - line.left).abs() * view.scale)).collect()
+        } else {
+            Vec::new()
+        };
+        let leading = match targets.as_slice() {
+            [.., before, last] => last.baseline - before.baseline,
+            _ => glyph_size * 1.2,
+        };
+        let (original, look_dirty) = (edit.original.clone(), edit.look_dirty());
+        let drawn_rows = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let remember_rows = drawn_rows.clone();
         let mut layouter = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
             // Everything is drawable until the face's coverage is known.
             let covered = |c: char| coverage.as_ref().map_or(true, |known| known.has(c));
@@ -15995,13 +16081,30 @@ impl PagifyApp {
                 }
                 None => editor_layout_job(buf.as_str(), justify, wrap_width, &format, &fallback, &covered, &mut measure),
             };
-            ui.fonts_mut(|f| f.layout_job(job))
+            let galley = ui.fonts_mut(|f| f.layout_job(job));
+            // On the page: rows onto its lines, and - while it is still the page's own
+            // words, spread to the page's own widths - drawn in no colour at all.
+            let galley = if in_place_now {
+                let same = in_place::unchanged(buf.as_str(), &original, look_dirty);
+                let galley = if same { in_place::fit_rows(galley, &widths) } else { galley };
+                let galley = in_place::snap_rows(galley, &targets, leading);
+                if same { in_place::unseen(galley) } else { galley }
+            } else {
+                galley
+            };
+            *remember_rows.borrow_mut() = Some(galley.clone());
+            galley
         };
 
         {
             let style = ui.style_mut();
             // Not forced to one colour where the characters have colours of their own.
-            style.visuals.override_text_color = (!looked).then_some(ink);
+            // In place the letters carry their own colours (and none, while unchanged): a
+            // colour forced over them would draw the page's words twice.
+            style.visuals.override_text_color = (!looked && !in_place_now).then_some(ink);
+            if in_place_now {
+                style.visuals.text_cursor.stroke.color = in_place::caret_on(ink);
+            }
             style.visuals.extreme_bg_color = paper;
             style.visuals.selection.bg_fill = theme::violet().gamma_multiply(0.35);
             // Always multiline: a single run can grow a second line of its
@@ -16009,6 +16112,8 @@ impl PagifyApp {
             // `apply_one_edit`), so Enter has to add a line here too
             // rather than submit — a singleline field could never do that.
             let editor = egui::TextEdit::multiline(&mut edit.buffer).layouter(&mut layouter);
+            // Its text starts where the box does, so the rows sit where they were put.
+            let editor = if in_place_now { editor.margin(egui::Margin::ZERO) } else { editor };
             // `.frame(Frame::NONE)`, not just a background colour and zero
             // margin: leaving the frame unset made egui fall back to its own
             // ordinary widget chrome underneath — this app's rounded corners
@@ -16019,6 +16124,7 @@ impl PagifyApp {
             // meant to avoid; a blank frame leaves only what is drawn
             // explicitly.
             let response = ui.put(rect, editor.id(id).frame(egui::Frame::NONE));
+            edit.shown = drawn_rows.borrow_mut().take().map(|galley| (galley, rect.min));
             // The looks follow the typing: what was typed takes the look before it.
             if edit.buffer != edit.rich.text() {
                 edit.rich.edit(&edit.buffer);

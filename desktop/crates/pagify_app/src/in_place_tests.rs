@@ -154,3 +154,119 @@ fn closing_the_box_drops_the_picture() {
     h.run_steps(2);
     assert!(textless(h.state()).is_none());
 }
+
+fn shown(app: &PagifyApp) -> std::sync::Arc<egui::Galley> {
+    app.tab().edit.editing_run.as_ref().and_then(|e| e.shown.as_ref()).map(|(galley, _)| galley.clone()).expect("the editor was drawn")
+}
+
+#[test]
+fn an_unchanged_box_draws_no_paper_and_no_ink() {
+    let mut h = harness_from(opened(open_page("inplace-invisible", &LINES, "")));
+    h.run_steps(3);
+    assert_eq!(h.state().editor_cover(0), None, "paper over the page's own words");
+    let galley = shown(h.state());
+    let vertices: Vec<_> = galley.rows.iter().flat_map(|r| r.row.visuals.mesh.vertices.iter()).collect();
+    assert!(!vertices.is_empty(), "nothing was laid out, so this proves nothing");
+    assert!(vertices.iter().all(|v| v.color.a() == 0), "the editor draws letters over the page's own");
+}
+
+#[test]
+fn typed_words_are_drawn_once_the_textless_picture_is_there() {
+    let mut app = opened(open_page("inplace-typed-ink", &LINES, ""));
+    type_a_letter(&mut app);
+    let mut h = harness_from(app);
+    h.run_steps(4);
+    assert!(textless(h.state()).is_some());
+    assert_eq!(h.state().editor_cover(0), None);
+    let galley = shown(h.state());
+    assert!(galley.rows.iter().flat_map(|r| r.row.visuals.mesh.vertices.iter()).any(|v| v.color.a() > 0), "typed words are not drawn");
+}
+
+#[test]
+fn until_the_picture_is_there_the_paper_still_covers() {
+    let mut h = async_from(opened(open_page("inplace-cover", &LINES, "")));
+    type_a_letter(h.state_mut());
+    h.run_steps(1);
+    assert!(textless(h.state()).is_none(), "test assumption: the worker has not answered yet");
+    let background = h.state().tab().edit.editing_run.as_ref().expect("open").background;
+    assert_eq!(h.state().editor_cover(0), Some(egui::Color32::from_rgb(background.r, background.g, background.b)));
+}
+
+#[test]
+fn baselines_lie_inside_their_lines() {
+    let app = opened(open_page("inplace-baselines", &LINES, ""));
+    let edit = app.tab().edit.editing_run.as_ref().expect("an editor");
+    assert_eq!(edit.baselines.len(), edit.lines.len());
+    for ((_, rect), baseline) in edit.lines.iter().zip(&edit.baselines) {
+        assert!(*baseline > rect.top && *baseline <= rect.bottom, "baseline {baseline} outside {rect:?}");
+    }
+    // The page draws them 12 pt apart.
+    assert!((edit.baselines[1] - edit.baselines[0] - 12.0).abs() < 0.1, "{:?}", edit.baselines);
+}
+
+#[test]
+fn each_row_sits_on_its_lines_baseline() {
+    let mut h = harness_from(opened(open_page("inplace-rows", &LINES, "")));
+    h.run_steps(3);
+    let view = h.state().tab().view_state.last_view.expect("the page was drawn");
+    let edit = h.state().tab().edit.editing_run.as_ref().expect("an editor");
+    let (galley, at) = edit.shown.clone().expect("drawn");
+    assert_eq!(galley.rows.len(), 3);
+    for (row, baseline) in galley.rows.iter().zip(&edit.baselines) {
+        let drawn = at.y + row.pos.y + row.row.glyphs[0].pos.y;
+        let wanted = view.to_screen(AppPoint { x: 0.0, y: *baseline as f64 }).y;
+        assert!((drawn - wanted).abs() < 1.0, "baseline drawn at {drawn}, the page's at {wanted}");
+    }
+}
+
+#[test]
+fn a_click_lands_on_the_letter_the_page_shows_there() {
+    let mut h = harness_from(opened(open_page("inplace-caret", &LINES, "")));
+    h.run_steps(3);
+    let view = h.state().tab().view_state.last_view.expect("the page was drawn");
+    let edit = h.state().tab().edit.editing_run.as_ref().expect("an editor");
+    let (galley, at) = edit.shown.clone().expect("drawn");
+    // The page's own line "delta epsilon zeta": a click at the left edge of "zeta" (letter 14).
+    let line = &edit.lines[1].1;
+    let letters = 18.0;
+    let x = view.to_screen(AppPoint { x: (line.left + (line.right - line.left) * 14.0 / letters) as f64, y: 0.0 }).x;
+    let y = view.to_screen(AppPoint { x: 0.0, y: ((line.top + line.bottom) / 2.0) as f64 }).y;
+    let cursor = galley.cursor_from_pos(egui::pos2(x, y) - at);
+    let index = cursor.index.0;
+    let expected = "alpha beta gamma
+".chars().count() + 14;
+    assert!(index.abs_diff(expected) <= 2, "clicked letter 14 of line 2 (index {expected}), the caret went to {index}");
+}
+
+/// Three lines the page draws with 3 pt between the letters, which the editor's own font
+/// has no way to match without being told the width.
+const SPACED: &str = "BT /F1 10 Tf 3 Tc 100 700 Td (alpha beta gamma) Tj ET
+                      BT /F1 10 Tf 3 Tc 100 688 Td (delta epsilon zeta) Tj ET
+                      BT /F1 10 Tf 3 Tc 100 676 Td (eta theta iota) Tj ET
+";
+
+#[test]
+fn each_row_spans_the_width_of_the_pages_line() {
+    each_row_matches_the_page(open_page("inplace-widths", &LINES, ""));
+}
+
+#[test]
+fn each_row_spans_a_line_the_page_draws_with_spaced_letters() {
+    each_row_matches_the_page(open_page("inplace-widths-spaced", &[], SPACED));
+}
+
+fn each_row_matches_the_page(app: PagifyApp) {
+    let mut h = harness_from(opened(app));
+    h.run_steps(3);
+    let view = h.state().tab().view_state.last_view.expect("the page was drawn");
+    let edit = h.state().tab().edit.editing_run.as_ref().expect("an editor");
+    let (galley, at) = edit.shown.clone().expect("drawn");
+    for (row, (_, line)) in galley.rows.iter().zip(&edit.lines) {
+        let (first, last) = (row.row.glyphs.first().expect("a letter"), row.row.glyphs.last().expect("a letter"));
+        let (left, right) = (at.x + row.pos.x + first.pos.x, at.x + row.pos.x + last.pos.x + last.advance_width);
+        let page_left = view.to_screen(AppPoint { x: line.left as f64, y: 0.0 }).x;
+        let page_right = view.to_screen(AppPoint { x: line.right as f64, y: 0.0 }).x;
+        assert!((left - page_left).abs() < 1.0, "the line starts at {left}, the page's at {page_left}");
+        assert!((right - page_right).abs() < 1.0, "the line ends at {right}, the page's at {page_right}");
+    }
+}

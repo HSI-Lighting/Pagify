@@ -273,6 +273,8 @@ impl crate::PagifyApp {
             styled: false,
             line_base: opened.line_base,
             box_chars: opened.box_chars,
+            baselines: vec![run.origin.y],
+            shown: None,
             piece_texts: opened.piece_texts,
             font_objects: opened.font_objects,
         });
@@ -676,6 +678,17 @@ impl crate::PagifyApp {
         };
         let opened = pagify_shell::line_styles::open_looks(&pieces, &combined, &dominant);
 
+        // Where each line's letters stand, from the first run that draws it; a line drawn
+        // as shapes has none, so it is given a baseline a fifth of its height above its foot.
+        let baselines: Vec<f32> = lines
+            .iter()
+            .map(|line| {
+                line.objects
+                    .iter()
+                    .find_map(|o| text_by_object.get(o))
+                    .map_or(line.rect.bottom - (line.rect.bottom - line.rect.top) * 0.2, |run| run.origin.y)
+            })
+            .collect();
         let edit = EditingRun {
             page,
             object: seed_object,
@@ -704,6 +717,8 @@ impl crate::PagifyApp {
             styled: false,
             line_base: opened.line_base,
             box_chars: opened.box_chars,
+            baselines,
+            shown: None,
             piece_texts: opened.piece_texts,
             font_objects: opened.font_objects,
         };
