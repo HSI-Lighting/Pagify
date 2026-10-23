@@ -1960,6 +1960,11 @@ struct EditingRun {
     baselines: Vec<f32>,
     /// The box's text as last drawn: its laid-out rows and where they were on screen.
     shown: Option<(std::sync::Arc<egui::Galley>, egui::Pos2)>,
+    /// How this box looks over the page without its old words, as of the last frame it was drawn
+    /// so: what an **applied** edit leaves up until the page is drawn again (see
+    /// [`in_place::Settling`]). Kept here, on the box, so that a box closed any other way - an
+    /// undo, an edit elsewhere, Escape - takes it with it: those words were never applied.
+    look: Option<in_place::Settling>,
     /// Each piece's words as the page draws them: what a piece restyled in place is
     /// written again with.
     piece_texts: std::collections::HashMap<usize, String>,
@@ -13077,6 +13082,7 @@ impl PagifyApp {
             box_chars: looks.box_chars,
             baselines: Vec::new(),
             shown: None,
+            look: None,
             piece_texts: looks.piece_texts,
             font_objects: looks.font_objects,
         });
@@ -13312,6 +13318,12 @@ impl PagifyApp {
         let (generation, errors_before) = (self.doc_generation(), self.ui_state.errors_said);
         let backup = edit.clone();
         self.apply_one_edit(edit);
+        // **Only an edit that was written leaves its look up** until the page is drawn again: the
+        // page moves to a new epoch and has no picture for a moment. A box closed for any other
+        // reason never gets here, and its unapplied words are not kept.
+        if self.doc_generation() != generation {
+            self.tab_mut().edit.settling = backup.look.clone();
+        }
         let elapsed = started.elapsed();
         self.recording_state.session_log.record("info", &format!("apply took {elapsed:?}"));
 
@@ -14923,17 +14935,7 @@ impl PagifyApp {
         }
         // Still wanted: looked at again in a moment, when the page's picture has not come.
         ctx.request_repaint_after(std::time::Duration::from_millis(50));
-        self.tab().edit.settling.as_ref().map(|s| in_place::Settling {
-            page: s.page,
-            epoch: s.epoch,
-            zoom: s.zoom,
-            rotation: s.rotation,
-            picture: s.picture.clone(),
-            galley: s.galley.clone(),
-            at_pt: s.at_pt,
-            ink: s.ink,
-            since: s.since,
-        })
+        self.tab().edit.settling.clone()
     }
 
     /// Whether the page without the open paragraph is held and good for it: this paragraph's
@@ -16100,6 +16102,9 @@ impl PagifyApp {
             _ => glyph_size * 1.2,
         };
         let (original, look_dirty) = (edit.original.clone(), edit.look_dirty());
+        // A line the page draws as shapes stays on the page; its words in the box's text must
+        // not be painted over those shapes once the rest of the box is drawn.
+        let frozen = edit.frozen.clone();
         let drawn_rows = std::rc::Rc::new(std::cell::RefCell::new(None));
         let remember_rows = drawn_rows.clone();
         let mut layouter = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
@@ -16137,7 +16142,7 @@ impl PagifyApp {
                 let same = in_place::unchanged(buf.as_str(), &original, look_dirty);
                 let galley = if same { in_place::fit_rows(galley, &widths) } else { galley };
                 let galley = in_place::snap_rows(galley, &targets, leading);
-                if same { in_place::unseen(galley) } else { galley }
+                if same { in_place::unseen(galley) } else { in_place::unseen_rows(galley, &frozen) }
             } else {
                 galley
             };
@@ -16270,7 +16275,9 @@ impl PagifyApp {
         // says "apply this" — reported from use. Escape still leaves
         // whatever was typed here alone.
         if settle.is_some() {
-            self.tab_mut().edit.settling = settle;
+            if let Some(run) = self.tab_mut().edit.editing_run.as_mut() {
+                run.look = settle;
+            }
         }
     }
 

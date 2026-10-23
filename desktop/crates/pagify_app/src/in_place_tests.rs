@@ -57,6 +57,20 @@ fn settle(h: &mut egui_kittest::Harness<'static, PagifyApp>, frames: usize) {
     }
 }
 
+/// Frames until `ready` holds, or ten seconds of real time. The render worker is a real thread
+/// and takes the one PDFium lock that every other test running at the same time shares, so how
+/// long a picture takes depends on the load; what is asserted is that it arrives.
+fn wait_until(h: &mut egui_kittest::Harness<'static, PagifyApp>, ready: impl Fn(&PagifyApp) -> bool) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if ready(h.state()) {
+            return true;
+        }
+        settle(h, 1);
+    }
+    ready(h.state())
+}
+
 #[test]
 fn an_unchanged_paragraph_asks_for_no_textless_picture() {
     let mut h = harness_from(opened(open_page("inplace-unchanged", &LINES, "")));
@@ -128,13 +142,7 @@ fn zooming_with_the_box_open_still_hides_the_old_words() {
     let mut app = opened(open_page("inplace-zoom", &LINES, ""));
     type_a_letter(&mut app);
     let mut h = async_from(app);
-    for _ in 0..40 {
-        if textless(h.state()).is_some() {
-            break;
-        }
-        settle(&mut h, 1);
-    }
-    assert!(textless(h.state()).is_some(), "the picture never arrived");
+    assert!(wait_until(&mut h, |app| textless(app).is_some()), "the picture never arrived");
     let zoom = h.state().resolved_zoom();
     h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(zoom * 1.5);
     for frame in 0..12 {
@@ -281,13 +289,7 @@ fn typed_and_settled() -> egui_kittest::Harness<'static, PagifyApp> {
     let mut app = opened(open_page("inplace-settling", &LINES, ""));
     type_a_letter(&mut app);
     let mut h = async_from(app);
-    for _ in 0..60 {
-        if textless(h.state()).is_some() {
-            break;
-        }
-        settle(&mut h, 1);
-    }
-    assert!(textless(h.state()).is_some(), "the picture never arrived");
+    assert!(wait_until(&mut h, |app| textless(app).is_some()), "the picture never arrived");
     settle(&mut h, 3);
     h
 }
@@ -339,4 +341,33 @@ fn a_box_put_away_with_no_edit_leaves_nothing_behind() {
     let zoom = canvas_zoom(&h);
     h.state_mut().tab_mut().edit.editing_run = None;
     assert!(!settling_now(&mut h, zoom, false), "nothing was applied, so the page is as it was");
+}
+
+/// A page's drawn (frozen) line stays on the page as shapes. Once anything is typed the whole
+/// box is visible, and a frozen line's row would be painted in the editor's font over those
+/// shapes: its row must stay invisible, and only its row.
+#[test]
+fn a_frozen_line_is_not_drawn_over_the_pages_shapes_once_typed() {
+    let mut app = opened(open_page("inplace-frozen", &LINES, ""));
+    app.tab_mut().edit.editing_run.as_mut().expect("an editor").frozen = vec![false, true, false];
+    type_a_letter(&mut app);
+    let mut h = harness_from(app);
+    h.run_steps(4);
+    let galley = shown(h.state());
+    let visible = |row: usize| galley.rows[row].row.visuals.mesh.vertices.iter().any(|v| v.color.a() > 0);
+    assert!(visible(0) && visible(2), "the lines the box owns are drawn");
+    assert!(!visible(1), "the frozen line is painted over the page's own shapes");
+}
+
+/// An undo, or an edit elsewhere, closes the open box because the page moved on: its typed words
+/// were never applied, so nothing of them may be left up while the page is drawn again.
+#[test]
+fn a_box_closed_because_the_page_changed_leaves_no_look_behind() {
+    let mut h = typed_and_settled();
+    let zoom = canvas_zoom(&h);
+    h.state_mut().tab_mut().doc.as_mut().expect("open").rendered_is_stale();
+    h.run_steps(1);
+    assert!(h.state().tab().edit.editing_run.is_none(), "test assumption: the stale box was closed");
+    assert!(h.state().tab().edit.settling.is_none(), "unapplied words were kept up as if applied");
+    assert!(!settling_now(&mut h, zoom, false));
 }

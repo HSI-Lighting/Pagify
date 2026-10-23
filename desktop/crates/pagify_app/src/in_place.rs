@@ -24,6 +24,24 @@ pub(crate) fn unseen(mut galley: Arc<egui::Galley>) -> Arc<egui::Galley> {
     galley
 }
 
+/// `galley` with the rows listed in `rows` (`true` = blank it) drawn in no colour, the others as
+/// they are. **For the lines the box does not own**: a line the page draws as shapes stays on the
+/// page under the box, but its words are still in the box's text, and once the rest is visible
+/// they would be painted over those shapes.
+pub(crate) fn unseen_rows(mut galley: Arc<egui::Galley>, rows: &[bool]) -> Arc<egui::Galley> {
+    if !rows.iter().any(|blank| *blank) {
+        return galley;
+    }
+    for (index, placed) in Arc::make_mut(&mut galley).rows.iter_mut().enumerate() {
+        if rows.get(index).copied().unwrap_or(false) {
+            for vertex in &mut Arc::make_mut(&mut placed.row).visuals.mesh.vertices {
+                vertex.color = Color32::TRANSPARENT;
+            }
+        }
+    }
+    galley
+}
+
 /// Where one row of the editor's text must sit: its left edge, its baseline, and how far
 /// its tallest letter rises above it and its lowest falls below it. Screen pixels,
 /// from the galley's own origin.
@@ -136,6 +154,7 @@ pub(crate) fn unchanged(buffer: &str, original: &str, look_dirty: bool) -> bool 
 /// the edited page does not exist until it is rendered again**, so for that moment the page
 /// without the old words (`picture`) and the typed words (`galley`) stay up, and nothing
 /// flashes the old text or the bare paper. Good for one zoom and turn of the view.
+#[derive(Clone)]
 pub(crate) struct Settling {
     pub(crate) page: usize,
     /// The document's `render_epoch` while the box was open; an applied edit moves it.
@@ -276,6 +295,16 @@ two");
         assert!(!unchanged("alpha beta", "alpha beta", true), "a look changed");
         assert!(!unchanged("", "alpha beta", false), "typed away is a change");
         assert!(unchanged("", "  ", true), "nothing to delete");
+    }
+
+    #[test]
+    fn unseen_rows_blanks_only_the_rows_it_is_told_to() {
+        let galley = unseen_rows(laid_out("one\ntwo\nthree"), &[false, true]);
+        let visible = |row: usize| galley.rows[row].row.visuals.mesh.vertices.iter().any(|v| v.color.a() > 0);
+        assert!(visible(0), "row 0 was not asked for");
+        assert!(!visible(1), "row 1 was");
+        assert!(visible(2), "row 2 is past the list, so it is left alone");
+        assert_eq!(unseen_rows(laid_out("one"), &[]).rows.len(), 1, "an empty list changes nothing");
     }
 
     #[test]

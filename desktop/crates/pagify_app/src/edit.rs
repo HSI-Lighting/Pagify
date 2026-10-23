@@ -275,6 +275,7 @@ impl crate::PagifyApp {
             box_chars: opened.box_chars,
             baselines: vec![run.origin.y],
             shown: None,
+            look: None,
             piece_texts: opened.piece_texts,
             font_objects: opened.font_objects,
         });
@@ -719,6 +720,7 @@ impl crate::PagifyApp {
             box_chars: opened.box_chars,
             baselines,
             shown: None,
+            look: None,
             piece_texts: opened.piece_texts,
             font_objects: opened.font_objects,
         };
