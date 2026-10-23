@@ -360,6 +360,27 @@ pub struct PdfiumDocument {
     /// otherwise reach for has nowhere to go in a windowed build with no
     /// console attached.
     last_batch_timing: Vec<(&'static str, std::time::Duration)>,
+    /// Documents a page was imported from, kept open for as long as this one
+    /// lives.
+    ///
+    /// **PDFium's importer leaves references bound to the source.** It clones
+    /// every reference in the copied page, and `CPDF_PageOrganizer::
+    /// UpdateReference` deliberately skips the keys `Parent`, `Prev` and
+    /// `First` — needed for a page tree, wrong for an annotation. A `Popup`
+    /// annotation's `/Parent` (or a reply thread's, or a form widget's) is
+    /// therefore cloned still pointing at the *source* `CPDF_Document`.
+    /// Closing the source turns that into a dangling document pointer, and the
+    /// next full save walks it: reported from use as the app dying in
+    /// `pdfium.dll` at `+0x7317e` while saving a document that had had a page
+    /// with a placed picture (a `/Stamp` with its `/Popup`) pasted into it.
+    ///
+    /// So the source is not a temporary of the import call: it is kept here
+    /// until this document is dropped. The memory is one parsed page source
+    /// per paste; the alternative is a crash.
+    ///
+    /// Declared after `document` so that, on drop, this document closes first
+    /// and the sources it borrowed from close after it.
+    imported_sources: Vec<Box<dyn Document>>,
 }
 
 /// What an edit starts from: some bytes, and whether they are the document's
@@ -377,6 +398,17 @@ unsafe impl Send for PdfiumDocument {}
 unsafe impl Sync for PdfiumDocument {}
 
 impl PdfiumDocument {
+    /// How many imported-from documents this one is keeping alive.
+    ///
+    /// **For the regression test of the `Parent`-reference crash only**, not
+    /// for callers: what matters to them is that saving does not crash. See
+    /// the `imported_sources` field's own comment for why the count is
+    /// non-zero after a page import.
+    #[doc(hidden)]
+    pub fn retained_import_sources(&self) -> usize {
+        self.imported_sources.len()
+    }
+
     /// Write a signed document's bytes verbatim, when that is what the
     /// document is. `Ok(true)` when it was written; the caller has nothing
     /// more to write.
@@ -774,6 +806,7 @@ impl PdfiumDocument {
             image_alpha: std::collections::HashMap::new(),
             next_alpha_id: 0,
             last_batch_timing: Vec::new(),
+            imported_sources: Vec::new(),
         })
     }
 
@@ -4109,6 +4142,21 @@ impl DocumentMut for PdfiumDocument {
         // caller is holding for the duration of this call, and only this
         // implementation ever produces or reads it.
         self.import_pages_from(handle as FPDF_DOCUMENT, indices, at)
+    }
+
+    /// Import pages **without closing the document they came from**: PDFium's
+    /// importer leaves an annotation's `/Parent` reference bound to the
+    /// source, so the source has to outlive this document. See
+    /// [`DocumentMut::import_pages_keeping_source`].
+    fn import_pages_keeping_source(
+        &mut self,
+        source: Box<dyn Document>,
+        indices: &[usize],
+        at: usize,
+    ) -> Result<usize> {
+        let count = self.import_pages(source.as_ref(), indices, at)?;
+        self.imported_sources.push(source);
+        Ok(count)
     }
 
     fn insert_blank_page(

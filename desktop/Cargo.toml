@@ -1,4 +1,4 @@
-[workspace]
+﻿[workspace]
 resolver = "2"
 members  = ["crates/pagify_shell", "crates/pagify_app", "crates/pagify_issue"]
 
@@ -8,7 +8,7 @@ members  = ["crates/pagify_shell", "crates/pagify_app", "crates/pagify_issue"]
 # `pdf_core` carries this same patch in its own manifest, and Cargo honours
 # `[patch.crates-io]` ONLY in the workspace root. The moment `pdf_core` became a
 # path dependency here instead of a root in its own right, its copy stopped
-# being read — with no warning of any kind.
+# being read â€” with no warning of any kind.
 #
 # What breaks without it: Cargo resolves stock `pdfium-render` 0.9.3 from
 # crates.io, where `PdfDocument::handle()` is `pub(crate)`, and `pdf_core` fails
@@ -16,7 +16,7 @@ members  = ["crates/pagify_shell", "crates/pagify_app", "crates/pagify_issue"]
 # a registry source file. Nothing names the patch.
 #
 # What that method buys: incremental save. A signature covers a byte range, and
-# a full rewrite relocates every object in the file — so without this, no
+# a full rewrite relocates every object in the file â€” so without this, no
 # signature can survive an edit. See rust/vendor/README.md in the Pagify repo.
 # ---------------------------------------------------------------------------
 [patch.crates-io]
@@ -24,14 +24,14 @@ pdfium-render = { path = "../rust/vendor/pdfium-render" }
 
 [workspace.package]
 edition = "2021"
-version = "0.1.96"
+version = "0.1.98"
 
-# Consumed, never forked — see the build plan §5.4. Anything Pagify needs that
+# Consumed, never forked â€” see the build plan Â§5.4. Anything Pagify needs that
 # these do not do belongs in `pagify_shell`, above them.
 [workspace.dependencies]
 # Inside this repository, so a clone builds without anything beside it.
 pdf_core   = { path = "../rust/pdf_core" }
-# **Not** in this repository. Consumed, never forked — and **pinned to a
+# **Not** in this repository. Consumed, never forked â€” and **pinned to a
 # commit**, so every checkout builds the same kernel. It used to be a path to
 # a sibling checkout of HSI-Lighting/3D-factory, which built whatever that
 # checkout happened to hold, recorded nothing in the lockfile, and had already

@@ -911,6 +911,7 @@ fn moving_and_turning_a_placed_picture_are_undone() {
     app.finish_placed_image_grab(
         PlacedImageSelected { page: 0, index: was.index, rect: was.rect, rotation: was.rotation },
         Grab { handle: None, from: AppPoint { x: 0.0, y: 0.0 }, by: (50.0, 30.0) },
+        false,
     );
     assert!((app_mark(&app).rect.left - was.rect.left - 50.0).abs() < 0.5, "not moved: {:?}", app_mark(&app).rect);
     app.submit("undo");
@@ -921,6 +922,7 @@ fn moving_and_turning_a_placed_picture_are_undone() {
     app.finish_placed_image_grab(
         PlacedImageSelected { page: 0, index: now.index, rect: now.rect, rotation: now.rotation },
         Grab { handle: Some(Handle::Rotate), from: AppPoint { x: 160.0, y: 138.0 }, by: (-20.0, 20.0) },
+        false,
     );
     assert!(app_mark(&app).rotation.abs() > 1.0, "not turned");
     app.submit("undo");

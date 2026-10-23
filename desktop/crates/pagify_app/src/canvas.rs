@@ -225,8 +225,9 @@ impl crate::PagifyApp {
         }
 
         if response.drag_stopped() {
+            let shift = ui.input(|i| i.modifiers.shift);
             if let (Some(grab), Some(sel)) = (self.tab_mut().selection.grab.take(), self.tab_mut().selection.selected.clone()) {
-                self.finish_grab(sel, grab, view.scale);
+                self.finish_grab(sel, grab, view.scale, shift);
             }
             if let Some(grab) = self.tab_mut().selection.group_grab.take() {
                 self.finish_group_grab(grab, view.scale);
@@ -347,8 +348,9 @@ impl crate::PagifyApp {
         }
 
         if response.drag_stopped() {
+            let shift = ui.input(|i| i.modifiers.shift);
             if let (Some(grab), Some(sel)) = (self.tab_mut().selection.signature_grab.take(), self.tab_mut().selection.signature_selected.clone()) {
-                self.finish_signature_grab(sel, grab);
+                self.finish_signature_grab(sel, grab, shift);
                 return true;
             }
         }
@@ -434,8 +436,9 @@ impl crate::PagifyApp {
         }
 
         if response.drag_stopped() {
+            let shift = ui.input(|i| i.modifiers.shift);
             if let (Some(grab), Some(sel)) = (self.tab_mut().selection.placed_image_grab.take(), self.tab_mut().selection.placed_image_selected.clone()) {
-                self.finish_placed_image_grab(sel, grab);
+                self.finish_placed_image_grab(sel, grab, shift);
                 return true;
             }
         }
@@ -658,6 +661,9 @@ impl crate::PagifyApp {
         // Where it is going, while it is being dragged.
         if let Some(grab) = &self.tab_mut().selection.grab {
             let (dx, dy) = grab.by;
+            // Only a page picture has an original ratio to hold; Shift means
+            // something else on a run of words or a drawn shape.
+            let keep_ratio = sel.what == "the picture" && ui.input(|i| i.modifiers.shift);
             let going = match grab.handle {
                 None => pdf_core::document::Rect {
                     left: sel.rect.left + dx,
@@ -665,16 +671,7 @@ impl crate::PagifyApp {
                     right: sel.rect.right + dx,
                     bottom: sel.rect.bottom + dy,
                 },
-                Some(handle) => {
-                    let (sx, sy) = handle.scale(&sel.rect, (dx, dy));
-                    let (ax, ay) = handle.anchor(&sel.rect);
-                    pdf_core::document::Rect {
-                        left: ax + (sel.rect.left - ax) * sx,
-                        top: ay + (sel.rect.top - ay) * sy,
-                        right: ax + (sel.rect.right - ax) * sx,
-                        bottom: ay + (sel.rect.bottom - ay) * sy,
-                    }
-                }
+                Some(handle) => handle.resized_rect(&sel.rect, (dx, dy), keep_ratio),
             };
             let ghost = to_screen(&going);
             painter.rect_filled(ghost, egui::CornerRadius::ZERO, theme::violet().gamma_multiply(0.10));

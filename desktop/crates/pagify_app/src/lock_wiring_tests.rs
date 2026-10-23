@@ -867,7 +867,7 @@ fn dragging_a_selected_signature_moves_it() {
     let mark = app.tab_mut().doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
     let sel = SignatureSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation };
     let grab = Grab { handle: None, from: AppPoint { x: mark.rect.left as f64, y: mark.rect.top as f64 }, by: (30.0, -15.0) };
-    app.finish_signature_grab(sel, grab);
+    app.finish_signature_grab(sel, grab, false);
 
     let moved = app.tab_mut().doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
     assert!((moved.rect.left - (mark.rect.left + 30.0)).abs() < 0.5, "left did not move");
@@ -898,7 +898,7 @@ fn dragging_a_signature_handle_resizes_about_the_opposite_corner() {
         from: AppPoint { x: mark.rect.right as f64, y: mark.rect.bottom as f64 },
         by: (-w / 2.0, -h / 2.0),
     };
-    app.finish_signature_grab(sel, grab);
+    app.finish_signature_grab(sel, grab, false);
 
     let resized = app.tab_mut().doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
     assert!((resized.rect.left - mark.rect.left).abs() < 0.5 && (resized.rect.top - mark.rect.top).abs() < 0.5, "the anchored corner moved");
@@ -945,7 +945,7 @@ fn dragging_a_selected_placed_image_moves_it() {
         from: AppPoint { x: mark.rect.left as f64, y: mark.rect.top as f64 },
         by: (30.0, -15.0),
     };
-    app.finish_placed_image_grab(sel, grab);
+    app.finish_placed_image_grab(sel, grab, false);
 
     let moved = app.tab_mut().doc.as_ref().unwrap().session.placed_image_marks(0).unwrap().remove(0);
     assert!((moved.rect.left - (mark.rect.left + 30.0)).abs() < 0.5, "left did not move");
@@ -974,7 +974,7 @@ fn dragging_a_placed_image_handle_resizes_about_the_opposite_corner() {
         from: AppPoint { x: mark.rect.right as f64, y: mark.rect.bottom as f64 },
         by: (-w / 2.0, -h / 2.0),
     };
-    app.finish_placed_image_grab(sel, grab);
+    app.finish_placed_image_grab(sel, grab, false);
 
     let resized = app.tab_mut().doc.as_ref().unwrap().session.placed_image_marks(0).unwrap().remove(0);
     assert!(
@@ -983,6 +983,157 @@ fn dragging_a_placed_image_handle_resizes_about_the_opposite_corner() {
     );
     assert!(((resized.rect.right - resized.rect.left) - w / 2.0).abs() < 1.0, "width did not halve");
     assert!(((resized.rect.bottom - resized.rect.top) - h / 2.0).abs() < 1.0, "height did not halve");
+}
+
+/// **Shift on a corner follows the diagonal.** Pulling only sideways must
+/// still grow the height, because the point is to keep the proportions —
+/// without Shift the same drag is a free stretch (below).
+#[test]
+fn shift_dragging_a_placed_picture_handle_keeps_its_ratio() {
+    let mut app = app("two-column.pdf");
+    app.place_image_at(0, AppPoint { x: 100.0, y: 400.0 }, solid_rgba(8, 4, [40, 90, 200]), 8, 4)
+        .expect("placed");
+
+    let mark = app.tab_mut().doc.as_ref().unwrap().session.placed_image_marks(0).unwrap().remove(0);
+    let (w, h) = (mark.rect.right - mark.rect.left, mark.rect.bottom - mark.rect.top);
+    let grab = Grab {
+        handle: Some(Handle::BottomRight),
+        from: AppPoint { x: mark.rect.right as f64, y: mark.rect.bottom as f64 },
+        by: (w / 2.0, 0.0),
+    };
+    app.finish_placed_image_grab(
+        PlacedImageSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation },
+        grab,
+        true,
+    );
+
+    let resized = app.tab_mut().doc.as_ref().unwrap().session.placed_image_marks(0).unwrap().remove(0);
+    let (w1, h1) = (resized.rect.right - resized.rect.left, resized.rect.bottom - resized.rect.top);
+    assert!((resized.rect.left - mark.rect.left).abs() < 0.5, "the anchored corner moved");
+    assert!((resized.rect.top - mark.rect.top).abs() < 0.5, "the anchored corner moved");
+    assert!(h1 > h + 1.0, "a sideways shift-drag left the height alone: {h} -> {h1}");
+    assert!(
+        ((w1 / h1) - (w / h)).abs() < 0.01,
+        "the ratio changed: {w}x{h} became {w1}x{h1}",
+    );
+}
+
+/// The same drag with no Shift is what it always was: the width moves, the
+/// height does not.
+#[test]
+fn a_placed_picture_handle_without_shift_still_stretches_freely() {
+    let mut app = app("two-column.pdf");
+    app.place_image_at(0, AppPoint { x: 100.0, y: 400.0 }, solid_rgba(8, 4, [40, 90, 200]), 8, 4)
+        .expect("placed");
+
+    let mark = app.tab_mut().doc.as_ref().unwrap().session.placed_image_marks(0).unwrap().remove(0);
+    let (w, h) = (mark.rect.right - mark.rect.left, mark.rect.bottom - mark.rect.top);
+    let grab = Grab {
+        handle: Some(Handle::BottomRight),
+        from: AppPoint { x: mark.rect.right as f64, y: mark.rect.bottom as f64 },
+        by: (w / 2.0, 0.0),
+    };
+    app.finish_placed_image_grab(
+        PlacedImageSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation },
+        grab,
+        false,
+    );
+
+    let resized = app.tab_mut().doc.as_ref().unwrap().session.placed_image_marks(0).unwrap().remove(0);
+    let (w1, h1) = (resized.rect.right - resized.rect.left, resized.rect.bottom - resized.rect.top);
+    assert!((w1 - w * 1.5).abs() < 1.0, "the width did not follow the drag: {w} -> {w1}");
+    assert!((h1 - h).abs() < 0.5, "a free stretch changed the height: {h} -> {h1}");
+}
+
+/// And a signature, whose resize goes through its own commit function.
+#[test]
+fn shift_dragging_a_signature_handle_keeps_its_ratio() {
+    let (mut app, path) = with_signature_pad("two-column.pdf", "signature-ratio");
+    app.save_uploaded_signature("mine", solid_rgba(8, 4, [40, 90, 200]), 8, 4).expect("kept");
+    app.submit("signature");
+    app.place_signature(0, AppPoint { x: 100.0, y: 400.0 }).expect("placed");
+
+    let mark = app.tab_mut().doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
+    let (w, h) = (mark.rect.right - mark.rect.left, mark.rect.bottom - mark.rect.top);
+    let grab = Grab {
+        handle: Some(Handle::BottomRight),
+        from: AppPoint { x: mark.rect.right as f64, y: mark.rect.bottom as f64 },
+        by: (w / 2.0, 0.0),
+    };
+    app.finish_signature_grab(
+        SignatureSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation },
+        grab,
+        true,
+    );
+
+    let resized = app.tab_mut().doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
+    let (w1, h1) = (resized.rect.right - resized.rect.left, resized.rect.bottom - resized.rect.top);
+    assert!(h1 > h + 1.0, "a sideways shift-drag left the height alone: {h} -> {h1}");
+    assert!(
+        ((w1 / h1) - (w / h)).abs() < 0.01,
+        "the signature's ratio changed: {w}x{h} became {w1}x{h1}",
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The object tool's own picture, selected as page content through Edit
+/// Object — the third kind the request named. Its commit goes through
+/// `finish_grab`, which must apply the ratio only to "the picture", not to
+/// the words or shapes that share the same handles.
+#[test]
+fn shift_resizing_a_page_picture_keeps_its_ratio() {
+    let mut app = app("pictures.pdf");
+    app.submit("editobject");
+    let image = app.tab_mut().doc.as_ref().unwrap().session.images_on(0).unwrap().remove(0);
+    let (w, h) = (image.rect.right - image.rect.left, image.rect.bottom - image.rect.top);
+    let sel = Selected { page: 0, object: image.object, rect: image.rect, what: "the picture" };
+    let grab = Grab {
+        handle: Some(Handle::BottomRight),
+        from: AppPoint { x: image.rect.right as f64, y: image.rect.bottom as f64 },
+        by: (w / 2.0, 0.0),
+    };
+    app.finish_grab(sel, grab, 1.0, true);
+
+    let after = app.tab().selection.selected.as_ref().expect("the picture should still be selected");
+    let (w1, h1) = (after.rect.right - after.rect.left, after.rect.bottom - after.rect.top);
+    assert!(h1 > h + 1.0, "a sideways shift-drag left the height alone: {h} -> {h1}");
+    assert!(
+        ((w1 / h1) - (w / h)).abs() < 0.01,
+        "the page picture's ratio changed: {w}x{h} became {w1}x{h1}",
+    );
+}
+
+/// Shift does **not** mean "keep the ratio" for a shape: the guard in
+/// `finish_grab` is by what was picked. A shape resized the same way still
+/// stretches freely.
+#[test]
+fn shift_resizing_a_shape_still_stretches_freely() {
+    let mut app = app("quadrants.pdf");
+    app.submit("editobject");
+    let shape = app
+        .tab_mut()
+        .doc
+        .as_ref()
+        .unwrap()
+        .session
+        .drawn_objects(0)
+        .unwrap()
+        .into_iter()
+        .find(|d| d.depth == 0 && d.kind == pdf_core::document::DrawnKind::Shape)
+        .expect("a shape on the page");
+    let (w, h) = (shape.rect.right - shape.rect.left, shape.rect.bottom - shape.rect.top);
+    let sel = Selected { page: 0, object: shape.object, rect: shape.rect, what: "the shape" };
+    let grab = Grab {
+        handle: Some(Handle::BottomRight),
+        from: AppPoint { x: shape.rect.right as f64, y: shape.rect.bottom as f64 },
+        by: (w / 2.0, 0.0),
+    };
+    app.finish_grab(sel, grab, 1.0, true);
+
+    let after = app.tab().selection.selected.as_ref().expect("the shape should still be selected");
+    let h1 = after.rect.bottom - after.rect.top;
+    assert!((h1 - h).abs() < 0.5, "Shift changed a shape's height: {h} -> {h1}");
 }
 
 /// **The property the whole split exists for.** `apply_signatures`
@@ -2067,7 +2218,7 @@ fn a_negligible_drag_on_a_signature_changes_nothing() {
     let sel = SignatureSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation };
     app.tab_mut().selection.signature_selected = Some(sel.clone());
     let grab = Grab { handle: None, from: AppPoint { x: mark.rect.left as f64, y: mark.rect.top as f64 }, by: (0.1, -0.1) };
-    app.finish_signature_grab(sel.clone(), grab);
+    app.finish_signature_grab(sel.clone(), grab, false);
 
     let still = app.tab_mut().doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
     assert_eq!(still.rect, mark.rect, "a negligible drag moved the signature");
@@ -2141,7 +2292,7 @@ fn dragging_the_rotate_handle_turns_the_signature() {
         from: AppPoint { x: centre.0 + 20.0, y: centre.1 },
         by: (-20.0, 20.0),
     };
-    app.finish_signature_grab(sel, grab);
+    app.finish_signature_grab(sel, grab, false);
 
     let turned = app.tab_mut().doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
     assert!((turned.rotation - 90.0).abs() < 1.0, "expected roughly a 90-degree turn, got {}", turned.rotation);
@@ -2173,7 +2324,7 @@ fn a_negligible_rotate_drag_changes_nothing() {
     };
     // A drag of a fraction of a degree — nowhere near the 0.5-degree floor.
     let grab = Grab { handle: Some(Handle::Rotate), from: centre_ish, by: (0.0, 0.01) };
-    app.finish_signature_grab(sel.clone(), grab);
+    app.finish_signature_grab(sel.clone(), grab, false);
 
     let still = app.tab_mut().doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
     assert_eq!(still.rotation, 0.0, "a negligible drag should not have rotated the signature");
@@ -6032,7 +6183,7 @@ fn dragging_a_selection_moves_it_when_let_go() {
 
     // Let go.
     let grab = app.tab_mut().selection.grab.take().expect("grab");
-    app.finish_grab(sel, grab, 1.0);
+    app.finish_grab(sel, grab, 1.0, false);
     let moved = app.layers_on(0).iter().find(|d| d.kind == pdf_core::document::DrawnKind::Shape).cloned().expect("panel");
     assert!(
         (moved.rect.left - panel.rect.left - 30.0).abs() < 0.5 && (moved.rect.top - panel.rect.top - 18.0).abs() < 0.5,
@@ -6067,7 +6218,7 @@ fn text_placed_by_add_text_can_be_selected_and_dragged_like_any_other_run() {
     assert_eq!(sel.what, "the words");
 
     let grab = Grab { handle: None, from: at, by: (25.0, 12.0) };
-    app.finish_grab(sel.clone(), grab, 1.0);
+    app.finish_grab(sel.clone(), grab, 1.0, false);
 
     let moved = app.tab_mut().selection.selected.clone().expect("still selected after the drag");
     assert_eq!(moved.what, "the words", "the drag left it split down to a single letter");
@@ -6111,7 +6262,7 @@ fn dragging_an_isolated_line_of_text_moves_the_whole_line_not_one_letter() {
     let before_left = leftmost(&before);
 
     let grab = Grab { handle: None, from: at, by: (60.0, 0.0) };
-    app.finish_grab(sel, grab, 1.0);
+    app.finish_grab(sel, grab, 1.0, false);
 
     let after = app.tab_mut().doc.as_ref().unwrap().session.text_run_rects(0).unwrap();
     assert_eq!(after.len(), before_count, "the run was split into characters by a drag");
@@ -6142,7 +6293,7 @@ fn undo_puts_a_dragged_object_back() {
     assert!(app.select_thing_at(0, corner));
     let sel = app.tab_mut().selection.selected.clone().expect("selected");
 
-    app.finish_grab(sel, Grab { handle: None, from: corner, by: (30.0, 18.0) }, 1.0);
+    app.finish_grab(sel, Grab { handle: None, from: corner, by: (30.0, 18.0) }, 1.0, false);
     let moved = app
         .layers_on(0)
         .iter()
@@ -6206,7 +6357,7 @@ fn a_tiny_wobble_does_not_move_the_selection_but_a_real_drag_still_does() {
 
     // Two page points of drift at a zoom where that is under three
     // screen pixels (scale 1.0) — should change nothing.
-    app.finish_grab(sel.clone(), Grab { handle: None, from: middle, by: (2.0, 0.0) }, 1.0);
+    app.finish_grab(sel.clone(), Grab { handle: None, from: middle, by: (2.0, 0.0) }, 1.0, false);
     let still = app
         .layers_on(0)
         .iter()
@@ -6217,7 +6368,7 @@ fn a_tiny_wobble_does_not_move_the_selection_but_a_real_drag_still_does() {
 
     // The identical two points of movement, but zoomed in enough (scale
     // 3.0) that it is a real few-pixel drag — should move it.
-    app.finish_grab(sel, Grab { handle: None, from: middle, by: (2.0, 0.0) }, 3.0);
+    app.finish_grab(sel, Grab { handle: None, from: middle, by: (2.0, 0.0) }, 3.0, false);
     let moved = app
         .layers_on(0)
         .iter()
@@ -6249,7 +6400,7 @@ fn dragging_a_handle_resizes_about_the_opposite_corner() {
         from: AppPoint { x: panel.rect.right as f64, y: panel.rect.bottom as f64 },
         by: (-w / 2.0, -h / 2.0),
     };
-    app.finish_grab(sel, grab, 1.0);
+    app.finish_grab(sel, grab, 1.0, false);
     assert!(said(&app).contains("resized to 50%"), "{}", said(&app));
 
     let now = app.layers_on(0).iter().find(|d| d.kind == pdf_core::document::DrawnKind::Shape).cloned().expect("panel");

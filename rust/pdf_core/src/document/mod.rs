@@ -1699,6 +1699,36 @@ pub trait DocumentMut {
         at: usize,
     ) -> Result<usize>;
 
+    /// [`DocumentMut::import_pages`], keeping `source` open as long as this
+    /// document lives.
+    ///
+    /// **Why the source outlives the call.** PDFium's `FPDF_ImportPagesByIndex`
+    /// clones every reference in a copied page, and
+    /// `CPDF_PageOrganizer::UpdateReference` deliberately skips the keys
+    /// `Parent`, `Prev` and `First`. That is right for a page tree and wrong
+    /// for an annotation: a `Popup`'s `/Parent`, a reply thread's, or a form
+    /// widget's is left bound to the **source** `CPDF_Document`. Closing the
+    /// source then leaves the destination with a reference into freed memory,
+    /// and a later full save walks it — an access violation inside
+    /// `pdfium.dll` (`+0x7317e` on the pinned 151.0.7881 build), reported from
+    /// use when a page carrying a placed picture and its Popup was pasted into
+    /// another document and saved.
+    ///
+    /// The default is for the lightweight `DocumentMut` doubles used by tests:
+    /// it imports and lets the source go, which is safe for pages without
+    /// annotation back-references. `PdfiumDocument` overrides it and retains
+    /// the source until it is itself dropped.
+    fn import_pages_keeping_source(
+        &mut self,
+        source: Box<dyn Document>,
+        indices: &[usize],
+        at: usize,
+    ) -> Result<usize> {
+        let count = self.import_pages(source.as_ref(), indices, at)?;
+        drop(source);
+        Ok(count)
+    }
+
     // ----------------------------------------------------------- persistence --
 
     /// Append a delta, leaving the original bytes untouched.

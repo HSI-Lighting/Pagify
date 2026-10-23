@@ -651,8 +651,12 @@ impl Command {
                 let source =
                     crate::document::pdfium_doc::PdfiumDocument::open_bytes(pdf.clone(), None)?;
                 // An empty index list is PDFium own spelling of "every page",
-                // which is exactly what this command carries.
-                let count = doc.import_pages(&source, &[], *at)?;
+                // which is exactly what this command carries. The source is
+                // handed over rather than borrowed: PDFium leaves an
+                // annotation's `/Parent` reference bound to it, so it must stay
+                // open for as long as the destination does — see
+                // `DocumentMut::import_pages_keeping_source`.
+                let count = doc.import_pages_keeping_source(Box::new(source), &[], *at)?;
                 Ok(UndoRecord::RemovePages { at: *at, count })
             }
             Command::SetPageRotation {

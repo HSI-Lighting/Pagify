@@ -130,7 +130,7 @@ impl PagifyApp {
         // The same endings a mouse drag has (`Self::interact_objects` and the
         // two after it); only the one the keys filled in has a drag to end.
         if let (Some(grab), Some(sel)) = (self.tab_mut().selection.grab.take(), self.tab().selection.selected.clone()) {
-            self.finish_grab(sel, grab, scale);
+            self.finish_grab(sel, grab, scale, false);
         }
         if let Some(grab) = self.tab_mut().selection.group_grab.take() {
             self.finish_group_grab(grab, scale);
@@ -138,12 +138,12 @@ impl PagifyApp {
         if let (Some(grab), Some(sel)) =
             (self.tab_mut().selection.signature_grab.take(), self.tab().selection.signature_selected.clone())
         {
-            self.finish_signature_grab(sel, grab);
+            self.finish_signature_grab(sel, grab, false);
         }
         if let (Some(grab), Some(sel)) =
             (self.tab_mut().selection.placed_image_grab.take(), self.tab().selection.placed_image_selected.clone())
         {
-            self.finish_placed_image_grab(sel, grab);
+            self.finish_placed_image_grab(sel, grab, false);
         }
     }
 

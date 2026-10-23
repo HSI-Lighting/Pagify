@@ -1,15 +1,15 @@
-; Pagify Desktop — Windows installer.
+﻿; Pagify Desktop â€” Windows installer.
 ;
 ; Built with Inno Setup rather than a hand-copied folder of loose files.
 ; Structure choices here are deliberately the ones a mainstream, trusted
 ; installer uses, since an unsigned exe's biggest strike against it with
 ; Windows is looking like nothing else Windows has ever seen:
 ;   - a per-user install under %LocalAppData%\Programs, the same place VS
-;     Code, Discord and most other modern Windows apps install to — no admin
+;     Code, Discord and most other modern Windows apps install to â€” no admin
 ;     prompt, no UAC elevation, nothing that reads as "this wants to change
 ;     your whole machine".
 ;   - a real Start Menu entry and an Add/Remove Programs uninstall entry,
-;     both with a proper publisher name, product name and version — the
+;     both with a proper publisher name, product name and version â€” the
 ;     metadata a bare renamed .exe never carries.
 ;   - the installer's own icon set explicitly, so it is not one more
 ;     nameless grey-icon .exe in Downloads.
@@ -17,19 +17,19 @@
 ;     the most common on Windows and is not what "packed to evade AV" looks
 ;     like structurally.
 ;
-; None of this replaces a real code-signing certificate — that is the actual
+; None of this replaces a real code-signing certificate â€” that is the actual
 ; fix for the SmartScreen "Windows protected your PC" prompt, and nothing
 ; about folder layout changes that. This gets everything else right so that,
-; once a certificate exists, signing is the only remaining step — see
+; once a certificate exists, signing is the only remaining step â€” see
 ; SIGNING_THUMBPRINT in build.ps1, which this can be pointed at the same way.
 
 #define MyAppName "Pagify"
-#define MyAppVersion "0.1.96"
+#define MyAppVersion "0.1.98"
 #define MyAppPublisher "HSI Lighting"
 #define MyAppExeName "Pagify.exe"
 
 [Setup]
-; Fixed once, kept stable across versions — this is what tells Windows a
+; Fixed once, kept stable across versions â€” this is what tells Windows a
 ; new installer is an *update* to the same app rather than a different one.
 AppId={{7C9F3C9E-6C37-4A0B-9E0B-6E4E4B9E9C7A}
 AppName={#MyAppName}
@@ -61,7 +61,7 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 [Files]
 Source: "..\..\target\release\pagify_app.exe"; DestDir: "{app}"; DestName: "{#MyAppExeName}"; Flags: ignoreversion
 Source: "..\..\third_party\pdfium\pdfium-win-x64\bin\pdfium.dll"; DestDir: "{app}"; Flags: ignoreversion
-; The OCR models (`pagify_shell::models` — "beside the executable… is what an
+; The OCR models (`pagify_shell::models` â€” "beside the executableâ€¦ is what an
 ; installed app uses") were missing from here entirely: fonts and the
 ; dictionary are embedded in the exe itself (`include_bytes!`/`include_str!`),
 ; but these two are loaded from disk, so `extracttext` silently had nothing

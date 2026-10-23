@@ -2652,6 +2652,72 @@ impl Handle {
         (sx.max(0.05), sy.max(0.05))
     }
 
+    /// [`Handle::scale`], or — with `keep_ratio` — one factor on both axes so
+    /// the rectangle keeps its proportions.
+    ///
+    /// **A corner follows the diagonal.** The far corner is where the handle
+    /// is; the pointer's movement projected onto the anchor-to-far-corner
+    /// diagonal is how much of that diagonal the drag asks for, so a drag
+    /// pulled mostly along one axis still moves the other in step instead of
+    /// jumping to whichever axis happened to change more. An edge has no
+    /// diagonal, so its own axis sets both — resizing from the right grows
+    /// height as well, symmetrically about the opposite edge's middle.
+    fn scale_keeping_ratio(&self, r: &pdf_core::document::Rect, by: (f32, f32)) -> (f32, f32) {
+        let (w, h) = ((r.right - r.left).max(0.01), (r.bottom - r.top).max(0.01));
+        let factor = match self {
+            Handle::Left => (w - by.0) / w,
+            Handle::Right => (w + by.0) / w,
+            Handle::Top => (h - by.1) / h,
+            Handle::Bottom => (h + by.1) / h,
+            // A turn scales nothing; the caller handles it before asking.
+            Handle::Rotate => 1.0,
+            // Which way the far corner is from the anchor.
+            corner => {
+                let (ux, uy) = match corner {
+                    Handle::TopLeft => (-1.0, -1.0),
+                    Handle::TopRight => (1.0, -1.0),
+                    Handle::BottomLeft => (-1.0, 1.0),
+                    _ => (1.0, 1.0),
+                };
+                1.0 + (by.0 * ux * w + by.1 * uy * h) / (w * w + h * h)
+            }
+        };
+        let factor = factor.max(0.05);
+        (factor, factor)
+    }
+
+    /// The factor this drag means, keeping the proportions or not.
+    fn scale_with(
+        &self,
+        r: &pdf_core::document::Rect,
+        by: (f32, f32),
+        keep_ratio: bool,
+    ) -> (f32, f32) {
+        if keep_ratio {
+            self.scale_keeping_ratio(r, by)
+        } else {
+            self.scale(r, by)
+        }
+    }
+
+    /// The rectangle a drag asks for: [`Handle::scale_with`] about
+    /// [`Handle::anchor`].
+    fn resized_rect(
+        &self,
+        r: &pdf_core::document::Rect,
+        by: (f32, f32),
+        keep_ratio: bool,
+    ) -> pdf_core::document::Rect {
+        let (sx, sy) = self.scale_with(r, by, keep_ratio);
+        let (ax, ay) = self.anchor(r);
+        pdf_core::document::Rect {
+            left: ax + (r.left - ax) * sx,
+            top: ay + (r.top - ay) * sy,
+            right: ax + (r.right - ax) * sx,
+            bottom: ay + (r.bottom - ay) * sy,
+        }
+    }
+
     fn cursor(&self) -> egui::CursorIcon {
         match self {
             Handle::Left | Handle::Right => egui::CursorIcon::ResizeHorizontal,
@@ -6429,8 +6495,12 @@ impl PagifyApp {
     /// pixels at another. Reported from use as a click moving whatever it
     /// selected — invisible on a whole sentence, glaring on the single
     /// letter a click can now pick out of one.
-    fn finish_grab(&mut self, sel: Selected, grab: Grab, scale: f32) {
+    fn finish_grab(&mut self, sel: Selected, grab: Grab, scale: f32, keep_ratio: bool) {
         let (dx, dy) = grab.by;
+        // Only a picture keeps its proportions: a run of words or a drawn
+        // shape has no original ratio to hold, and Shift already means
+        // something else on them (see `dragged_by`).
+        let keep_ratio = keep_ratio && sel.what == "the picture";
         // `handle: None` here is exactly the "aimed at a corner, landed on
         // the body" failure mode `Self::object_hover_handle` exists to
         // prevent — logged before the outcome message below, which only
@@ -6438,7 +6508,10 @@ impl PagifyApp {
         // reporter actually meant to happen.
         self.recording_state.session_log.record(
             "drag",
-            &format!("{} handle={:?} by=({dx:.1},{dy:.1}) rect={:?}", sel.what, grab.handle, sel.rect),
+            &format!(
+                "{} handle={:?} by=({dx:.1},{dy:.1}) ratio={keep_ratio} rect={:?}",
+                sel.what, grab.handle, sel.rect
+            ),
         );
         let told = match grab.handle {
             None => {
@@ -6465,7 +6538,7 @@ impl PagifyApp {
                 self.rotate_thing(sel.page, sel.object, pivot, degrees)
             }
             Some(handle) => {
-                let (sx, sy) = handle.scale(&sel.rect, (dx, dy));
+                let (sx, sy) = handle.scale_with(&sel.rect, (dx, dy), keep_ratio);
                 if (sx - 1.0).abs() < 0.005 && (sy - 1.0).abs() < 0.005 {
                     return;
                 }
@@ -6492,7 +6565,7 @@ impl PagifyApp {
             // that the finding-again below looks at.
             Some(Handle::Rotate) => sel.rect,
             Some(handle) => {
-                let (sx, sy) = handle.scale(&sel.rect, (dx, dy));
+                let (sx, sy) = handle.scale_with(&sel.rect, (dx, dy), keep_ratio);
                 let (ax, ay) = handle.anchor(&sel.rect);
                 pdf_core::document::Rect {
                     left: ax + (sel.rect.left - ax) * sx,
@@ -6891,10 +6964,13 @@ impl PagifyApp {
     /// `move_thing`/`scale_thing`, since a signature's rect (and now angle)
     /// is the whole of what moving, resizing or turning it means; there is
     /// no content-stream object underneath to transform.
-    fn finish_signature_grab(&mut self, sel: SignatureSelected, grab: Grab) {
+    fn finish_signature_grab(&mut self, sel: SignatureSelected, grab: Grab, keep_ratio: bool) {
         self.recording_state.session_log.record(
             "drag",
-            &format!("signature handle={:?} by={:?} rect={:?}", grab.handle, grab.by, sel.rect),
+            &format!(
+                "signature handle={:?} by={:?} ratio={keep_ratio} rect={:?}",
+                grab.handle, grab.by, sel.rect
+            ),
         );
         if grab.handle == Some(Handle::Rotate) {
             let wanted = Self::angle_from_drag(&sel.rect, sel.rotation, grab.from, grab.by);
@@ -6932,7 +7008,7 @@ impl PagifyApp {
                 }
             }
             Some(handle) => {
-                let (sx, sy) = handle.scale(&sel.rect, (dx, dy));
+                let (sx, sy) = handle.scale_with(&sel.rect, (dx, dy), keep_ratio);
                 if (sx - 1.0).abs() < 0.005 && (sy - 1.0).abs() < 0.005 {
                     return;
                 }
@@ -6966,10 +7042,13 @@ impl PagifyApp {
 
 
     /// The same as [`Self::finish_signature_grab`], for [`Self::placed_image_selected`].
-    fn finish_placed_image_grab(&mut self, sel: PlacedImageSelected, grab: Grab) {
+    fn finish_placed_image_grab(&mut self, sel: PlacedImageSelected, grab: Grab, keep_ratio: bool) {
         self.recording_state.session_log.record(
             "drag",
-            &format!("placed image handle={:?} by={:?} rect={:?}", grab.handle, grab.by, sel.rect),
+            &format!(
+                "placed image handle={:?} by={:?} ratio={keep_ratio} rect={:?}",
+                grab.handle, grab.by, sel.rect
+            ),
         );
         if grab.handle == Some(Handle::Rotate) {
             let wanted = Self::angle_from_drag(&sel.rect, sel.rotation, grab.from, grab.by);
@@ -7007,7 +7086,7 @@ impl PagifyApp {
                 }
             }
             Some(handle) => {
-                let (sx, sy) = handle.scale(&sel.rect, (dx, dy));
+                let (sx, sy) = handle.scale_with(&sel.rect, (dx, dy), keep_ratio);
                 if (sx - 1.0).abs() < 0.005 && (sy - 1.0).abs() < 0.005 {
                     return;
                 }
@@ -7274,6 +7353,9 @@ impl PagifyApp {
         );
 
         if let Some(grab) = &self.tab_mut().selection.signature_grab {
+            // Shift keeps the picture's proportions while a resize is in
+            // flight, as it will when the drag is let go.
+            let keep_ratio = ui.input(|i| i.modifiers.shift);
             // Turning does not move `sel.rect` at all — see `SignatureSelected`
             // and `Annotation::Image`'s own doc for why rotation is a
             // separate transform, not a change to the rect move and resize
@@ -7306,16 +7388,7 @@ impl PagifyApp {
                     right: sel.rect.right + dx,
                     bottom: sel.rect.bottom + dy,
                 },
-                Some(handle) => {
-                    let (sx, sy) = handle.scale(&sel.rect, (dx, dy));
-                    let (ax, ay) = handle.anchor(&sel.rect);
-                    pdf_core::document::Rect {
-                        left: ax + (sel.rect.left - ax) * sx,
-                        top: ay + (sel.rect.top - ay) * sy,
-                        right: ax + (sel.rect.right - ax) * sx,
-                        bottom: ay + (sel.rect.bottom - ay) * sy,
-                    }
-                }
+                Some(handle) => handle.resized_rect(&sel.rect, (dx, dy), keep_ratio),
             };
             let ghost = to_screen(&going);
             painter.rect_filled(ghost, egui::CornerRadius::ZERO, theme::violet().gamma_multiply(0.10));
@@ -7374,6 +7447,9 @@ impl PagifyApp {
         );
 
         if let Some(grab) = &self.tab_mut().selection.placed_image_grab {
+            // Shift keeps the picture's proportions while a resize is in
+            // flight, as it will when the drag is let go.
+            let keep_ratio = ui.input(|i| i.modifiers.shift);
             if grab.handle == Some(Handle::Rotate) {
                 let degrees = Self::angle_from_drag(&sel.rect, sel.rotation, grab.from, grab.by);
                 let centre = to_screen(&sel.rect).center();
@@ -7399,16 +7475,7 @@ impl PagifyApp {
                     right: sel.rect.right + dx,
                     bottom: sel.rect.bottom + dy,
                 },
-                Some(handle) => {
-                    let (sx, sy) = handle.scale(&sel.rect, (dx, dy));
-                    let (ax, ay) = handle.anchor(&sel.rect);
-                    pdf_core::document::Rect {
-                        left: ax + (sel.rect.left - ax) * sx,
-                        top: ay + (sel.rect.top - ay) * sy,
-                        right: ax + (sel.rect.right - ax) * sx,
-                        bottom: ay + (sel.rect.bottom - ay) * sy,
-                    }
-                }
+                Some(handle) => handle.resized_rect(&sel.rect, (dx, dy), keep_ratio),
             };
             let ghost = to_screen(&going);
             painter.rect_filled(ghost, egui::CornerRadius::ZERO, theme::violet().gamma_multiply(0.10));
