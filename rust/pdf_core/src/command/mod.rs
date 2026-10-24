@@ -170,6 +170,14 @@ pub enum Command {
         objects: Vec<usize>,
         by: crate::document::Point,
     },
+    /// Move several objects of one page, each by its own distance, in one edit and one undo: a
+    /// paragraph's lines put left, centred or right (`pagify_shell::paragraph_align`). Planned
+    /// against one read of the page like [`Command::MoveObjects`]; where that refuses, the
+    /// members are moved one at a time as a `Batch`.
+    MoveObjectsEach {
+        page_index: usize,
+        moves: Vec<(usize, crate::document::Point)>,
+    },
     /// Resize several objects of one page about the same point: Edit
     /// Object's group resize. Planned against one read of the page and written
     /// once ([`crate::document::DocumentMut::scale_objects_mut`]); where that
@@ -535,6 +543,11 @@ pub enum UndoRecord {
         objects: Vec<usize>,
         by: crate::document::Point,
     },
+    /// See [`Command::MoveObjectsEach`]: each moved back by its own distance.
+    MoveObjectsEach {
+        page_index: usize,
+        moves: Vec<(usize, crate::document::Point)>,
+    },
     /// See [`Command::ScaleObjects`]: resized back in one edit, or one at a time.
     ScaleObjects {
         page_index: usize,
@@ -771,6 +784,20 @@ impl Command {
                 .execute(doc),
                 Err(other) => Err(other),
             },
+            Command::MoveObjectsEach { page_index, moves } => match doc.move_objects_each_mut(*page_index, moves) {
+                Ok(()) => Ok(UndoRecord::MoveObjectsEach {
+                    page_index: *page_index,
+                    moves: moves.iter().map(|(object, by)| (*object, crate::document::Point { x: -by.x, y: -by.y })).collect(),
+                }),
+                Err(PdfError::Unsupported(_)) => Command::Batch {
+                    commands: moves
+                        .iter()
+                        .map(|&(object, by)| Command::MoveObject { page_index: *page_index, object, by })
+                        .collect(),
+                }
+                .execute(doc),
+                Err(other) => Err(other),
+            },
             Command::ScaleObject { page_index, object, anchor, sx, sy } => {
                 doc.scale_object_mut(*page_index, *object, *anchor, *sx, *sy)?;
                 Ok(UndoRecord::ScaleObject {
@@ -994,6 +1021,9 @@ impl Command {
             Command::MoveObjects { page_index, objects, .. } => {
                 format!("Move {} things on page {}", objects.len(), page_index + 1)
             }
+            Command::MoveObjectsEach { page_index, moves } => {
+                format!("Move {} things on page {}", moves.len(), page_index + 1)
+            }
             Command::SetPlacedImageRect { page_index, rect, was, .. } => {
                 let same_size = ((rect.right - rect.left) - (was.right - was.left)).abs() < 0.01
                     && ((rect.bottom - rect.top) - (was.bottom - was.top)).abs() < 0.01;
@@ -1077,6 +1107,7 @@ impl Command {
             | Command::RemoveText { page_index, .. }
             | Command::MoveObject { page_index, .. }
             | Command::MoveObjects { page_index, .. }
+            | Command::MoveObjectsEach { page_index, .. }
             | Command::ScaleObjects { page_index, .. }
             | Command::SetPlacedImageRect { page_index, .. }
             | Command::TurnPlacedImage { page_index, .. }
@@ -1187,6 +1218,15 @@ impl UndoRecord {
             UndoRecord::MoveObjects { page_index, objects, by } => match doc.move_objects_mut(page_index, &objects, by) {
                 Err(PdfError::Unsupported(_)) => {
                     for object in objects {
+                        doc.move_object_mut(page_index, object, by)?;
+                    }
+                    Ok(())
+                }
+                moved => moved,
+            },
+            UndoRecord::MoveObjectsEach { page_index, moves } => match doc.move_objects_each_mut(page_index, &moves) {
+                Err(PdfError::Unsupported(_)) => {
+                    for (object, by) in moves {
                         doc.move_object_mut(page_index, object, by)?;
                     }
                     Ok(())

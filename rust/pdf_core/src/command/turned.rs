@@ -42,6 +42,10 @@ impl Command {
             Command::MoveObject { page_index, object, by } => {
                 Command::MoveObject { page_index, object, by: offset_back(frame_of(page_index), by) }
             }
+            Command::MoveObjectsEach { page_index, moves } => Command::MoveObjectsEach {
+                page_index,
+                moves: moves.into_iter().map(|(object, by)| (object, offset_back(frame_of(page_index), by))).collect(),
+            },
             Command::MoveObjects { page_index, objects, by } => {
                 Command::MoveObjects { page_index, objects, by: offset_back(frame_of(page_index), by) }
             }

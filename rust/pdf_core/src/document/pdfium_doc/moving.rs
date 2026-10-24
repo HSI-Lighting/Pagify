@@ -15,10 +15,42 @@ pub(super) enum Change {
     Scale { anchor: Point, sx: f32, sy: f32 },
 }
 
+impl Change {
+    /// The same change: a move by the same distance, or a resize about the same point by the same factors.
+    fn same(self, other: Change) -> bool {
+        match (self, other) {
+            (Change::Move(a), Change::Move(b)) => a.x == b.x && a.y == b.y,
+            (Change::Scale { anchor: a, sx, sy }, Change::Scale { anchor: b, sx: tx, sy: ty }) => {
+                a.x == b.x && a.y == b.y && sx == tx && sy == ty
+            }
+            _ => false,
+        }
+    }
+}
+
 impl PdfiumDocument {
     /// See [`crate::document::DocumentMut::move_objects_mut`].
     pub(super) fn move_objects_in_stream(&mut self, page_index: usize, objects: &[usize], by: Point) -> Result<()> {
-        self.change_objects_in_stream(page_index, objects, Change::Move(by))
+        self.change_objects_in_stream(page_index, objects, &|_| Change::Move(by))
+    }
+
+    /// See [`crate::document::DocumentMut::move_objects_each_mut`]: every member by its own
+    /// distance, planned and checked exactly as a group move by one distance is.
+    pub(super) fn move_objects_each_in_stream(&mut self, page_index: usize, moves: &[(usize, Point)]) -> Result<()> {
+        let mut each: std::collections::BTreeMap<usize, Point> = std::collections::BTreeMap::new();
+        for &(object, by) in moves {
+            if !(by.x.is_finite() && by.y.is_finite()) {
+                return Err(PdfError::InvalidArgument("a move must be a distance".into()));
+            }
+            if let Some(was) = each.insert(object, by) {
+                if was.x != by.x || was.y != by.y {
+                    return Err(PdfError::InvalidArgument("one object cannot be moved two ways at once".into()));
+                }
+            }
+        }
+        let objects: Vec<usize> = each.keys().copied().collect();
+        let still = Point { x: 0.0, y: 0.0 };
+        self.change_objects_in_stream(page_index, &objects, &|object| Change::Move(each.get(&object).copied().unwrap_or(still)))
     }
 
     /// See [`crate::document::DocumentMut::scale_objects_mut`].
@@ -33,7 +65,7 @@ impl PdfiumDocument {
         if !(sx.is_finite() && sy.is_finite()) || sx.abs() < 1e-3 || sy.abs() < 1e-3 {
             return Err(PdfError::InvalidArgument("that would resize it to nothing".into()));
         }
-        self.change_objects_in_stream(page_index, objects, Change::Scale { anchor, sx, sy })
+        self.change_objects_in_stream(page_index, objects, &|_| Change::Scale { anchor, sx, sy })
     }
 
     /// **Reported from use (0.1.78):** 96 things moved together froze the
@@ -52,7 +84,15 @@ impl PdfiumDocument {
     /// same. Anything that cannot be planned or checked is a refusal that
     /// changes nothing, and the command then edits the members one at a time,
     /// as a group always was.
-    fn change_objects_in_stream(&mut self, page_index: usize, objects: &[usize], change: Change) -> Result<()> {
+    ///
+    /// `change_of` says what happens to each member: one change for all of a group move or
+    /// resize, or each member's own distance (`move_objects_each_in_stream`).
+    fn change_objects_in_stream(
+        &mut self,
+        page_index: usize,
+        objects: &[usize],
+        change_of: &dyn Fn(usize) -> Change,
+    ) -> Result<()> {
         use crate::pdf::content;
         use pdfium_render::prelude::{FPDF_PAGEOBJ_IMAGE, FPDF_PAGEOBJ_PATH, FPDF_PAGEOBJ_TEXT};
 
@@ -84,7 +124,7 @@ impl PdfiumDocument {
 
         // The same edit a single move or resize makes, as a matrix on the page
         // (y up) for pictures and shapes.
-        let page_matrix = match change {
+        let page_matrix_of = |change: Change| match change {
             Change::Move(by) => [1.0, 0.0, 0.0, 1.0, by.x, -by.y],
             Change::Scale { anchor, sx, sy } => {
                 let (ax, ay) = (anchor.x, height - anchor.y);
@@ -108,9 +148,15 @@ impl PdfiumDocument {
                 if !all_moving || inside.iter().any(|i| covered.contains(i)) {
                     continue;
                 }
+                // Moved whole only when everything in it changes alike; otherwise each
+                // member is planned on its own below, as for a scope partly selected.
+                let change = change_of(inside[0]);
+                if !inside.iter().all(|i| change_of(*i).same(change)) {
+                    continue;
+                }
                 let ctm = states[open].ctm;
                 let back = inverse(ctm).ok_or(PdfError::Unsupported("this is placed by a transform this cannot invert"))?;
-                let local = matrices(matrices(ctm, page_matrix), back);
+                let local = matrices(matrices(ctm, page_matrix_of(change)), back);
                 let at = operations[open].span.end;
                 members.push(vec![(at..at, concat_matrix(&local)?)]);
                 covered.extend(inside);
@@ -123,6 +169,8 @@ impl PdfiumDocument {
         // the slow way, which says why.
         let facts = PageFacts::new(self, page_index);
         for &object in objects.iter().filter(|o| !covered.contains(*o)) {
+            let change = change_of(object);
+            let page_matrix = page_matrix_of(change);
             let planned = match census.get(object).map(|d| d.kind as u32) {
                 Some(FPDF_PAGEOBJ_IMAGE | FPDF_PAGEOBJ_PATH) => {
                     self.transform_edits(&facts, page_index, object, page_matrix, &file, &page, &operations, &states, &placed)
@@ -165,7 +213,7 @@ impl PdfiumDocument {
                 let placed_right = if objects.binary_search(&index).is_err() {
                     near(n.left, r.left) && near(n.top, r.top) && near(n.right, r.right) && near(n.bottom, r.bottom)
                 } else {
-                    match change {
+                    match change_of(index) {
                         Change::Move(by) => {
                             near(n.left, r.left + by.x)
                                 && near(n.top, r.top + by.y)

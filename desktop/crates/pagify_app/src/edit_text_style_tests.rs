@@ -284,7 +284,8 @@ fn the_preview_draws_an_underlined_word_underlined() {
 #[test]
 fn the_character_styles_are_open_and_the_paragraph_styles_say_next() {
     let next = Some("Comes with paragraph styles, the next stage.".to_string());
-    let open = edit_text_gates(false);
+    let (_app, mut edit) = picked("gates", &[], &two_pieces("/F1 12 Tf"), "Hello");
+    let open = edit_text_gates(&edit);
     for (name, gate) in [
         ("bold", &open.bold),
         ("italic", &open.italic),
@@ -298,7 +299,6 @@ fn the_character_styles_are_open_and_the_paragraph_styles_say_next() {
         assert_eq!(gate, &None, "{name} should work");
     }
     for (name, gate) in [
-        ("justify", &open.justify),
         ("indent", &open.indent),
         ("lists", &open.lists),
         ("line spacing", &open.line_spacing),
@@ -307,7 +307,9 @@ fn the_character_styles_are_open_and_the_paragraph_styles_say_next() {
         assert_eq!(gate, &next, "{name} should say what comes next");
     }
     // Drawn lettering is replaced in one look: its character styles stay closed.
-    let drawn = edit_text_gates(true);
+    assert!(open.justify.is_some(), "justifying a page's own paragraph is not built");
+    edit.drawn = true;
+    let drawn = edit_text_gates(&edit);
     let why = Some("Drawn lettering is replaced in one look.".to_string());
     assert_eq!(
         (&drawn.underline, &drawn.strike, &drawn.script, &drawn.letter_spacing, &drawn.width, &drawn.baseline),

@@ -4918,6 +4918,10 @@ impl DocumentMut for PdfiumDocument {
         self.move_objects_in_stream(page_index, objects, by)
     }
 
+    fn move_objects_each_mut(&mut self, page_index: usize, moves: &[(usize, Point)]) -> Result<()> {
+        self.move_objects_each_in_stream(page_index, moves)
+    }
+
     fn restack_mut(&mut self, page_index: usize, object: usize, where_to: crate::document::Stacking) -> Result<()> {
         <Self as Document>::restack(self, page_index, object, where_to)
     }

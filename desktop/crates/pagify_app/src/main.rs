@@ -1970,6 +1970,14 @@ struct EditingRun {
     line_tracking: Vec<f32>,
     /// The box's frame on screen as last drawn: its rows, or the width its handles were dragged to.
     frame: Option<egui::Rect>,
+    /// The alignment chosen in the panel, and the one the paragraph opened with
+    /// (`paragraph_align::detect`). When they differ, Apply moves the lines.
+    align: pagify_shell::paragraph_align::LineAlign,
+    align_was: pagify_shell::paragraph_align::LineAlign,
+    /// Where each line shows its ink, left and right, in page points, read when the box opened.
+    line_inks: Vec<Option<(f32, f32)>>,
+    /// Each row's ink width as last drawn, in page points: what a retyped line will measure.
+    row_widths_pt: Vec<f32>,
     /// Each piece's words as the page draws them: what a piece restyled in place is
     /// written again with.
     piece_texts: std::collections::HashMap<usize, String>,
@@ -2004,6 +2012,11 @@ impl EditingRun {
     /// Whether anything but the words differs from how the box opened: the style, a picked
     /// font, or a character's look.
     fn look_dirty(&self) -> bool {
+        self.styles_dirty() || self.align != self.align_was
+    }
+
+    /// [`Self::look_dirty`] without the alignment: the style, a picked font, a character's look.
+    fn styles_dirty(&self) -> bool {
         let changed_look = pdf_core::document::TextStyle { face: None, ..self.style.clone() }
             != pdf_core::document::TextStyle { face: None, ..self.was.clone() };
         let picked_font = self.style.face.is_some();
@@ -2014,6 +2027,11 @@ impl EditingRun {
     /// Whether the box can be edited on the page itself — invisible until the words
     /// change, its rows on the page's own baselines — which needs a baseline for every
     /// line. Drawn lettering and a box with none keep the paper and the egui layout.
+    /// Whether the words or their looks changed - the alignment aside.
+    fn words_or_looks_changed(&self) -> bool {
+        !in_place::unchanged(&self.buffer, &self.original, self.styles_dirty())
+    }
+
     fn in_place(&self) -> bool {
         !self.drawn && !self.lines.is_empty() && self.baselines.len() == self.lines.len()
     }
@@ -13101,6 +13119,10 @@ impl PagifyApp {
             look: None,
             line_tracking: Vec::new(),
             frame: None,
+            align: Default::default(),
+            align_was: Default::default(),
+            line_inks: Vec::new(),
+            row_widths_pt: Vec::new(),
             piece_texts: looks.piece_texts,
             font_objects: looks.font_objects,
         });
@@ -13325,6 +13347,22 @@ impl PagifyApp {
         if self.editor_is_stale(&edit) {
             self.let_go_of_stale_editor(&edit);
             return false;
+        }
+        // **Another alignment moves the lines, before anything is written to them**: one move,
+        // each line by its own distance, of objects whose words stay as they are. A move does not
+        // renumber the page, so words retyped in the same Apply go to the lines it moved.
+        let moves = self.alignment_moves(&edit);
+        if !moves.is_empty() {
+            let page_index = edit.page;
+            if let Err(e) = self.run_group_command(vec![pdf_core::command::Command::MoveObjectsEach { page_index, moves }]) {
+                self.say_error(format!("the lines could not be lined up, so nothing was changed: {e}"));
+                return false;
+            }
+            if !edit.words_or_looks_changed() {
+                self.tab_mut().edit.settling = edit.look.clone();
+                self.say_info(format!("lined up on page {} — `undo` puts it back.", page_index + 1));
+                return false;
+            }
         }
         // **Timed and logged on its own, separate from whatever the session
         // log's own "editing a paragraph…" → "paragraph changed" gap shows.**
@@ -14956,6 +14994,49 @@ impl PagifyApp {
         self.tab().edit.settling.clone()
     }
 
+    /// The moves that put the open box's lines where its alignment says: each line's objects
+    /// (and its faux-bold twins) by the distance between where its ink starts and where it is to
+    /// start in the paragraph's box. Nothing when the alignment is the one it opened with. A line
+    /// whose words were retyped is measured as the box drew it, the others by the page's own ink.
+    fn alignment_moves(&self, edit: &EditingRun) -> Vec<(usize, pdf_core::document::Point)> {
+        if !edit.in_place() || edit.align == edit.align_was {
+            return Vec::new();
+        }
+        let box_left = edit.rect.left.min(edit.rect.right);
+        let box_width = (edit.rect.right - edit.rect.left).abs();
+        let typed: Vec<&str> = edit.buffer.split('\n').collect();
+        let original: Vec<&str> = edit.original.split('\n').collect();
+        let mut moves = Vec::new();
+        for (line, (objects, _)) in edit.lines.iter().enumerate() {
+            if objects.is_empty() || edit.frozen.get(line).copied().unwrap_or(false) {
+                continue;
+            }
+            let Some(Some((ink_left, ink_right))) = edit.line_inks.get(line).copied() else { continue };
+            let width = if typed.get(line) == original.get(line) {
+                ink_right - ink_left
+            } else {
+                edit.row_widths_pt.get(line).copied().unwrap_or(ink_right - ink_left)
+            };
+            let target = pagify_shell::paragraph_align::offsets(&[width], box_left, box_width, edit.align);
+            let dx = target.first().copied().unwrap_or(ink_left) - ink_left;
+            if dx.abs() < 0.05 {
+                continue;
+            }
+            for &object in objects.iter().chain(edit.twins.get(line).into_iter().flatten()) {
+                moves.push((object, pdf_core::document::Point { x: dx, y: 0.0 }));
+            }
+        }
+        moves
+    }
+
+    /// Where the words in `rect` show their ink on `page`: the left edge of the first mark and
+    /// the right edge of the last, in page points.
+    fn line_ink(&mut self, page: usize, rect: &pdf_core::document::Rect) -> Option<(f32, f32)> {
+        let area = (rect.left, rect.top, rect.right, rect.bottom);
+        let characters = self.characters(page)?;
+        Some((characters.ink_left_in(area)?, characters.ink_right_in(area)?))
+    }
+
     /// Where the page's own letters of each line of the open box end: the right edge of the last mark of
     /// ink in the line's box, in page points. **Not the line's box edge**, which can run well past its
     /// letters (a table cell's padding): the invisible rows are spread to the letters. Empty - no fit -
@@ -16153,6 +16234,15 @@ impl PagifyApp {
         // A line the page draws as shapes stays on the page; its words in the box's text must
         // not be painted over those shapes once the rest of the box is drawn.
         let frozen = edit.frozen.clone();
+        // **Lined up as Apply will put them**: once another alignment is chosen, each row is placed
+        // by its ink in the paragraph's box (`paragraph_align::offsets`), so the choice shows while
+        // editing, not only once applied.
+        let aligning = in_place_now && edit.align != edit.align_was;
+        let align = edit.align;
+        let box_left_px = view.to_screen(AppPoint { x: edit.rect.left.min(edit.rect.right) as f64, y: 0.0 }).x - rect.left();
+        let box_width_px = (edit.rect.right - edit.rect.left).abs() * view.scale;
+        let row_inks = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let remember_inks = row_inks.clone();
         let drawn_rows = std::rc::Rc::new(std::cell::RefCell::new(None));
         let remember_rows = drawn_rows.clone();
         let mut layouter = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
@@ -16193,8 +16283,28 @@ impl PagifyApp {
             } else {
                 in_place::spread_rows(galley, &tracking_px)
             };
+            // Each row's ink: where its first letter starts and how wide its letters are.
+            let inks: Vec<(f32, f32)> = galley
+                .rows
+                .iter()
+                .map(|placed| {
+                    let glyphs = &placed.row.glyphs;
+                    match (glyphs.iter().find(|g| !g.chr.is_whitespace()), glyphs.iter().rev().find(|g| !g.chr.is_whitespace())) {
+                        (Some(first), Some(last)) => (first.pos.x, last.pos.x + last.advance_width - first.pos.x),
+                        _ => (0.0, 0.0),
+                    }
+                })
+                .collect();
+            let mut placed = targets.clone();
+            if aligning {
+                for (target, (lead, width)) in placed.iter_mut().zip(&inks) {
+                    let at = pagify_shell::paragraph_align::offsets(&[*width], box_left_px, box_width_px, align);
+                    target.left = at.first().copied().unwrap_or(target.left + lead) - lead;
+                }
+            }
+            *remember_inks.borrow_mut() = inks;
             let galley = if in_place_now {
-                let galley = in_place::snap_rows(galley, &targets, leading);
+                let galley = in_place::snap_rows(galley, &placed, leading);
                 if same { in_place::unseen(galley) } else { in_place::unseen_rows(galley, &frozen) }
             } else {
                 galley
@@ -16238,6 +16348,7 @@ impl PagifyApp {
             // explicitly.
             let response = ui.put(rect, editor.id(id).frame(egui::Frame::NONE));
             edit.shown = drawn_rows.borrow_mut().take().map(|galley| (galley, rect.min));
+            edit.row_widths_pt = row_inks.borrow().iter().map(|(_, width)| width / view.scale.max(0.01)).collect();
             // Remembered each frame the page-without-the-words is under the typed words, so
             // that applying them can leave this look up until the page is drawn again.
             if let (Some(picture), Some((galley, at)), true) =
@@ -16732,7 +16843,7 @@ fn wrap_typed_last_line(
         let range = self.edit_selection();
         let (look, gates) = {
             let Some(e) = self.tab().edit.editing_run.as_ref() else { return };
-            (edit_text_look(e, range.clone()), edit_text_gates(e.drawn))
+            (edit_text_look(e, range.clone()), edit_text_gates(e))
         };
         let changes = tsp::show(ui, egui::Id::new(("text-style", new_box)), &look, &gates);
 
@@ -16820,6 +16931,11 @@ fn wrap_typed_last_line(
             };
             if let (Some(picked), Some(b)) = (picked, self.tab_mut().edit.new_text_box.as_mut()) {
                 b.align = picked;
+            }
+        }
+        if let (StyleTarget::EditText, Some(a)) = (target, changes.align) {
+            if let Some(e) = self.tab_mut().edit.editing_run.as_mut() {
+                e.align = line_align(a);
             }
         }
     }
@@ -17648,22 +17764,56 @@ fn edit_text_look(edit: &EditingRun, range: std::ops::Range<usize>) -> text_styl
         letter_spacing: of.letter_spacing_pt,
         width: of.width_pct,
         baseline: of.baseline_pt,
-        align: None,
+        align: Some(panel_align(edit.align)),
+    }
+}
+
+fn panel_align(align: pagify_shell::paragraph_align::LineAlign) -> text_style_panel::Align {
+    use pagify_shell::paragraph_align::LineAlign as L;
+    match align {
+        L::Left => text_style_panel::Align::Left,
+        L::Center => text_style_panel::Align::Center,
+        L::Right => text_style_panel::Align::Right,
+        L::Justify => text_style_panel::Align::Justify,
+    }
+}
+
+fn line_align(align: text_style_panel::Align) -> pagify_shell::paragraph_align::LineAlign {
+    use pagify_shell::paragraph_align::LineAlign as L;
+    match align {
+        text_style_panel::Align::Left => L::Left,
+        text_style_panel::Align::Center => L::Center,
+        text_style_panel::Align::Right => L::Right,
+        text_style_panel::Align::Justify => L::Justify,
     }
 }
 
 /// Which controls of the Edit Text panel work: every character style does, the paragraph
 /// styles say that they come next, and drawn lettering — replaced in one look — keeps
 /// only the font, its size, its colour, Bold and Italic.
-fn edit_text_gates(drawn: bool) -> text_style_panel::Gates {
+fn edit_text_gates(edit: &EditingRun) -> text_style_panel::Gates {
+    let drawn = edit.drawn;
     let later = || Some("Comes with paragraph styles, the next stage.".to_string());
-    let alignment =
-        || Some("Alignment is for new text boxes for now. Drag the side handles of the box to set where the lines wrap.".to_string());
+    // **Left, centre and right move the lines** (`paragraph_align`), whose words stay as they
+    // are. Justifying a paragraph that is not, or changing one that is, writes its lines again,
+    // which is not built; nor is moving the lines Pagify underlined with their words.
+    let underlined = edit.rich.runs().iter().any(|(_, look)| look.underline || look.strike);
+    let alignment = if drawn {
+        Some("Drawn lettering is replaced in one look.".to_string())
+    } else if !edit.in_place() {
+        Some("This box cannot be lined up on the page.".to_string())
+    } else if edit.align_was == pagify_shell::paragraph_align::LineAlign::Justify {
+        Some("A justified paragraph keeps its alignment for now.".to_string())
+    } else if underlined {
+        Some("Lines with an underline or a strike-through keep their alignment for now.".to_string())
+    } else {
+        None
+    };
     let mut gates = text_style_panel::Gates {
-        left: alignment(),
-        center: alignment(),
-        right: alignment(),
-        justify: later(),
+        left: alignment.clone(),
+        center: alignment.clone(),
+        right: alignment,
+        justify: Some("Justifying a page's own paragraph comes next.".to_string()),
         indent: later(),
         lists: later(),
         line_spacing: later(),

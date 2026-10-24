@@ -526,3 +526,87 @@ fn a_one_line_boxs_frame_sits_on_its_letters_not_its_padding() {
     assert!(boxed - ink > 20.0, "test assumption: the text box runs past its letters");
     assert!(frame.right() - ink < 8.0, "the frame ends at {}, the letters at {ink}", frame.right());
 }
+
+/// The ink centre of each of `texts` on page 1, in page points.
+fn ink_centres(app: &mut PagifyApp, texts: &[&str]) -> Vec<f32> {
+    let chars = app.characters(0).expect("characters").clone();
+    texts
+        .iter()
+        .map(|text| {
+            let range = chars.find(text).first().cloned().unwrap_or_else(|| panic!("{text:?} is not on the page"));
+            let (first, last) = (chars.line_rects(range.start..range.start + 1), chars.line_rects(range.end - 1..range.end));
+            (first.first().map_or(0.0, |r| r.left) + last.first().map_or(0.0, |r| r.right)) / 2.0
+        })
+        .collect()
+}
+
+#[test]
+fn a_paragraph_opens_showing_its_own_alignment() {
+    let app = opened(open_page("align-opens", &LINES, ""));
+    let edit = app.tab().edit.editing_run.as_ref().expect("an editor");
+    assert_eq!(edit.align_was, pagify_shell::paragraph_align::LineAlign::Left);
+    assert_eq!(crate::edit_text_look(edit, 0..1).align, Some(crate::text_style_panel::Align::Left));
+    assert!(crate::edit_text_gates(edit).center.is_none(), "centre is offered");
+}
+
+/// Centre moves each line by its own distance, its words untouched, and one undo puts it back.
+#[test]
+fn centre_moves_each_line_and_one_undo_takes_it_back() {
+    let mut app = opened(open_page("align-centre", &LINES, ""));
+    let texts = ["alpha beta gamma", "delta epsilon zeta", "eta theta iota"];
+    let before = ink_centres(&mut app, &texts);
+    let (box_left, box_right) = {
+        let edit = app.tab_mut().edit.editing_run.as_mut().expect("an editor");
+        edit.align = pagify_shell::paragraph_align::LineAlign::Center;
+        (edit.rect.left, edit.rect.right)
+    };
+    let middle = (box_left + box_right) / 2.0;
+    app.apply_editing_page();
+    let after = ink_centres(&mut app, &texts);
+    for (text, centre) in texts.iter().zip(&after) {
+        assert!((centre - middle).abs() < 0.6, "{text:?} is centred at {centre}, the box's middle is {middle}");
+    }
+    assert!(before.iter().zip(&after).any(|(b, a)| (b - a).abs() > 5.0), "test assumption: the lines were not centred before");
+    app.submit("undo");
+    let undone = ink_centres(&mut app, &texts);
+    for (b, u) in before.iter().zip(&undone) {
+        assert!((b - u).abs() < 0.3, "after one undo a line is centred at {u}, it was at {b}");
+    }
+}
+
+/// The alignment chosen shows in the box while editing, before Apply.
+#[test]
+fn the_preview_shows_the_alignment_before_apply() {
+    let mut app = opened(open_page("align-preview", &LINES, ""));
+    let (left, right) = {
+        let edit = app.tab_mut().edit.editing_run.as_mut().expect("an editor");
+        edit.align = pagify_shell::paragraph_align::LineAlign::Center;
+        (edit.rect.left, edit.rect.right)
+    };
+    let mut h = harness_from(app);
+    h.run_steps(4);
+    let view = h.state().tab().view_state.last_view.expect("the page was drawn");
+    let middle = view.to_screen(AppPoint { x: ((left + right) / 2.0) as f64, y: 0.0 }).x;
+    let (galley, at) = h.state().tab().edit.editing_run.as_ref().expect("an editor").shown.clone().expect("drawn");
+    for row in &galley.rows {
+        let glyphs = &row.row.glyphs;
+        let first = glyphs.iter().find(|g| !g.chr.is_whitespace()).expect("a letter");
+        let last = glyphs.iter().rev().find(|g| !g.chr.is_whitespace()).expect("a letter");
+        let centre = at.x + row.pos.x + (first.pos.x + last.pos.x + last.advance_width) / 2.0;
+        assert!((centre - middle).abs() < 1.5, "a row is centred at {centre}, the box's middle at {middle}");
+    }
+}
+
+#[test]
+fn drawn_lettering_and_justified_paragraphs_keep_alignment_greyed() {
+    let app = opened(open_page("align-gates", &LINES, ""));
+    let mut edit = app.tab().edit.editing_run.as_ref().expect("an editor").clone();
+    edit.drawn = true;
+    assert!(crate::edit_text_gates(&edit).center.is_some());
+    edit.drawn = false;
+    edit.align_was = pagify_shell::paragraph_align::LineAlign::Justify;
+    assert!(crate::edit_text_gates(&edit).center.is_some());
+    edit.align_was = pagify_shell::paragraph_align::LineAlign::Left;
+    assert!(crate::edit_text_gates(&edit).center.is_none());
+    assert!(crate::edit_text_gates(&edit).justify.is_some(), "justifying is not built");
+}

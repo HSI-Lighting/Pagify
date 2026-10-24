@@ -102,6 +102,7 @@ fn collect_pages(command: &pdf_core::command::Command, out: &mut Vec<usize>) {
         | C::ReplaceTextLines { page_index, .. }
         | C::MoveObject { page_index, .. }
         | C::MoveObjects { page_index, .. }
+        | C::MoveObjectsEach { page_index, .. }
         | C::ScaleObjects { page_index, .. }
         | C::ScaleObject { page_index, .. }
         | C::RotateObject { page_index, .. }

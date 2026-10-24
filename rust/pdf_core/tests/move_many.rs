@@ -515,3 +515,44 @@ fn the_vivo_drawing_moved_out_of_its_frame_is_still_drawn() {
     assert!(left > 1000, "the drawing did not leave: {left}");
     assert!(arrived * 10 >= left * 9, "only {arrived} of the {left} dark pixels arrived — the rest were clipped away");
 }
+
+/// The lines of a paragraph centred or set right move by different amounts: **one command, each
+/// object by its own distance**, one undo, and nothing else on the page moves.
+#[test]
+fn objects_move_by_their_own_distances_in_one_command() {
+    let Some(()) = skip_without_pdfium() else { return };
+    let _lock = serial();
+    let mut doc = busy_page();
+    let before = top_level(&doc);
+    let (a, b) = (before[0].object, before[1].object);
+    let (by_a, by_b) = (Point { x: 20.0, y: 0.0 }, Point { x: 5.0, y: 0.0 });
+    let words = texts(&doc);
+
+    let mut history = CommandHistory::new(8);
+    history
+        .execute(Command::MoveObjectsEach { page_index: 0, moves: vec![(a, by_a), (b, by_b)] }, &mut doc)
+        .expect("move each");
+    let after = top_level(&doc);
+    assert_eq!(after.len(), before.len());
+    for (was, now) in before.iter().zip(&after) {
+        let want = if was.object == a { shifted(was.rect, by_a) } else if was.object == b { shifted(was.rect, by_b) } else { was.rect };
+        assert!(near(now.rect, want, 0.5), "object {} is at {:?}, wanted {:?}", was.object, now.rect, want);
+    }
+    assert_eq!(texts(&doc), words, "the words changed");
+
+    history.undo(&mut doc).expect("undo").expect("a step to undo");
+    assert_moved(&before, &top_level(&doc), &[], by_a);
+    assert!(history.undo(&mut doc).expect("undo").is_none(), "it was more than one step");
+}
+
+#[test]
+fn one_object_asked_to_move_two_ways_is_refused_and_nothing_moves() {
+    let Some(()) = skip_without_pdfium() else { return };
+    let _lock = serial();
+    let mut doc = busy_page();
+    let before = top_level(&doc);
+    let a = before[0].object;
+    let moves = vec![(a, Point { x: 20.0, y: 0.0 }), (a, Point { x: 5.0, y: 0.0 })];
+    assert!(CommandHistory::new(8).execute(Command::MoveObjectsEach { page_index: 0, moves }, &mut doc).is_err());
+    assert_moved(&before, &top_level(&doc), &[], Point { x: 0.0, y: 0.0 });
+}

@@ -278,6 +278,10 @@ impl crate::PagifyApp {
             look: None,
             line_tracking: vec![looks.get(&run.object).map_or(0.0, |look| look.tracking)],
             frame: None,
+            align: Default::default(),
+            align_was: Default::default(),
+            line_inks: if heavy.is_some() { vec![None] } else { vec![self.line_ink(page, &run.rect)] },
+            row_widths_pt: Vec::new(),
             piece_texts: opened.piece_texts,
             font_objects: opened.font_objects,
         });
@@ -697,6 +701,12 @@ impl crate::PagifyApp {
             .iter()
             .map(|line| line.objects.iter().find_map(|o| looks.get(o)).map_or(0.0, |look| look.tracking))
             .collect();
+        // Where each line shows its ink, and the alignment the paragraph has: what the panel
+        // shows, and what another alignment moves the lines from.
+        let line_inks: Vec<Option<(f32, f32)>> = lines.iter().map(|line| self.line_ink(page, &line.rect)).collect();
+        let inks: Vec<pagify_shell::paragraph_align::LineInk> =
+            line_inks.iter().flatten().map(|&(left, right)| pagify_shell::paragraph_align::LineInk { left, right }).collect();
+        let align_was = pagify_shell::paragraph_align::detect(&inks, size, justify);
         let edit = EditingRun {
             page,
             object: seed_object,
@@ -730,6 +740,10 @@ impl crate::PagifyApp {
             look: None,
             line_tracking,
             frame: None,
+            align: align_was,
+            align_was,
+            line_inks,
+            row_widths_pt: Vec::new(),
             piece_texts: opened.piece_texts,
             font_objects: opened.font_objects,
         };

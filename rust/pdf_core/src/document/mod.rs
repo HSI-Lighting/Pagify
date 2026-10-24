@@ -1378,6 +1378,14 @@ pub trait DocumentMut {
         Err(PdfError::Unsupported("moving several objects in one go"))
     }
 
+    /// Move several objects of one page, **each by its own distance**, in one edit — see
+    /// [`crate::command::Command::MoveObjectsEach`]: the lines of a paragraph centred or set right
+    /// move by different amounts. A refusal changes nothing, and the command then moves them one
+    /// at a time.
+    fn move_objects_each_mut(&mut self, _page_index: usize, _moves: &[(usize, Point)]) -> Result<()> {
+        Err(PdfError::Unsupported("moving several objects in one go"))
+    }
+
     /// See [`Document::restack`].
     fn restack_mut(&mut self, _page_index: usize, _object: usize, _where_to: Stacking) -> Result<()> {
         Err(PdfError::Unsupported("changing the drawing order"))
