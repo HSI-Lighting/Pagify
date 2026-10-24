@@ -14,12 +14,12 @@ path = "src/main.rs"
 # same code that will check it in Pagify. Nothing here touches PDFium.
 [dependencies]
 pdf_core.workspace = true
-sm2 = { version = "0.13.3", features = ["dsa", "pkcs8"] }
+sm2 = { version = "0.14", features = ["dsa", "pkcs8"] }
 x509-cert = { version = "0.2", default-features = false, features = ["std"] }
 der = { version = "0.7", features = ["oid"] }
 spki = "0.7"
 const-oid = { version = "0.9", features = ["db"] }
-pkcs8 = { version = "0.10", features = ["encryption", "std"] }
+pkcs8 = { version = "0.11", features = ["encryption", "getrandom", "std"] }
 p12 = "0.6"
 rand_core = { version = "0.6", features = ["getrandom"] }
 zeroize = "1"

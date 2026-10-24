@@ -47,6 +47,7 @@ use der::{Decode, Encode};
 use pdf_core::pdf::sm::{self, DISTINGUISHING_ID};
 use pdf_core::pdf::trust::{self, Anchors, Trust};
 use sm2::dsa::signature::Signer;
+use sm2::elliptic_curve::Generate as _;
 use sm2::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey};
 use x509_cert::Certificate;
 use zeroize::Zeroizing;
@@ -136,7 +137,7 @@ fn root_new(options: &Options) -> Outcome<()> {
     println!("The root's passphrase. There is no recovery: lose it and the root is lost.");
     let passphrase = prompt_twice("root passphrase")?;
 
-    let secret = sm2::SecretKey::random(&mut rand_core::OsRng);
+    let secret = sm2::SecretKey::generate();
     let key = sm2::dsa::SigningKey::new(DISTINGUISHING_ID, &secret)?;
     let name = parse_name(subject)?;
     let certificate = make_certificate(
@@ -148,7 +149,7 @@ fn root_new(options: &Options) -> Outcome<()> {
         years,
         true,
     )?;
-    let encrypted = secret.to_pkcs8_encrypted_der(&mut rand_core::OsRng, passphrase.as_bytes())?;
+    let encrypted = secret.to_pkcs8_encrypted_der(passphrase.as_bytes())?;
 
     write_new(&dir.join("root.der"), &certificate.to_der()?)?;
     write_new(&dir.join("root.key"), encrypted.as_bytes())?;
@@ -213,7 +214,7 @@ fn root_restore_check(options: &Options) -> Outcome<()> {
     }
 
     // A throwaway leaf from the restored root, checked the way Pagify checks.
-    let throwaway = sm2::SecretKey::random(&mut rand_core::OsRng);
+    let throwaway = sm2::SecretKey::generate();
     let leaf = make_certificate(
         &root.tbs_certificate.subject,
         &parse_name("CN=restore check (throwaway),O=Pagify")?,
@@ -271,7 +272,7 @@ fn leaf_issue(options: &Options) -> Outcome<()> {
     let key = sm2::dsa::SigningKey::new(DISTINGUISHING_ID, &secret)?;
 
     let serial = next_serial(&dir)?;
-    let leaf_secret = sm2::SecretKey::random(&mut rand_core::OsRng);
+    let leaf_secret = sm2::SecretKey::generate();
     let leaf = make_certificate(
         &root.tbs_certificate.subject,
         &parse_name(subject)?,
@@ -510,7 +511,7 @@ mod tests {
     use super::*;
 
     fn root_and_key() -> (Certificate, sm2::dsa::SigningKey, Vec<u8>) {
-        let secret = sm2::SecretKey::random(&mut rand_core::OsRng);
+        let secret = sm2::SecretKey::generate();
         let key = sm2::dsa::SigningKey::new(DISTINGUISHING_ID, &secret).unwrap();
         let name = parse_name("CN=Test Root,O=Pagify").unwrap();
         let root = make_certificate(&name, &name, &key, &secret.public_key(), &random_serial(), 20, true).unwrap();
@@ -523,7 +524,7 @@ mod tests {
     #[test]
     fn an_issued_leaf_is_pinned_under_its_root_and_not_under_a_lookalike() {
         let (root, key, der) = root_and_key();
-        let leaf_secret = sm2::SecretKey::random(&mut rand_core::OsRng);
+        let leaf_secret = sm2::SecretKey::generate();
         let leaf = make_certificate(
             &root.tbs_certificate.subject,
             &parse_name("CN=Alice,O=Pagify").unwrap(),
@@ -550,7 +551,7 @@ mod tests {
     #[test]
     fn the_identity_written_reads_back_through_pagify() {
         let (root, key, _) = root_and_key();
-        let leaf_secret = sm2::SecretKey::random(&mut rand_core::OsRng);
+        let leaf_secret = sm2::SecretKey::generate();
         let leaf = make_certificate(
             &root.tbs_certificate.subject,
             &parse_name("CN=Bob,O=Pagify").unwrap(),
@@ -572,8 +573,8 @@ mod tests {
     /// The encrypted root key opens with its passphrase and not without.
     #[test]
     fn the_root_key_is_encrypted_under_its_passphrase() {
-        let secret = sm2::SecretKey::random(&mut rand_core::OsRng);
-        let encrypted = secret.to_pkcs8_encrypted_der(&mut rand_core::OsRng, b"correct horse").unwrap();
+        let secret = sm2::SecretKey::generate();
+        let encrypted = secret.to_pkcs8_encrypted_der(b"correct horse").unwrap();
         let back = sm2::SecretKey::from_pkcs8_encrypted_der(encrypted.as_bytes(), b"correct horse").unwrap();
         assert_eq!(back.to_bytes(), secret.to_bytes());
         assert!(sm2::SecretKey::from_pkcs8_encrypted_der(encrypted.as_bytes(), b"wrong").is_err());

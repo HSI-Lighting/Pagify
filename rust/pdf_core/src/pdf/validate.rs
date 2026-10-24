@@ -566,12 +566,13 @@ mod words {
             SECP_256_R_1 => " P-256".into(),
             SECP_384_R_1 => " P-384".into(),
             SECP_521_R_1 => " P-521".into(),
-            c if c == sm2::Sm2::OID => " SM2".into(),
+            c if c.as_bytes() == sm2::Sm2::OID.as_bytes() => " SM2".into(),
             other => format!(" {other}"),
         }
     }
 
-    // `sm2::Sm2::OID` needs the trait in scope.
+    // `sm2::Sm2::OID` needs the trait in scope. It is a newer `const-oid` than the
+    // certificate's, so the two are compared by their encoded bytes.
     use sm2::pkcs8::AssociatedOid as _;
 }
 

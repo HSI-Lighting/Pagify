@@ -107,10 +107,12 @@ sha2 = "0.10"
 # itself — see `crate::sign`. None of this is optional: a signature that is
 # not one is worse than none at all. The signature is SM2 over SM3 and nothing
 # else (`pdf/sm.rs`); there is no `rsa` here, and with it no RUSTSEC-2023-0071.
-# `sm2` 0.13 and `sm3` 0.4 are the releases on the same `signature 2` /
-# `digest 0.10` generation as `cms` 0.2 and `sha2` 0.10 — the day `cms` moves
-# to `signature 3`, `sm2` moves to 0.14 in the same commit, or the trait
-# bounds fail in ways that look unrelated.
+# `sm2` 0.14 and `sm3` 0.5 are a generation ahead of `cms` 0.2, `x509-cert`
+# 0.2 and `der` 0.7 (`signature 3`, `der 0.8`). They moved on 2026-10-24
+# because `sm2` 0.13's `crypto-bigint` 0.5 is not constant-time
+# (RUSTSEC-2026-0387). The two generations meet only as bytes: a signature's
+# 64 bytes, a key's PKCS#8 DER, an OID's encoding. Keep it that way; when
+# `cms` moves to `der 0.8`, the rest follow it.
 # `cms` without its `builder` feature: the builder cannot describe an SM2
 # signer (see `detached_signature`), and the feature drags in `rsa`, `aes`,
 # `sha1` and `sha3` for key transport nothing here does.
@@ -123,8 +125,8 @@ p12 = "0.6"
 argon2 = "0.5"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
-sm2 = { version = "0.13.3", features = ["dsa", "pkcs8", "pem"] }
-sm3 = "0.4.2"
+sm2 = { version = "0.14", features = ["dsa", "pkcs8", "pem"] }
+sm3 = "0.5"
 
 # No `lopdf`. PDFium is the single writer: two independent object models writing
 # one file is a corruption class that is very hard to diagnose, and PDFium covers
