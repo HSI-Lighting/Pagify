@@ -1965,6 +1965,11 @@ struct EditingRun {
     /// [`in_place::Settling`]). Kept here, on the box, so that a box closed any other way - an
     /// undo, an edit elsewhere, Escape - takes it with it: those words were never applied.
     look: Option<in_place::Settling>,
+    /// Each line's spacing apart from its `Tc`, in points after each glyph (`RunTextLook::tracking`):
+    /// what the box adds to the rows it draws so retyped words sit where the page puts them.
+    line_tracking: Vec<f32>,
+    /// The box's frame on screen as last drawn: its rows, or the width its handles were dragged to.
+    frame: Option<egui::Rect>,
     /// Each piece's words as the page draws them: what a piece restyled in place is
     /// written again with.
     piece_texts: std::collections::HashMap<usize, String>,
@@ -2094,6 +2099,17 @@ enum TextAlign {
     Left,
     Center,
     Right,
+}
+
+impl TextAlign {
+    /// The same alignment, as egui lines up a laid-out job's rows.
+    fn egui(&self) -> egui::Align {
+        match self {
+            TextAlign::Left => egui::Align::LEFT,
+            TextAlign::Center => egui::Align::Center,
+            TextAlign::Right => egui::Align::RIGHT,
+        }
+    }
 }
 
 impl From<TextAlign> for pagify_shell::text_layout::RowAlign {
@@ -13083,6 +13099,8 @@ impl PagifyApp {
             baselines: Vec::new(),
             shown: None,
             look: None,
+            line_tracking: Vec::new(),
+            frame: None,
             piece_texts: looks.piece_texts,
             font_objects: looks.font_objects,
         });
@@ -14002,7 +14020,7 @@ impl PagifyApp {
         // The rows the box showed, laid out again with the very arguments it drew with.
         let px_per_pt = self.tab().view_state.last_view.map(|v| v.scale).unwrap_or(1.0).max(0.01);
         let ready = self.faces_state.box_faces_ready.clone();
-        let galley = ctx.fonts_mut(|f| f.layout_job(rich_preview::box_job(rich, rich.text(), px_per_pt, &ready, new_text.wrap_px)));
+        let galley = ctx.fonts_mut(|f| f.layout_job(rich_preview::box_job(rich, rich.text(), px_per_pt, &ready, new_text.wrap_px, new_text.align.egui())));
         let margin_pt = BOX_MARGIN_PX as f32 / px_per_pt;
         let normal: Vec<bool> = (0..chars.len()).map(|i| rich.look_at(i + 1).script == Script::Normal).collect();
         let mut rows = Vec::with_capacity(galley.rows.len());
@@ -16012,7 +16030,8 @@ impl PagifyApp {
         // is and the others fall below it, so the box grows downwards — it used
         // to stay one line tall, with the wrapped lines hanging out of its
         // bottom.
-        let extra_lines = edit.buffer.split('\n').count().saturating_sub(1);
+        // Lines beyond the ones the box opened with: those are already in its height.
+        let extra_lines = edit.buffer.split('\n').count().saturating_sub(edit.lines.len().max(1));
         let row_height = ui.fonts_mut(|f| f.row_height(&font_id));
         let rect = egui::Rect::from_min_size(
             egui::pos2(top_left.x + edit.box_resize.left_shift_pt * view.scale, bottom_right.y - height),
@@ -16035,12 +16054,7 @@ impl PagifyApp {
         // bordered box around what is about to change — for a brand new text
         // box; the run/paragraph editor here never did. Same border, same
         // reason: see the scope before committing to it, not after.
-        ui.painter().rect_stroke(
-            rect.expand(1.0),
-            0.0,
-            egui::Stroke::new(1.0, theme::violet_bright()),
-            egui::StrokeKind::Outside,
-        );
+        // (The frame itself is drawn once the box's rows are laid out: see `frame` below.)
 
         // **Justified, the same as the page it came from — real
         // justification, not left-aligned and ragged.** `egui::TextEdit`
@@ -16125,6 +16139,17 @@ impl PagifyApp {
             _ => glyph_size * 1.2,
         };
         let (original, look_dirty) = (edit.original.clone(), edit.look_dirty());
+        // The page's spacing apart from `Tc`, per row, in the box's pixels: what the looks' letter
+        // spacing (`Tc`) does not hold. A justified paragraph's rows but its last are already
+        // spread to their width.
+        let px_per_pt = glyph_size / edit.style.size.filter(|s| *s > 0.0).unwrap_or(12.0);
+        let last_line = edit.line_tracking.len().saturating_sub(1);
+        let tracking_px: Vec<f32> = edit
+            .line_tracking
+            .iter()
+            .enumerate()
+            .map(|(line, pt)| if justify && line < last_line { 0.0 } else { pt * px_per_pt })
+            .collect();
         // A line the page draws as shapes stays on the page; its words in the box's text must
         // not be painted over those shapes once the rest of the box is drawn.
         let frozen = edit.frozen.clone();
@@ -16160,10 +16185,15 @@ impl PagifyApp {
             };
             let galley = ui.fonts_mut(|f| f.layout_job(job));
             // On the page: rows onto its lines, and - while it is still the page's own
-            // words, spread to the page's own widths - drawn in no colour at all.
+            // words, spread to the page's own widths - drawn in no colour at all. Words it draws
+            // itself take the page's spacing apart from `Tc` too.
+            let same = in_place::unchanged(buf.as_str(), &original, look_dirty);
+            let galley = if in_place_now && same {
+                in_place::fit_rows(galley, &widths)
+            } else {
+                in_place::spread_rows(galley, &tracking_px)
+            };
             let galley = if in_place_now {
-                let same = in_place::unchanged(buf.as_str(), &original, look_dirty);
-                let galley = if same { in_place::fit_rows(galley, &widths) } else { galley };
                 let galley = in_place::snap_rows(galley, &targets, leading);
                 if same { in_place::unseen(galley) } else { in_place::unseen_rows(galley, &frozen) }
             } else {
@@ -16247,6 +16277,24 @@ impl PagifyApp {
         ui.style_mut().visuals.override_text_color = None;
         ui.style_mut().visuals.selection.stroke.color = selection_ink;
 
+        // **The frame hugs what the box draws**: on the page, its rows, which sit on the page's
+        // own lines - not the text box's rectangle, which runs past the letters of a padded table
+        // cell. A width the handles were dragged to is the frame's width, and a box with paper under
+        // it is framed where the paper is.
+        let frame = match (&edit.shown, edit.box_resize.width_pt) {
+            (Some((galley, at)), None) if in_place_now => {
+                egui::Rect::from_min_size(*at, galley.rect.size().max(egui::vec2(4.0, 4.0)))
+            }
+            _ => rect,
+        };
+        edit.frame = Some(frame);
+        ui.painter().rect_stroke(
+            frame.expand(1.0),
+            0.0,
+            egui::Stroke::new(1.0, theme::violet_bright()),
+            egui::StrokeKind::Outside,
+        );
+
         // **Handles on the left and right edges: the box is a width to wrap the
         // words to**, so the same words can sit on one line or several. Declared
         // after the page's own response, so a press on one is the handle's and
@@ -16256,8 +16304,8 @@ impl PagifyApp {
             let scale = view.scale.max(0.01);
             for handle in [Handle::Left, Handle::Right] {
                 let at = egui::pos2(
-                    if handle == Handle::Left { rect.left() } else { rect.right() },
-                    rect.center().y,
+                    if handle == Handle::Left { frame.left() } else { frame.right() },
+                    frame.center().y,
                 );
                 let grip = ui.interact(
                     egui::Rect::from_center_size(at, egui::vec2(14.0, 18.0)),
@@ -16268,7 +16316,8 @@ impl PagifyApp {
                     ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::ResizeHorizontal);
                 }
                 if grip.dragged() {
-                    let current = rect.width() / scale;
+                    // From where the handle is seen, or the first drag jumps to the box's padding.
+                    let current = frame.width() / scale;
                     let dragged = grip.drag_delta().x / scale;
                     let wanted = if handle == Handle::Left { current - dragged } else { current + dragged };
                     let width = wanted.max(MIN_RUN_BOX_PT);
@@ -16482,11 +16531,12 @@ fn wrap_typed_last_line(
         // decoration (`rich_preview::box_job`) — the rows Add to Page writes.
         let px_per_pt = view.scale.max(0.01);
         let model = new_text.rich.clone();
+        let align = new_text.align.egui();
         let wrap = std::cell::Cell::new(new_text.wrap_px);
         let wrapped_at = &wrap;
         let mut layouter = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
             wrapped_at.set(wrap_width);
-            let job = rich_preview::box_job(&model, buf.as_str(), px_per_pt, &ready, wrap_width);
+            let job = rich_preview::box_job(&model, buf.as_str(), px_per_pt, &ready, wrap_width, align);
             ui.fonts_mut(|f| f.layout_job(job))
         };
         let response = ui.put(

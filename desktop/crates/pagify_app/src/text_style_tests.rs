@@ -125,7 +125,7 @@ fn the_box_draws_each_run_in_its_face_size_and_colour() {
     let ready: std::collections::BTreeSet<String> = ["Montserrat-Regular".to_string()].into();
     let family = egui::FontFamily::Name(rich_preview::face_family("Montserrat-Regular").into());
 
-    let job = rich_preview::box_job(&rich, "ab", 2.0, &ready, 500.0);
+    let job = rich_preview::box_job(&rich, "ab", 2.0, &ready, 500.0, egui::Align::LEFT);
     let b = &job.sections[1].format;
     assert_eq!(b.font_id, egui::FontId::new(40.0, family.clone()));
     assert_eq!(b.color, egui::Color32::from_rgb(255, 0, 0));
@@ -133,11 +133,11 @@ fn the_box_draws_each_run_in_its_face_size_and_colour() {
     assert!(job.sections[0].format.underline.width == 0.0, "a plain run is underlined");
 
     rich.set_char(0..1, &CharChange { script: Some(Script::Super), ..Default::default() });
-    let job = rich_preview::box_job(&rich, "ab", 2.0, &ready, 500.0);
+    let job = rich_preview::box_job(&rich, "ab", 2.0, &ready, 500.0, egui::Align::LEFT);
     assert_eq!(job.sections[0].format.valign, egui::Align::TOP);
     assert!((job.sections[0].format.font_id.size - 10.0 * 2.0 * 0.58).abs() < 1e-3);
 
-    let job = rich_preview::box_job(&rich, "ab", 2.0, &Default::default(), 500.0);
+    let job = rich_preview::box_job(&rich, "ab", 2.0, &Default::default(), 500.0, egui::Align::LEFT);
     assert_eq!(job.sections[1].format.font_id.family, egui::FontFamily::Proportional, "a face not yet installed is drawn in");
 }
 
@@ -160,7 +160,7 @@ fn a_long_box_at_another_width_is_shaped_once_not_per_letter() {
     pdf_core::text::shape(face, &text).expect("shaped");
     let once = started.elapsed();
     let started = std::time::Instant::now();
-    let job = rich_preview::box_job(&rich, &text, 1.5, &Default::default(), 400.0);
+    let job = rich_preview::box_job(&rich, &text, 1.5, &Default::default(), 400.0, egui::Align::LEFT);
     let laid_out = started.elapsed();
     eprintln!("shaping {} letters once {once:?}; the box's layout {laid_out:?}", text.chars().count());
     assert_eq!(job.sections.len(), text.chars().count(), "test assumption: a section per letter");
@@ -616,4 +616,16 @@ fn a_drawn_word_names_the_face_its_replacement_is_written_in() {
     let shown = h.state().tab().edit.editing_run.as_ref().expect("an editor").current_face.clone();
     assert_eq!(shown.as_deref(), Some(expected.as_str()));
     assert!(h.query_by_label(&format!("Font {expected}")).is_some(), "the font field does not name {expected}");
+}
+
+/// A new box's preview lines its rows up the way the box is aligned, as Add to Page will: it
+/// used to show every row at the left whatever was chosen, and only the page showed the change.
+#[test]
+fn a_new_boxs_preview_is_aligned_as_the_box_is() {
+    let mut rich = pagify_shell::rich_text::RichText::new(pagify_shell::rich_text::CharLook::plain("Helvetica", 12.0, [0, 0, 0, 255]));
+    rich.edit("ab\ncd");
+    for align in [egui::Align::LEFT, egui::Align::Center, egui::Align::RIGHT] {
+        let job = rich_preview::box_job(&rich, "ab\ncd", 2.0, &Default::default(), 500.0, align);
+        assert_eq!(job.halign, align);
+    }
 }

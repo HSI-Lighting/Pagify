@@ -276,6 +276,8 @@ impl crate::PagifyApp {
             baselines: vec![run.origin.y],
             shown: None,
             look: None,
+            line_tracking: vec![looks.get(&run.object).map_or(0.0, |look| look.tracking)],
+            frame: None,
             piece_texts: opened.piece_texts,
             font_objects: opened.font_objects,
         });
@@ -690,6 +692,11 @@ impl crate::PagifyApp {
                     .map_or(line.rect.bottom - (line.rect.bottom - line.rect.top) * 0.2, |run| run.origin.y)
             })
             .collect();
+        // Each line's spacing apart from `Tc`, from the first piece that draws it.
+        let line_tracking: Vec<f32> = lines
+            .iter()
+            .map(|line| line.objects.iter().find_map(|o| looks.get(o)).map_or(0.0, |look| look.tracking))
+            .collect();
         let edit = EditingRun {
             page,
             object: seed_object,
@@ -721,6 +728,8 @@ impl crate::PagifyApp {
             baselines,
             shown: None,
             look: None,
+            line_tracking,
+            frame: None,
             piece_texts: opened.piece_texts,
             font_objects: opened.font_objects,
         };

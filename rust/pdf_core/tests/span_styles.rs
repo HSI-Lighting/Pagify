@@ -985,3 +985,22 @@ fn an_untagged_line_under_words_is_not_read_as_an_underline() {
     let look = looks_of(&doc, &[object])[&object];
     assert!(!look.underline && !look.strike, "a rectangle another program drew was read as ours: {look:?}");
 }
+
+/// A producer that letter-spaces a line writes a `Tc` and a `TJ` number after every glyph that
+/// cancels most of it (§15). The look reads the `Tc` as the letter spacing, which is what Apply
+/// writes back, and the numbers' share apart from it, which Apply carries without being told:
+/// the box needs both to draw the letters where the page has them.
+#[test]
+fn a_producers_tracking_is_read_beside_its_tc() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _serial = serial();
+    let doc = open(b"BT /F1 1 Tf 8 0 0 8 72 700 Tm -0.164 Tc [(H)-124(e)-124(l)-124(l)-124(o)] TJ ET");
+    let hello = run_saying(&runs(&doc), "Hello").object;
+    let look = looks_of(&doc, &[hello])[&hello];
+    assert!((look.char_spacing - -1.312).abs() < 0.01, "Tc in points: {look:?}");
+    assert!((look.tracking - 0.992).abs() < 0.01, "the TJ numbers in points: {look:?}");
+    // A line with no numbers of its own has none.
+    let plain = open(b"BT /F1 12 Tf 72 700 Td 1 Tc (Hello) Tj ET");
+    let hello = run_saying(&runs(&plain), "Hello").object;
+    assert_eq!(looks_of(&plain, &[hello])[&hello].tracking, 0.0);
+}

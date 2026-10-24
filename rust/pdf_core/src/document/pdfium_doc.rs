@@ -1218,9 +1218,23 @@ impl Document for PdfiumDocument {
             let Some(state) = states.get(found.origin.operation) else { continue };
             // Text space to points on the page — the same number the write divides by.
             let scale = if found.scale.abs() > 1e-6 { found.scale } else { 1.0 };
+            // The share of the spacing written as a `TJ` number after each glyph, the way the
+            // writer measures it when it carries those numbers onto retyped words.
+            let width = found
+                .font
+                .as_ref()
+                .zip(fonts.as_ref())
+                .and_then(|(name, dict)| code_width(&file, dict, name))
+                .unwrap_or(1)
+                .max(1);
+            let operation = &operations[found.origin.operation];
+            let count = codes_of(operation, width).len();
+            let tracking = content::tracking(operation, 0..count, width, &vec![false; count])
+                .map_or(0.0, |t| -t.glyph / 1000.0 * state.size * state.horizontal_scale * scale);
             let mut look = crate::document::RunTextLook {
                 // A character's spacing is stretched by the horizontal scaling along with it.
                 char_spacing: state.char_spacing * state.horizontal_scale * scale,
+                tracking,
                 width_pct: state.horizontal_scale * 100.0,
                 rise: state.rise * scale,
                 ..Default::default()

@@ -2795,6 +2795,11 @@ pub struct SpanStyle {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RunTextLook {
     pub char_spacing: f32,
+    /// Points after each glyph that the producer wrote as a `TJ` number rather than as `Tc`
+    /// (`content::tracking`, §15): a letter-spaced line carries one after every glyph, beside a
+    /// `Tc` it cancels. **Never written by Apply**, which carries those numbers with the words; read
+    /// so that whatever draws the words (the Edit Text box) puts them where the page does.
+    pub tracking: f32,
     pub width_pct: f32,
     pub rise: f32,
     pub underline: bool,
@@ -2804,7 +2809,7 @@ pub struct RunTextLook {
 impl Default for RunTextLook {
     /// A piece with no look of its own: no spacing, full width, on the baseline.
     fn default() -> Self {
-        RunTextLook { char_spacing: 0.0, width_pct: 100.0, rise: 0.0, underline: false, strike: false }
+        RunTextLook { char_spacing: 0.0, width_pct: 100.0, rise: 0.0, underline: false, strike: false, tracking: 0.0 }
     }
 }
 

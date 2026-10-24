@@ -456,3 +456,73 @@ fn selecting_in_an_unchanged_box_does_not_show_its_invisible_letters() {
     let highlight = crate::theme::violet().gamma_multiply(0.35);
     assert!(!h.output().shapes.iter().any(|clipped| shows_text_inside(&clipped.shape, area, highlight)), "the selected letters are painted over the page's own");
 }
+
+/// One line as a letter-spacing producer writes it: `-0.15 Tc` and a `TJ` number after every glyph
+/// that cancels it, so the page draws the letters at their own widths.
+fn tracked_line(x: f32, y: f32, words: &str) -> String {
+    let glyphs: Vec<String> = words.chars().map(|c| format!("({c})")).collect();
+    format!("BT /F1 1 Tf 10 0 0 10 {x} {y} Tm -0.15 Tc [{}] TJ ET\n", glyphs.join("-150"))
+}
+
+/// Once typed in, the box's words are drawn by the box. It used to draw them with the page's
+/// `Tc` alone, which the producer's numbers cancel, so they came out squeezed together.
+#[test]
+fn retyped_text_keeps_the_pages_letter_spacing() {
+    let mut app = opened(open_page("inplace-tracked", &[], &tracked_line(100.0, 700.0, "delta epsilon zeta")));
+    // Typed at the end, a one-line run past its edge starts a new line; taking a letter off changes it in place.
+    app.tab_mut().edit.editing_run.as_mut().expect("an editor").buffer.pop();
+    let mut h = harness_from(app);
+    h.run_steps(4);
+    let view = h.state().tab().view_state.last_view.expect("the page was drawn");
+    let (galley, at, left) = {
+        let edit = h.state().tab().edit.editing_run.as_ref().expect("an editor");
+        let (galley, at) = edit.shown.clone().expect("drawn");
+        (galley, at, edit.lines[0].1.left)
+    };
+    let left_px = view.to_screen(AppPoint { x: left as f64, y: 0.0 }).x;
+    let chars = h.state_mut().characters(0).expect("characters").clone();
+    let range = chars.find("delta epsilon zeta").first().cloned().expect("the line in the page's letters");
+    let row = &galley.rows[0];
+    let mut worst = 0.0f32;
+    for (k, i) in range.enumerate() {
+        let Some(glyph) = row.row.glyphs.get(k) else { break };
+        if glyph.chr.is_whitespace() {
+            continue;
+        }
+        let page = view.to_screen(AppPoint { x: chars.line_rects(i..i + 1).first().map_or(0.0, |r| r.left) as f64, y: 0.0 }).x - left_px;
+        worst = worst.max((at.x + row.pos.x + glyph.pos.x - left_px - page).abs());
+    }
+    assert!(worst < 3.0, "a typed-in letter is {worst:.1} px from where the page has it");
+}
+
+#[test]
+fn the_box_hugs_a_paragraphs_lines() {
+    let mut h = harness_from(opened(open_page("inplace-hug", &LINES, "")));
+    h.run_steps(3);
+    let view = h.state().tab().view_state.last_view.expect("the page was drawn");
+    let edit = h.state().tab().edit.editing_run.as_ref().expect("an editor");
+    let frame = edit.frame.expect("the box's frame");
+    let (first, last) = (edit.lines[0].1, edit.lines[edit.lines.len() - 1].1);
+    let top = view.to_screen(AppPoint { x: 0.0, y: first.top as f64 }).y;
+    let bottom = view.to_screen(AppPoint { x: 0.0, y: last.bottom as f64 }).y;
+    assert!((frame.top() - top).abs() < 3.0, "the frame starts at {}, the first line at {top}", frame.top());
+    assert!((frame.bottom() - bottom).abs() < 4.0, "the frame ends at {}, the last line at {bottom}", frame.bottom());
+}
+
+/// A one-line box's frame, and the handles on it, sit on its letters: not on the end of the text
+/// box, which can run far past them (a table cell's padding).
+#[test]
+fn a_one_line_boxs_frame_sits_on_its_letters_not_its_padding() {
+    let padded = "BT /F1 10 Tf 100 700 Td [(delta epsilon zeta) -5000 ( )] TJ ET\n";
+    let mut h = harness_from(opened(open_page("inplace-hug-one", &[], padded)));
+    h.run_steps(3);
+    let view = h.state().tab().view_state.last_view.expect("the page was drawn");
+    let (frame, boxed, lines) = {
+        let edit = h.state().tab().edit.editing_run.as_ref().expect("an editor");
+        (edit.frame.expect("the box's frame"), view.to_screen(AppPoint { x: edit.lines[0].1.right as f64, y: 0.0 }).x, edit.lines.len())
+    };
+    assert_eq!(lines, 1, "test assumption: a one-line box");
+    let ink = page_ink_right_px(&mut h, "delta epsilon zeta");
+    assert!(boxed - ink > 20.0, "test assumption: the text box runs past its letters");
+    assert!(frame.right() - ink < 8.0, "the frame ends at {}, the letters at {ink}", frame.right());
+}

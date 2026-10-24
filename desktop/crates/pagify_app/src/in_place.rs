@@ -142,6 +142,42 @@ pub(crate) fn fit_rows(mut galley: Arc<egui::Galley>, widths: &[Option<f32>]) ->
     galley
 }
 
+/// `galley` with every gap between the letters of row *i* widened by `per_row[i]` px (narrowed,
+/// if negative); a row with no amount, or 0, is left as it is. **For the spacing a page keeps
+/// apart from its `Tc`**: a producer that letter-spaces a line writes a `TJ` number after every
+/// glyph, which the box's own layout knows nothing of, so the words it draws once they are
+/// typed in would otherwise come out squeezed (or spread) against the page's.
+pub(crate) fn spread_rows(mut galley: Arc<egui::Galley>, per_row: &[f32]) -> Arc<egui::Galley> {
+    if !per_row.iter().any(|px| px.is_finite() && *px != 0.0) {
+        return galley;
+    }
+    let g = Arc::make_mut(&mut galley);
+    let mut bounds = Rect::NOTHING;
+    let mut meshes = Rect::NOTHING;
+    for (index, placed) in g.rows.iter_mut().enumerate() {
+        let spacing = per_row.get(index).copied().filter(|px| px.is_finite()).unwrap_or(0.0);
+        if spacing != 0.0 {
+            let row = Arc::make_mut(&mut placed.row);
+            for (letter, glyph) in row.glyphs.iter_mut().enumerate() {
+                let dx = letter as f32 * spacing;
+                glyph.pos.x += dx;
+                if !glyph.uv_rect.is_nothing() {
+                    for vertex in row.visuals.mesh.vertices.iter_mut().skip(glyph.first_vertex as usize).take(4) {
+                        vertex.pos.x += dx;
+                    }
+                }
+            }
+            row.size.x += row.glyphs.len().saturating_sub(1) as f32 * spacing;
+            row.visuals.mesh_bounds = row.visuals.mesh.vertices.iter().fold(Rect::NOTHING, |r, v| r.union(Rect::from_min_max(v.pos, v.pos)));
+        }
+        bounds = bounds.union(Rect::from_min_size(placed.pos, placed.row.size));
+        meshes = meshes.union(placed.row.visuals.mesh_bounds.translate(placed.pos.to_vec2()));
+    }
+    g.rect = Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(bounds.right().max(0.0), bounds.bottom().max(0.0)));
+    g.mesh_bounds = meshes;
+    galley
+}
+
 /// Whether a box holding `buffer` asks for nothing over what `original` said: the same
 /// words (their edges aside), and no look changed (`look_dirty`). Typed away entirely is a
 /// change, unless there was nothing to delete. **The one rule** for "the box is still the
@@ -327,6 +363,17 @@ two");
         assert!(!visible(1), "row 1 was");
         assert!(visible(2), "row 2 is past the list, so it is left alone");
         assert_eq!(unseen_rows(laid_out("one"), &[]).rows.len(), 1, "an empty list changes nothing");
+    }
+
+    #[test]
+    fn spread_rows_widens_every_gap_of_a_row_by_its_own_amount() {
+        let before = laid_out("one\ntwo");
+        let after = spread_rows(before.clone(), &[1.5]);
+        let x = |g: &egui::Galley, row: usize, letter: usize| g.rows[row].row.glyphs[letter].pos.x;
+        assert!((x(&after, 0, 0) - x(&before, 0, 0)).abs() < 0.001, "the first letter stays");
+        assert!((x(&after, 0, 2) - x(&before, 0, 2) - 3.0).abs() < 0.001, "two gaps of 1.5 before the third letter");
+        assert_eq!(x(&after, 1, 2), x(&before, 1, 2), "a row with no amount is left alone");
+        assert!((after.rows[0].row.size.x - before.rows[0].row.size.x - 3.0).abs() < 0.01, "the row is as much wider");
     }
 
     #[test]

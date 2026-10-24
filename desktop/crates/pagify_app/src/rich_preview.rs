@@ -22,12 +22,16 @@ pub(crate) fn box_job(
     px_per_pt: f32,
     ready: &BTreeSet<String>,
     wrap_width: f32,
+    align: egui::Align,
 ) -> egui::text::LayoutJob {
     let mut rich = rich.clone();
     rich.edit(text);
     let chars: Vec<char> = text.chars().collect();
     let mut job = egui::text::LayoutJob::default();
     job.wrap.max_width = wrap_width;
+    // Lined up as Add to Page will put the rows: the preview showed every row at the left,
+    // whatever the box was aligned to, until it was applied.
+    job.halign = align;
 
     let spans = rich.spans(0..chars.len());
     if spans.is_empty() {
