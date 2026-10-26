@@ -58,9 +58,10 @@ fn placed(app: &PagifyApp) -> usize {
 #[test]
 fn a_page_picked_in_the_rail_does_not_take_copy_from_an_object_picked_after_it() {
     let mut h = harness("pictures.pdf");
-    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
+    // Edit Object in hand opens the Properties panel, which moves the page: the view is read after.
     h.state_mut().submit("editobject");
-    h.run_steps(1);
+    h.run_steps(2);
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
     h.state_mut().tab_mut().organize.organize_selected = vec![0];
 
     let image = h.state().tab().doc.as_ref().unwrap().session.images_on(0).unwrap().remove(0);

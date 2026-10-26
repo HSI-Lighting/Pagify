@@ -34,7 +34,7 @@ impl crate::PagifyApp {
     /// sides and its middle, on each axis: grey, and green where one is exactly
     /// on an edge or a middle of something else (see `pagify_shell::guides`).
     pub(crate) fn draw_move_guides(&mut self, ui: &mut egui::Ui, page: usize, view: PageView) {
-        let (moving, exclude): (pdf_core::document::Rect, Vec<usize>) = {
+        let moving: Option<(pdf_core::document::Rect, Vec<usize>)> = {
             let single = match (self.tab().selection.grab.clone(), self.tab().selection.selected.clone()) {
                 (Some(grab), Some(sel)) if grab.handle.is_none() && sel.page == page => {
                     Some((Self::shifted(sel.rect, grab.by), vec![sel.object]))
@@ -48,12 +48,16 @@ impl crate::PagifyApp {
                 }
                 _ => None,
             };
-            match single.or_else(group) {
-                Some(found) => found,
-                None => return,
-            }
+            single.or_else(group)
         };
-        let (_, guides) = self.align_for(page, moving, &exclude, view.scale, false);
+        // A picture, signature or drawn shape is only ever lined up with the page's own lines.
+        let guides = match moving {
+            Some((moving, exclude)) => self.align_for(page, moving, &exclude, view.scale, false).1,
+            None => match self.page_lines_while_dragging(page) {
+                Some(guides) => guides,
+                None => return,
+            },
+        };
         if guides.is_empty() {
             return;
         }
@@ -343,6 +347,8 @@ impl crate::PagifyApp {
                         None => egui::CursorIcon::Grabbing,
                     }
                 });
+                let snap = !ui.input(|i| i.modifiers.alt);
+                self.snap_to_page_lines(page, view.scale, snap, shift);
                 return true;
             }
         }
@@ -431,6 +437,8 @@ impl crate::PagifyApp {
                         None => egui::CursorIcon::Grabbing,
                     }
                 });
+                let snap = !ui.input(|i| i.modifiers.alt);
+                self.snap_to_page_lines(page, view.scale, snap, shift);
                 return true;
             }
         }
@@ -2165,6 +2173,8 @@ impl crate::PagifyApp {
                 ui.output_mut(|o| {
                     o.cursor_icon = handle.map(|h| h.cursor()).unwrap_or(egui::CursorIcon::Grabbing)
                 });
+                let snap = !ui.input(|i| i.modifiers.alt);
+                self.snap_to_page_lines(page, view.scale, snap, shift);
             }
         }
 

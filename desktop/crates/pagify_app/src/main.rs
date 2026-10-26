@@ -12,6 +12,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod align_page;
 mod canvas;
 mod caches;
 mod dispatch;
@@ -7223,6 +7224,12 @@ impl PagifyApp {
             return;
         }
         self.recording_state.session_log.record("drag", &format!("markup by=({dx:.1},{dy:.1})"));
+        self.move_markup_by(page, dx, dy);
+    }
+
+    /// Move the markup layer's own selection on `page` by `(dx, dy)` page points: the move a drag
+    /// ends in, and what Align to page does (which is not a wobbled click, so skips the drag's guard).
+    pub(crate) fn move_markup_by(&mut self, page: usize, dx: f32, dy: f32) {
         let height = view_height(self, page);
         let layer = self.tab_mut().markup.page(page, height);
         layer.begin("move");
@@ -16761,7 +16768,19 @@ fn wrap_typed_last_line(
         let has_shapes = text_page.is_none()
             && new_text_page.is_none()
             && self.tab_mut().markup.existing(page).is_some_and(|l| !l.selection().is_empty());
-        if text_page.is_none() && new_text_page.is_none() && !has_shapes {
+        // Edit Object in hand opens it too, for Align to page, so that the page slides once, when the
+        // tool is picked up, and not under a click: a double click on words, or a press that picks a
+        // thing and drags it, would otherwise find the page moved between its two halves. A picture or
+        // signature picked with no tool opens it only once the mouse is let go.
+        let open_id = egui::Id::new("properties-panel-open");
+        let was_open = ui.ctx().data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
+        let mouse_down = ui.input(|i| i.pointer.any_down());
+        let picked = self.align_subject().filter(|s| {
+            was_open || !mouse_down || !matches!(s, crate::align_page::Aligned::Signature | crate::align_page::Aligned::Picture)
+        });
+        let shown = text_page.is_some() || new_text_page.is_some() || has_shapes || picked.is_some();
+        ui.ctx().data_mut(|d| d.insert_temp(open_id, shown));
+        if !shown {
             return;
         }
 
@@ -16788,9 +16807,12 @@ fn wrap_typed_last_line(
                     self.draw_new_text_properties(ui, page);
                 } else if text_page.is_some() {
                     self.draw_run_properties(ui);
-                } else {
+                } else if has_shapes {
                     self.draw_shape_properties(ui, page);
+                } else if let Some(picked) = picked {
+                    ui.label(self.align_describe(picked));
                 }
+                self.draw_align_to_page(ui);
             });
     }
 
@@ -17980,6 +18002,8 @@ mod g1_command_box_tests;
 /// thing is actually being moved.
 #[cfg(test)]
 mod guide_tests;
+#[cfg(test)]
+mod align_page_tests;
 #[cfg(test)]
 mod nudge_tests;
 #[cfg(test)]

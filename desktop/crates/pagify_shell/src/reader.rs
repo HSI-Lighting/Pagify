@@ -497,6 +497,13 @@ impl Characters {
     /// label by a run of spaces begins at the same box edge as the label and shows far
     /// to its right.
     pub fn ink_left_in(&self, area: (f32, f32, f32, f32)) -> Option<f32> {
+        self.ink_in(area).map(|r| r.left)
+    }
+
+    /// The box round the ink inside `area`: every character that is not a space and whose box
+    /// is centred in it, however far its text object's own box runs past them. What a person
+    /// sees of the words, and so what they are aligned by.
+    pub fn ink_in(&self, area: (f32, f32, f32, f32)) -> Option<pdf_core::document::Rect> {
         let (left, top, right, bottom) = area;
         let (top, bottom) = (top.min(bottom), top.max(bottom));
         let (left, right) = (left.min(right), left.max(right));
@@ -507,26 +514,25 @@ impl Characters {
                 let (x, y) = ((b.left + b.right) / 2.0, (b.top + b.bottom) / 2.0);
                 !c.is_whitespace() && !c.is_control() && x >= left && x <= right && y >= top && y <= bottom
             })
-            .map(|(_, b)| b.left.min(b.right))
-            .reduce(f32::min)
+            .map(|(_, b)| pdf_core::document::Rect {
+                left: b.left.min(b.right),
+                top: b.top.min(b.bottom),
+                right: b.left.max(b.right),
+                bottom: b.top.max(b.bottom),
+            })
+            .reduce(|a, b| pdf_core::document::Rect {
+                left: a.left.min(b.left),
+                top: a.top.min(b.top),
+                right: a.right.max(b.right),
+                bottom: a.bottom.max(b.bottom),
+            })
     }
 
     /// The right edge of the last mark of ink inside `area`: the furthest right of
     /// any character that is not a space and whose box is centred in it. What a line
     /// *shows* ends there, whatever its text object's own box goes on to cover.
     pub fn ink_right_in(&self, area: (f32, f32, f32, f32)) -> Option<f32> {
-        let (left, top, right, bottom) = area;
-        let (top, bottom) = (top.min(bottom), top.max(bottom));
-        let (left, right) = (left.min(right), left.max(right));
-        self.text
-            .iter()
-            .zip(&self.boxes)
-            .filter(|(c, b)| {
-                let (x, y) = ((b.left + b.right) / 2.0, (b.top + b.bottom) / 2.0);
-                !c.is_whitespace() && !c.is_control() && x >= left && x <= right && y >= top && y <= bottom
-            })
-            .map(|(_, b)| b.left.max(b.right))
-            .reduce(f32::max)
+        self.ink_in(area).map(|r| r.right)
     }
 
     /// The character whose box contains this point, if any.

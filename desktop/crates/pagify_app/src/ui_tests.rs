@@ -1480,6 +1480,9 @@ fn dragging_a_signature_handle_through_the_real_pointer_path_resizes_it() {
         h.state().tab().selection.signature_selected.is_some(),
         "clicking the signature through a real pointer event did not select it"
     );
+    // The panel opens when the signature is picked and moves the page: the view is read again.
+    h.run_steps(2);
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
 
     let corner = view.to_screen(AppPoint { x: mark.rect.right as f64, y: mark.rect.bottom as f64 });
     let (w, ht) = (mark.rect.right - mark.rect.left, mark.rect.bottom - mark.rect.top);
@@ -1537,6 +1540,9 @@ fn dragging_the_rotate_handle_through_the_real_pointer_path_turns_it() {
         h.state().tab().selection.signature_selected.is_some(),
         "clicking the signature did not select it"
     );
+    // The panel opens when the signature is picked and moves the page: the view is read again.
+    h.run_steps(2);
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
 
     let ring = PagifyApp::rotate_handle_screen_pos(&mark.rect, view);
     drag(&mut h, ring, ring + egui::vec2(60.0, 0.0));
@@ -1566,10 +1572,10 @@ fn dragging_the_rotate_handle_through_the_real_pointer_path_turns_it() {
 #[test]
 fn dragging_an_object_handle_through_the_real_pointer_path_resizes_it() {
     let mut h = harness("pictures.pdf");
-    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
-
+    // Edit Object in hand opens the Properties panel, which moves the page: the view is read after.
     h.state_mut().submit("editobject");
-    h.run_steps(1);
+    h.run_steps(2);
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
 
     let image = h.state().tab().doc.as_ref().unwrap().session.images_on(0).unwrap().remove(0);
     let middle = view.to_screen(AppPoint {
@@ -1925,9 +1931,10 @@ fn right_aligned_text_lands_near_the_boxs_right_edge() {
 #[test]
 fn dragging_from_inside_a_forms_own_shape_starts_a_marquee_not_a_grab() {
     let mut h = harness("forms.pdf");
-    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
+    // Edit Object in hand opens the Properties panel, which moves the page: the view is read after.
     h.state_mut().submit("editobject");
-    h.run_steps(1);
+    h.run_steps(2);
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
 
     // The centre of the shape `forms.pdf` draws inside its own form —
     // found only through `grouped`, never `words`/`pictures`/`shapes`.
@@ -1967,9 +1974,10 @@ fn dragging_from_inside_a_forms_own_shape_starts_a_marquee_not_a_grab() {
 #[test]
 fn dragging_an_unselected_picture_starts_a_marquee_not_a_grab() {
     let mut h = harness("pictures.pdf");
-    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
+    // Edit Object in hand opens the Properties panel, which moves the page: the view is read after.
     h.state_mut().submit("editobject");
-    h.run_steps(1);
+    h.run_steps(2);
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
 
     let image = h.state().tab().doc.as_ref().unwrap().session.images_on(0).unwrap().remove(0);
     assert!(h.state().tab().selection.selected.is_none(), "nothing should be selected yet");
@@ -1993,9 +2001,10 @@ fn dragging_an_unselected_picture_starts_a_marquee_not_a_grab() {
 #[test]
 fn dragging_an_already_selected_pictures_body_still_moves_it() {
     let mut h = harness("pictures.pdf");
-    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
+    // Edit Object in hand opens the Properties panel, which moves the page: the view is read after.
     h.state_mut().submit("editobject");
-    h.run_steps(1);
+    h.run_steps(2);
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
 
     let image = h.state().tab().doc.as_ref().unwrap().session.images_on(0).unwrap().remove(0);
     let middle = view.to_screen(AppPoint {
