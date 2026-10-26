@@ -212,3 +212,76 @@ fn a_double_click_on_a_shape_or_clicks_on_words_one_at_a_time_open_no_editor() {
     super::ui_tests::click(&mut h, at);
     assert!(editor_words(&h).is_none(), "a click on words already selected opened an editor");
 }
+
+// ---- a page's background is not something a click picks ----
+//
+// Reported from use on the datasheet (page 1): a click on blank paper in Edit Object took the
+// page's background, a design program's spread (206% x 104% of the page) drawn through a form,
+// although moving it is no use to anyone. A click goes past anything that covers the page.
+
+/// A red square on a page whose background is drawn as `background` (raw content), with `extra`
+/// objects from number 6; Edit Object in hand.
+fn on_a_background(name: &str, background: &str, resources: &str, extra: &[Vec<u8>]) -> PagifyApp {
+    let content = format!("{background}\n1 0 0 rg 100 100 50 50 re f\n");
+    let dir = std::env::temp_dir().join(format!("pagify-background-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a scratch folder");
+    let path = dir.join(name);
+    std::fs::write(&path, crate::g4_edit_error_tests::page_with(content.as_bytes(), resources, extra)).expect("a scratch pdf");
+    let mut app = PagifyApp::new(Some(path.to_str().expect("a utf-8 path")));
+    app.submit("editobject");
+    app
+}
+
+const BLANK: AppPoint = AppPoint { x: 400.0, y: 200.0 };
+/// The square's middle (PDF 125, 125 on a page 792 high).
+const ON_THE_SQUARE: AppPoint = AppPoint { x: 125.0, y: 667.0 };
+
+#[test]
+fn a_click_on_paper_goes_past_a_background_drawn_through_a_form_wider_than_the_page() {
+    // As the datasheet draws it: a form whose box runs a page-width off to the left.
+    let form = b"<< /Type /XObject /Subtype /Form /BBox [-613 -18 612 878] /Length 34 >>\nstream\n0.9 g -613 -18 1225 896 re f\nendstream".to_vec();
+    let mut app = on_a_background("form-background.pdf", "/Fm0 Do", "/XObject << /Fm0 6 0 R >>", &[form]);
+    assert!(app.thing_at(0, BLANK, false).is_none(), "a click on blank paper picked {:?}", app.thing_at(0, BLANK, false));
+    assert!(!app.select_thing_at_drilling(0, BLANK, false), "the background was selected");
+    assert_eq!(app.thing_at(0, ON_THE_SQUARE, false).map(|(_, _, what)| what), Some("the shape"), "the square on it is still picked");
+}
+
+#[test]
+fn a_click_on_paper_goes_past_a_fill_the_page_draws_itself() {
+    let mut app = on_a_background("fill-background.pdf", "0.9 g 0 0 612 792 re f", "", &[]);
+    assert!(app.thing_at(0, BLANK, false).is_none(), "a click on blank paper picked {:?}", app.thing_at(0, BLANK, false));
+    assert_eq!(app.thing_at(0, ON_THE_SQUARE, false).map(|(_, _, what)| what), Some("the shape"));
+}
+
+/// Deliberately unchanged: a scanned page is one picture the size of the page, and it is what
+/// somebody clicking it means.
+#[test]
+fn a_picture_that_fills_the_page_is_still_picked() {
+    let image = b"<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 1 >>\nstream\n\xc0\nendstream".to_vec();
+    let app = on_a_background("scan.pdf", "q 612 0 0 792 0 0 cm /Im0 Do Q", "/XObject << /Im0 6 0 R >>", &[image]);
+    assert_eq!(app.thing_at(0, BLANK, false).map(|(_, _, what)| what), Some("the picture"));
+}
+
+/// The page it was reported on. Skips when the file is not on this machine.
+#[test]
+fn no_click_on_the_datasheets_first_page_picks_its_background() {
+    let path = r"C:\Users\hsili\Desktop\TECHNICAL DATASHEET.pdf";
+    if !std::path::Path::new(path).is_file() {
+        eprintln!("skipped: {path} is not here");
+        return;
+    }
+    let mut app = PagifyApp::new(Some(path));
+    app.submit("editobject");
+    let (w, h) = app.tab().doc.as_ref().unwrap().strip.size_of(0).expect("size");
+    let mut picked = 0;
+    for i in 1..20 {
+        for j in 1..28 {
+            let at = AppPoint { x: (w * i as f32 / 20.0) as f64, y: (h * j as f32 / 28.0) as f64 };
+            if let Some((object, rect, what)) = app.thing_at(0, at, false) {
+                picked += 1;
+                assert!(!PagifyApp::covers_the_page(&rect, (w, h)), "{at:?} picked {what} #{object}, which covers the page: {rect:?}");
+            }
+        }
+    }
+    assert!(picked > 0, "test assumption: some clicks land on something");
+}

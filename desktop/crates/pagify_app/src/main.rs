@@ -5994,7 +5994,18 @@ impl PagifyApp {
         ((p.0 - cx).powi(2) + (p.1 - cy).powi(2)).sqrt()
     }
 
+    /// Whether `r` covers the page (`page`, its width and height) at least nineteen-twentieths of
+    /// the way each way: the page's background, which nothing lines up with and nobody moves.
+    fn covers_the_page(r: &pdf_core::document::Rect, page: (f32, f32)) -> bool {
+        (r.right - r.left).abs() >= page.0 * 0.95 && (r.bottom - r.top).abs() >= page.1 * 0.95
+    }
+
     /// What is under a point, as something that could be picked up.
+    ///
+    /// **A shape or a group's drawing that covers the page is gone past** (`covers_the_page`):
+    /// reported from use, a click on blank paper took the datasheet's background, a spread drawn
+    /// through a form, which nobody means to move. It can still be picked from the right-click
+    /// list. A picture the size of the page is still picked: on a scanned page it is the page.
     ///
     /// Words first, then pictures, then **shapes** — a rule, a box, the panel a
     /// brochure sets its type on. A caption sits *on* a photograph, and
@@ -6020,6 +6031,8 @@ impl PagifyApp {
         let doc = self.tab().doc.as_ref()?;
         // Read once for the page as it is, not at every click and every hover.
         let hits = self.page_hits(page)?;
+        let size = doc.strip.size_of(page);
+        let background = |r: &pdf_core::document::Rect| size.is_some_and(|page| Self::covers_the_page(r, page));
 
         // `text_run_rects`, not `text_runs` — a hit-test only needs to know
         // where things are, and `text_runs` pays to extract every run's
@@ -6081,6 +6094,7 @@ impl PagifyApp {
                     d.depth == 0
                         && d.kind == pdf_core::document::DrawnKind::Shape
                         && holds(&d.rect)
+                        && !background(&d.rect)
                 })
                 // Each ranked once, not once per comparison: an outline is a read.
                 .map(|d| (rank(d), d))
@@ -6100,7 +6114,7 @@ impl PagifyApp {
         let grouped = || {
             hits.drawn
                 .iter()
-                .filter(|d| d.depth > 0 && holds(&d.rect))
+                .filter(|d| d.depth > 0 && holds(&d.rect) && !background(&d.rect))
                 .min_by(|a, b| {
                     let area = |d: &pdf_core::document::DrawnObject| {
                         ((d.rect.right - d.rect.left) * (d.rect.bottom - d.rect.top)).abs()
@@ -6471,7 +6485,7 @@ impl PagifyApp {
                 let (w, h) = ((r.right - r.left).abs(), (r.bottom - r.top).abs());
                 // The page's own background covers all of it and lines up with
                 // nothing but the page, whose edges are lines already.
-                let background = size.is_some_and(|(pw, ph)| w >= pw * 0.95 && h >= ph * 0.95);
+                let background = size.is_some_and(|page| Self::covers_the_page(r, page));
                 w >= 1.0 && h >= 1.0 && !background
             })
             .collect()
