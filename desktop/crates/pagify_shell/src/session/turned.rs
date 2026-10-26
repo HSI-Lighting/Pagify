@@ -73,7 +73,7 @@ fn read_frame(s: &mut pdf_core::registry::DocumentSession, page: usize) -> Resul
         return Ok(Frame::NONE);
     }
     let size = s.document.page_size(page)?;
-    let _ = size; Ok(Frame::NONE)
+    Ok(Frame::new(turns, size.width_pt, size.height_pt))
 }
 
 impl Session {
