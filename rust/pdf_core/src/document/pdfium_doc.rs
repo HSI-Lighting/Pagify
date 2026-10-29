@@ -9931,10 +9931,25 @@ fn font_to_unicode(
         } else {
             None
         };
+        // **Each space keeps its own gap**, not a median: a table row's
+        // "Luminaire name" is an ordinary space and the column before its
+        // ":" is a wide one, and one figure for both spreads the row when it
+        // is retyped (reported from use). Only the piece's own font's numbers
+        // mean anything in another font.
+        let old_space_gaps: Vec<f32> = if swap.is_none() {
+            let after = content::gaps_after(operation, width);
+            spaced_chars(&run.text, &owner, &spellings)
+                .iter()
+                .filter(|(character, _)| character.is_whitespace())
+                .map(|(_, code)| after.get(*code).copied().flatten().unwrap_or(0.0))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let mut replacement = content::replacing_pieces(
             operation,
             first..last + 1,
-            &content::tracked(&encoded, width, tracking, &wanted),
+            &content::tracked_with_spaces(&encoded, width, tracking, &old_space_gaps, &wanted),
             &drawing,
             size,
             width,
@@ -10319,6 +10334,23 @@ fn font_to_unicode(
                 };
 
                 let stretches_of = cut_into_stretches(looks, words.len());
+                // **A line's columns live after its spaces' codes** — including
+                // the spaces PDFium only inferred: the DIALux report opens
+                // "Luminaire name" to ":" with one number after the "e", which
+                // the old text reports as a space owning no code. Reusing each
+                // old space's own gap in order puts the words back in their
+                // columns when the line is retyped; a single median repeated
+                // after every space spread the row apart (reported from use).
+                let old_space_gaps: Vec<f32> = if stretches_of.len() == 1 {
+                    let after = content::gaps_after(operation, width);
+                    own_chars
+                        .iter()
+                        .filter(|(character, _)| character.is_whitespace())
+                        .map(|(_, code)| after.get(*code).copied().flatten().unwrap_or(0.0))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 let mut parts: Vec<LinePart> = Vec::new();
                 if !unchanged && first > 0 {
                     parts.push(LinePart::of(coded.pieces(0..first), drawn_with(&name, None), None, None));
@@ -10385,6 +10417,7 @@ fn font_to_unicode(
                         chars: seg.chars().collect(),
                         encoded,
                         tracking: if own_font { tracking } else { None },
+                        space_gaps: if own_font { old_space_gaps.clone() } else { Vec::new() },
                         more_follows: n + 1 < stretches_of.len(),
                         trailing,
                         points_per_unit,
@@ -10447,10 +10480,24 @@ fn font_to_unicode(
             } else {
                 None
             };
+            // **Each space keeps its own gap** — see `tracked_with_spaces`:
+            // a table row's word space and its column gap are different, and
+            // repeating their median after every space spread the retyped
+            // row across the page (reported from use).
+            let old_space_gaps: Vec<f32> = if swap.is_none() {
+                let after = content::gaps_after(operation, width);
+                spaced_chars(&run.text, &owner, &spellings)
+                    .iter()
+                    .filter(|(character, _)| character.is_whitespace())
+                    .map(|(_, code)| after.get(*code).copied().flatten().unwrap_or(0.0))
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let mut replacement = content::replacing_pieces(
                 operation,
                 first..last + 1,
-                &content::tracked(&encoded, width, tracking, &wanted),
+                &content::tracked_with_spaces(&encoded, width, tracking, &old_space_gaps, &wanted),
                 &drawing,
                 size,
                 width,
@@ -12095,6 +12142,11 @@ struct FreshWords {
     per_char: usize,
     /// The old line's spacing, when the words are in the piece's own font.
     tracking: Option<crate::pdf::content::Tracking>,
+    /// The gap after each of the old line's spaces, in order, where they are
+    /// not all the same. A table row's spaces are a word space and a column
+    /// gap: one median repeated after every space spreads the row, while
+    /// these put each word back where it was drawn.
+    space_gaps: Vec<f32>,
     /// Whether more of the line follows, so the spacing goes after the last glyph.
     more_follows: bool,
     /// The spacing the old words' last glyph carried, which goes on after the new.
@@ -12118,13 +12170,34 @@ impl FreshWords {
         let mut out: Vec<Piece> = Vec::new();
         if self.lined_up() {
             let mut run: Vec<u8> = Vec::new();
+            let mut spaces_seen = 0usize;
+            // As in `content::tracked_with_spaces`: the old gaps are only
+            // reused while the new words have no more spaces than the old.
+            let space_gaps: &[f32] =
+                if self.chars.iter().filter(|c| c.is_whitespace()).count() <= self.space_gaps.len() {
+                    &self.space_gaps
+                } else {
+                    &[]
+                };
             for (j, bytes) in self.encoded.chunks(self.per_char).enumerate() {
                 run.extend_from_slice(bytes);
+                let spaced = self.chars[j].is_whitespace();
                 let mut number = match self.tracking {
                     Some(t) if j + 1 < self.chars.len() || self.more_follows => {
-                        if self.chars[j].is_whitespace() { t.space } else { t.glyph }
+                        if spaced {
+                            let old = space_gaps.get(spaces_seen).copied();
+                            spaces_seen += 1;
+                            old.unwrap_or(t.space)
+                        } else {
+                            t.glyph
+                        }
                     }
-                    _ => 0.0,
+                    _ => {
+                        if spaced {
+                            spaces_seen += 1;
+                        }
+                        0.0
+                    }
                 };
                 number += gap(j);
                 if number != 0.0 {
@@ -12511,7 +12584,24 @@ fn align_codes(spellings: &[Option<String>], text: &str) -> Option<Vec<usize>> {
         // characters stop adding up, which is refused there.
         let Some(spelling) = spelling else { continue };
         let wanted: Vec<char> = spelling.chars().collect();
-        if wanted.is_empty() || at + wanted.len() > chars.len() {
+        if wanted.is_empty() {
+            continue;
+        }
+        // **A space of PDFium's own.** Where the producer moved the pen with a
+        // `TJ` number instead of drawing a space code, PDFium reports a space
+        // that no code spells. The DIALux report's "Calculation algorithm used
+        // Average indirect fraction" is 52 characters over 51 codes for exactly
+        // this: the gap between "used" and "Average" is a number, not a glyph.
+        // It belongs to no code, like the trailing whitespace below, so skip it
+        // and let this code match what follows. A code that spells whitespace
+        // itself matches first, so a real space is never passed over.
+        if !wanted[0].is_whitespace() {
+            while at < chars.len() && chars[at].is_whitespace() {
+                owner.push(usize::MAX);
+                at += 1;
+            }
+        }
+        if at + wanted.len() > chars.len() {
             continue;
         }
         if chars[at..at + wanted.len()] == wanted[..] {
@@ -18907,6 +18997,20 @@ mod owned_code_tests {
 
         let range = owned_codes(&owner).expect("a range");
         assert_eq!(range, 0..codes, "the replacement would have missed a code");
+    }
+
+    /// **The DIALux report's case.** "used Average" is 52 characters over 51
+    /// codes: the gap between the words is a `TJ` number, not a space glyph,
+    /// so PDFium reports a space no code spells. It owns no code, and the
+    /// line lines up all the same.
+    #[test]
+    fn a_space_pdfium_inserts_between_words_lines_up() {
+        let spellings: Vec<Option<String>> = "usedAverage".chars().map(|c| Some(c.to_string())).collect();
+        let owner = align_codes(&spellings, "used Average")
+            .expect("the inserted space is not supposed to break the alignment");
+        assert_eq!(owner[4], usize::MAX, "the inserted space must own no code");
+        assert_eq!(owner[5], 4, "the A must own the code after it");
+        assert_eq!(owned_codes(&owner).expect("a range"), 0..11);
     }
 }
 

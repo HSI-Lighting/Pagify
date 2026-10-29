@@ -3791,11 +3791,12 @@ fn splitting_a_run_leaves_its_letters_recoverable_as_one_paragraph() {
     );
 }
 
-/// **Found by audit-style report: a marquee must only take what it fully
-/// encloses.** A rectangle that merely crosses a picture's edge — the old
-/// "any overlap counts" rule — must leave it out.
+/// **A marquee takes what it touches, not only what it encloses.** A
+/// rectangle that merely crosses a picture's right half selects it — the
+/// owner's report: requiring the whole box meant a marquee had to sweep in
+/// everything else the box held.
 #[test]
-fn a_marquee_that_only_clips_a_picture_does_not_select_it() {
+fn a_marquee_that_only_clips_a_picture_still_selects_it() {
     let mut app = app("pictures.pdf");
     app.submit("editobject");
     let pictures = app.tab_mut().doc.as_ref().expect("open").session.images_on(0).expect("images");
@@ -3810,11 +3811,170 @@ fn a_marquee_that_only_clips_a_picture_does_not_select_it() {
         AppPoint { x: (target.rect.right + 5.0) as f64, y: (target.rect.bottom + 5.0) as f64 },
         false,
     );
-    assert_ne!(
+    assert_eq!(
         app.tab_mut().selection.selected.as_ref().map(|s| s.object),
         Some(target.object),
-        "a picture only half inside the marquee was selected"
+        "a picture half inside the marquee was not selected"
     );
+}
+
+/// **Part of a line, not the whole of it**: a rectangle over the right half
+/// of "The quick brown fox" takes the words under it and leaves the rest of
+/// the run alone — the run is split into its letters first.
+#[test]
+fn a_marquee_that_only_clips_a_line_of_text_takes_only_what_it_covers() {
+    let mut app = app("text-lines.pdf");
+    app.submit("editobject");
+    let runs = app.tab_mut().doc.as_ref().expect("open").session.text_run_rects(0).expect("runs");
+    let (_, rect) = runs.into_iter().min_by(|(_, a), (_, b)| a.top.total_cmp(&b.top)).expect("a run");
+
+    let mid_x = (rect.left + rect.right) / 2.0;
+    app.select_group_in(
+        0,
+        AppPoint { x: mid_x as f64, y: (rect.top - 5.0) as f64 },
+        AppPoint { x: (rect.right + 5.0) as f64, y: (rect.bottom + 5.0) as f64 },
+        false,
+    );
+    let picked: Vec<Selected> = app
+        .tab()
+        .selection
+        .selected
+        .iter()
+        .chain(app.tab().selection.group.iter())
+        .cloned()
+        .collect();
+    assert!(picked.len() > 1, "the crossed run should have come as its letters, not one object");
+    let after = app.tab().doc.as_ref().expect("open").session.text_runs(0).expect("runs after the split");
+    let mut pieces: Vec<(f32, String)> = picked
+        .iter()
+        .filter_map(|s| after.iter().find(|r| r.object == s.object).map(|r| (s.rect.left, r.text.clone())))
+        .collect();
+    pieces.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let taken: String = pieces.iter().map(|(_, text)| text.as_str()).collect();
+    assert!(taken.contains("fox"), "the words inside the marquee were not selected: {taken:?}");
+    assert!(
+        !taken.contains("The") && !taken.contains("quick"),
+        "the marquee took words outside it: {taken:?}"
+    );
+}
+
+/// **Retyping a table row keeps its columns.** On the DIALux report "Luminaire
+/// name : VEGA NANO" is one run whose ":" sits a column away (one `TJ` number
+/// after the "e" of "name"). Retyped to "…: VEG" the row was spread across its old
+/// width (a two-line label/value block read as a justified paragraph), and, with
+/// that fixed, every space still took the same median gap, so the ":" fell back
+/// next to "name". Now the ":" stays in its column, the line neither stretched
+/// nor collapsed.
+#[test]
+fn retyping_a_table_row_keeps_its_columns() {
+    let path = r"C:\Users\hsili\Desktop\LUX.pdf";
+    if !std::path::Path::new(path).exists() {
+        eprintln!("skipped: {path} is not here");
+        return;
+    }
+    let mut app = PagifyApp::new(Some(path));
+    app.pick_text_run(6, AppPoint { x: 232.0, y: 377.1 }).expect("picked");
+    let edit = app.tab().edit.editing_run.as_ref().expect("an editor opened").clone();
+    assert!(!edit.justify, "a label/value block was read as a justified paragraph");
+    let mut lines: Vec<String> = edit.buffer.split('\n').map(str::to_string).collect();
+    assert_eq!(lines[0], "Luminaire name : VEGA NANO");
+    lines[0] = "Luminaire name : VEG".to_string();
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = lines.join("\n");
+    app.apply_editing_page();
+
+    let row = app
+        .tab()
+        .doc
+        .as_ref()
+        .expect("open")
+        .session
+        .text_runs(6)
+        .expect("runs")
+        .into_iter()
+        .find(|r| r.text.starts_with("Luminaire name"))
+        .expect("the retyped row");
+    // The ":" keeps its column, so the shorter value ends at about 219.7 pt: not at
+    // 206 (the ":" fell back next to "name") and not at 255 (stretched to the old width).
+    assert!(
+        (215.0..225.0).contains(&row.rect.right),
+        "the row ends at {:.1}: its column gap was lost or it was stretched",
+        row.rect.right
+    );
+}
+
+/// **The owner's report, on the owner's file**: on the DIALux report a
+/// table row is one text object — "M 1.5 (Ceiling) 77 lx 0.63" — so a
+/// marquee over the `0.63` column used to take the whole row, and the whole
+/// table looked selected. Now the row is split and only the letters under
+/// the rectangle are picked.
+#[test]
+fn a_marquee_over_one_column_of_the_lux_table_takes_that_column_only() {
+    let path = r"C:\Users\hsili\Desktop\LUX.pdf";
+    if !std::path::Path::new(path).exists() {
+        eprintln!("skipped: {path} is not here");
+        return;
+    }
+    let mut app = PagifyApp::new(Some(path));
+    app.submit("editobject");
+    let page = 1;
+
+    // The right-hand column, dragged from just left of its own numbers down
+    // the table — the owner's marquee.
+    app.select_group_in(
+        page,
+        AppPoint { x: 322.0, y: 565.0 },
+        AppPoint { x: 360.0, y: 735.0 },
+        false,
+    );
+    let picked: Vec<Selected> = app
+        .tab()
+        .selection
+        .selected
+        .iter()
+        .chain(app.tab().selection.group.iter())
+        .cloned()
+        .collect();
+    assert!(picked.len() > 20, "the column should have come as its letters, got {} things", picked.len());
+    let after = app.tab().doc.as_ref().expect("open").session.text_runs(page).expect("runs after the split");
+
+    // A run split into its letters keeps consecutive object numbers, and so
+    // do the letters picked from one row: joining runs of consecutive
+    // objects reads back what was taken, row by row.
+    let mut objects: Vec<usize> = picked
+        .iter()
+        .filter(|s| after.iter().any(|r| r.object == s.object))
+        .map(|s| s.object)
+        .collect();
+    objects.sort_unstable();
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for object in objects {
+        match groups.last_mut() {
+            Some(group) if group.last().is_some_and(|last| last + 1 == object) => group.push(object),
+            _ => groups.push(vec![object]),
+        }
+    }
+    let taken: Vec<String> = groups
+        .iter()
+        .map(|group| {
+            group
+                .iter()
+                .map(|object| after.iter().find(|r| r.object == *object).expect("a run").text.as_str())
+                .collect::<String>()
+                .trim()
+                .to_string()
+        })
+        .collect();
+
+    // A space between two words is its own zero-area box and is not picked,
+    // so a row can read back as "150" and "lx" in two groups; joining the
+    // groups is what the row says.
+    let column: String = taken.join(" ");
+    for value in ["150 lx", "102 lx", "0.68", "0.32", "1.20 m", "0.63", "0.41", "0.02", "0.28", "0.00"] {
+        assert!(column.contains(value), "the column's {value:?} was not taken: {taken:?}");
+    }
+    for other in ["M 1.5", "M 1.1", "77 lx", "182 lx", "Position", "0.75 m", "425 lx", "171 lx", "Horizontal"] {
+        assert!(!column.contains(other), "the marquee took {other:?} from outside the column: {taken:?}");
+    }
 }
 
 /// **Shift-click adds to the selection instead of replacing it.**

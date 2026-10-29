@@ -25,7 +25,8 @@
 //! loses the kerning of a `TJ`.
 
 use pdf_core::command::Command;
-use pdf_core::document::{Rect, TextLineEdit, TextStyle};
+use pdf_core::document::{Rect, SpanStyle, TextLineEdit, TextStyle};
+use std::collections::HashMap;
 
 /// `"1 line"`, `"13 lines"`: a count with its noun, in the number it is.
 pub fn count_of(n: usize, one: &str, many: &str) -> String {
@@ -321,6 +322,37 @@ pub fn line_edits_with(
     justified: bool,
     spans_for: &dyn Fn(usize) -> LineSpans,
 ) -> Vec<TextLineEdit> {
+    line_edits_with_pieces(fates, lines, twins, style, justified, spans_for, &HashMap::new())
+}
+
+/// [`line_edits_with`], knowing each piece's own words (by object).
+///
+/// **A written line whose typed words still begin with one or more whole
+/// leading pieces keeps those pieces where they are** and writes the rest
+/// onto the first piece that changed. This is what keeps a retyped line's
+/// words on top of the page's own white cell backgrounds: a page may draw a
+/// white shape *between* a line's pieces (the DIALux report draws the cell's
+/// white box between the ":" and the value), and writing the whole line onto
+/// its first piece puts the new words **before** that white shape in the
+/// page's stream, so the shape covers them. Reported from use: after applying
+/// an edit to the LUX report's header, "Installation: E" showed the "E" but
+/// the rest of the typed value was hidden by the cell's white box, while the
+/// fields around it were fine. Writing the remainder onto its own piece puts
+/// it after the white shape, where the old words were, and leaves the kept
+/// pieces exactly where the producer set them.
+///
+/// Only a line in its own look, not kept to a width, and without twins: a
+/// restyle, a stretch and a faux-bold twin each need the line written as one
+/// piece. A line that keeps no leading piece is written as it always was.
+pub fn line_edits_with_pieces(
+    fates: &[LineFate<'_>],
+    lines: &[(Vec<usize>, Rect)],
+    twins: &[Vec<usize>],
+    style: &TextStyle,
+    justified: bool,
+    spans_for: &dyn Fn(usize) -> LineSpans,
+    piece_texts: &HashMap<usize, String>,
+) -> Vec<TextLineEdit> {
     let style = TextStyle { face: style.face.clone(), size: style.size, ..Default::default() };
     let spans = justify_targets(fates, lines, justified);
     fates
@@ -331,15 +363,30 @@ pub fn line_edits_with(
         .flat_map(|(i, ((fate, (objects, _)), justify_to))| {
             let twins = twins.get(i).map_or(&[][..], Vec::as_slice);
             match (fate, objects.split_first()) {
-                (LineFate::Written(text), Some((first, rest))) => match spans_for(i) {
-                    LineSpans::Whole(spans) => vec![TextLineEdit::Retype {
-                        first: *first,
-                        text: (*text).to_string(),
-                        style: style.clone(),
-                        remove: rest.iter().chain(twins).copied().collect(),
-                        justify_to,
-                        spans,
-                    }],
+                (LineFate::Written(text), Some(_)) => match spans_for(i) {
+                    LineSpans::Whole(spans) => {
+                        let restyle = style.face.is_some() || style.size.is_some();
+                        let (kept, at) =
+                            unchanged_leading_pieces(text, objects, twins, justify_to, &spans, restyle, piece_texts);
+                        let (_, write) = objects.split_at(kept);
+                        let Some((piece, after)) = write.split_first() else { return Vec::new() };
+                        let typed = &text[at..];
+                        if typed.is_empty() {
+                            // The typed line says only what the kept pieces say.
+                            vec![TextLineEdit::Remove {
+                                objects: write.iter().chain(twins).copied().collect(),
+                            }]
+                        } else {
+                            vec![TextLineEdit::Retype {
+                                first: *piece,
+                                text: typed.to_string(),
+                                style: style.clone(),
+                                remove: after.iter().chain(twins).copied().collect(),
+                                justify_to,
+                                spans,
+                            }]
+                        }
+                    }
                     LineSpans::InPlace(pieces) => pieces
                         .into_iter()
                         .map(|(object, text, spans)| TextLineEdit::Retype {
@@ -359,6 +406,39 @@ pub fn line_edits_with(
             }
         })
         .collect()
+}
+
+/// How many of a written line's leading pieces the typed words still say
+/// exactly, and how many bytes of the typed words they account for — see
+/// [`line_edits_with_pieces`]. None (or one that would keep the whole line,
+/// which would skip a restyle) where the line has to be written as one piece:
+/// a look that changed, a width to keep or a twin.
+fn unchanged_leading_pieces(
+    text: &str,
+    objects: &[usize],
+    twins: &[usize],
+    justify_to: Option<f32>,
+    spans: &[SpanStyle],
+    restyle: bool,
+    piece_texts: &HashMap<usize, String>,
+) -> (usize, usize) {
+    if restyle || piece_texts.is_empty() || !spans.is_empty() || justify_to.is_some() || !twins.is_empty() {
+        return (0, 0);
+    }
+    let (mut kept, mut at) = (0usize, 0usize);
+    for &object in objects {
+        let Some(piece) = piece_texts.get(&object) else { break };
+        if !text[at..].starts_with(piece.as_str()) {
+            break;
+        }
+        at += piece.len();
+        kept += 1;
+    }
+    if kept == 0 || kept == objects.len() {
+        (0, 0)
+    } else {
+        (kept, at)
+    }
 }
 
 /// Whether a retyped line of a justified paragraph is asked to keep its width at
@@ -413,6 +493,16 @@ pub fn ends_at_one_margin(lines: &[(Vec<usize>, Rect)]) -> bool {
         .map(|(_, rect)| rect.left.max(rect.right))
         .collect();
     let Some(furthest) = rights.iter().copied().reduce(f32::max) else { return false };
+    // **The last line is the short one.** It cannot end past the margin the
+    // lines above reach. A two-line table block has two independent fields
+    // and either can be the longer: the LUX report's "Luminaire name" row
+    // ends 35 pt before its "Equipment" row, so treating the block as
+    // justified stretched the retyped row's words across the page — reported
+    // from use, with the row spreading from "Luminaire" to "VEG".
+    let last_right = lines.last().map(|(_, rect)| rect.left.max(rect.right)).unwrap_or(0.0);
+    if last_right > furthest + 4.0 {
+        return false;
+    }
     let at_the_margin = rights.iter().filter(|right| furthest - **right <= 4.0).count();
     at_the_margin * 4 >= rights.len() * 3
 }
@@ -858,6 +948,89 @@ mod tests {
         assert_eq!(edits, [retype(10, "a", &[11]), retype(12, "b", &[]), retype(13, "c", &[14, 15])]);
     }
 
+    /// **A retyped line keeps the leading pieces its words still say.** The
+    /// page may draw a white cell box between the pieces (the LUX report's ":"
+    /// and its value); writing the whole line onto the ":" put the new words
+    /// before that white box, which covered them. The ":" stays, and the value
+    /// is written where it always was — after the box.
+    #[test]
+    fn a_written_line_keeps_the_leading_pieces_its_words_still_say() {
+        let l = lines(&[&[10, 11], &[20, 21]]);
+        let mut pieces = HashMap::new();
+        pieces.insert(10, ": ".to_string());
+        pieces.insert(11, "EVOLVE RETAILS".to_string());
+        pieces.insert(20, ": ".to_string());
+        pieces.insert(21, "28.10.2026".to_string());
+        let edits = line_edits_with_pieces(
+            &[Written(": E"), Written(": 28.10.2027")],
+            &l,
+            &[],
+            &TextStyle::default(),
+            false,
+            &|_| LineSpans::Whole(Vec::new()),
+            &pieces,
+        );
+        assert_eq!(edits, [retype(11, "E", &[]), retype(21, "28.10.2027", &[])]);
+
+        // A line that no longer says its first piece is written onto it, as before.
+        let edits = line_edits_with_pieces(
+            &[Written("E")],
+            &lines(&[&[10, 11]]),
+            &[],
+            &TextStyle::default(),
+            false,
+            &|_| LineSpans::Whole(Vec::new()),
+            &pieces,
+        );
+        assert_eq!(edits, [retype(10, "E", &[11])]);
+    }
+
+    /// A line typed down to just the pieces it still says removes the rest and
+    /// writes nothing: the kept prefix is already on the page.
+    #[test]
+    fn a_line_typed_down_to_its_leading_piece_removes_the_rest() {
+        let l = lines(&[&[10, 11]]);
+        let mut pieces = HashMap::new();
+        pieces.insert(10, ": ".to_string());
+        pieces.insert(11, "EVOLVE RETAILS".to_string());
+        let edits = line_edits_with_pieces(
+            &[Written(": ")],
+            &l,
+            &[],
+            &TextStyle::default(),
+            false,
+            &|_| LineSpans::Whole(Vec::new()),
+            &pieces,
+        );
+        assert_eq!(edits, [TextLineEdit::Remove { objects: vec![11] }]);
+    }
+
+    /// A restyle needs the line written as one piece, so the leading pieces are
+    /// not kept then: each would otherwise keep its old face and size.
+    #[test]
+    fn a_restyled_line_keeps_none_of_its_leading_pieces() {
+        let l = lines(&[&[10, 11]]);
+        let mut pieces = HashMap::new();
+        pieces.insert(10, ": ".to_string());
+        pieces.insert(11, "EVOLVE RETAILS".to_string());
+        let restyle = TextStyle { size: Some(14.0), ..Default::default() };
+        let edits = line_edits_with_pieces(
+            &[Written(": E")],
+            &l,
+            &[],
+            &restyle,
+            false,
+            &|_| LineSpans::Whole(Vec::new()),
+            &pieces,
+        );
+        assert_eq!(edits.len(), 1);
+        let TextLineEdit::Retype { first, text, remove, style, .. } = &edits[0] else {
+            panic!("not a retype: {edits:?}")
+        };
+        assert_eq!((*first, text.as_str(), remove.as_slice()), (10, ": E", &[11][..]));
+        assert_eq!(style.size, Some(14.0));
+    }
+
     /// A line the person deleted comes off the page whole, every piece of it.
     #[test]
     fn a_removed_line_removes_every_one_of_its_pieces() {
@@ -1088,6 +1261,9 @@ mod tests {
         assert!(!ends_at_one_margin(&[]));
         assert!(!ends_at_one_margin(&wide(&[(0.0, 100.0)])));
         assert!(ends_at_one_margin(&wide(&[(0.0, 100.0), (0.0, 40.0)])));
+        // A two-line table block: the lines are fields, not a paragraph, and
+        // the second is the longer one. Not justified, so not stretched.
+        assert!(!ends_at_one_margin(&wide(&[(106.9, 255.4), (107.0, 290.5)])));
     }
 
     /// **The width reaches the engine**: each retyped, non-last line of a

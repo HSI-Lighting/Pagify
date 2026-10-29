@@ -86,11 +86,9 @@ fn the_box_holds_the_spaces_the_page_has() {
 fn a_padded_pair_of_lines_is_not_drawn_justified() {
     let Some(mut app) = the_users_page() else { return };
     let edit = reopened_block(&mut app);
-    assert!(
-        pagify_shell::paragraph_lines::paragraph_should_justify(&edit.lines)
-            && pagify_shell::paragraph_lines::ends_at_one_margin(&edit.lines),
-        "the geometry alone would have called it justified — that is the trap"
-    );
+    // (The geometry once called this justified on its own — the trap the ink gate
+    // was written for. A last line that runs past the others is now refused
+    // earlier, by `ends_at_one_margin`; the outcome asked of both is the same.)
     assert!(!edit.justify, "a block padded with spaces was drawn stretched to its box");
 }
 
@@ -209,10 +207,7 @@ fn a_label_over_an_indented_value_is_not_drawn_justified() {
     assert_eq!(edit.lines.len(), 2, "the label and its value are one block");
     let value = edit.buffer.lines().nth(1).expect("a second line");
     assert!(value.starts_with("     "), "the value's own indent is in the box: {value:?}");
-    assert!(
-        pagify_shell::paragraph_lines::paragraph_should_justify(&edit.lines)
-            && pagify_shell::paragraph_lines::ends_at_one_margin(&edit.lines),
-        "the geometry alone would have called it justified — that is the trap"
-    );
+    // (Refused earlier now: the value line runs past the label's, which a
+    // justified paragraph's last line never does — see `ends_at_one_margin`.)
     assert!(!edit.justify, "the label was stretched across the box");
 }

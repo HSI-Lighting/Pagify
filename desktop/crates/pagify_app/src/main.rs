@@ -67,7 +67,7 @@ use pagify_shell::verbs::{self, MeasureKind, PageTarget, SignatureAction, Verb, 
 use pagify_shell::{PageRaster, Session};
 use pagify_shell::line_styles::{in_place_pieces, line_ranges, line_spans, range_looks_differ};
 use pagify_shell::paragraph_lines::{
-    asks_for_width, check_lines_up, commands_for, count_of, ends_at_one_margin, line_edits_with,
+    asks_for_width, check_lines_up, commands_for, count_of, ends_at_one_margin, line_edits_with_pieces,
     paragraph_applied_message, plan_log_line, plan_paragraph_edit, plan_paragraph_edit_with, recolour_targets,
     removed_pieces, LineSpans, STRETCH_JUSTIFIED_LINES,
 };
@@ -6143,26 +6143,34 @@ impl PagifyApp {
             (r.left.min(r.right), r.top.min(r.bottom), r.left.max(r.right), r.top.max(r.bottom))
         };
         let (ml, mt, mr, mb) = norm(&rect);
-        // **Fully inside, not merely touched.** A marquee that picked up
-        // anything its edge crossed used to sweep in a neighbour that was
-        // never meant to be part of the selection — the usual rule in every
-        // other drawing or office tool, and the one asked for here.
-        let contains = |r: &pdf_core::document::Rect| {
+        // **Touched, not merely enclosed.** A marquee takes every object whose
+        // box it crosses, so a rectangle dragged over part of a line of text,
+        // a picture or a shape takes that thing without having to enclose the
+        // whole of it. (The owner's report: text could only be selected by
+        // enclosing its entire box, which swept in the box's other text.)
+        let touches = |r: &pdf_core::document::Rect| {
             let (l, t, right, bottom) = norm(r);
-            ml <= l && mr >= right && mt <= t && mb >= bottom
+            ml <= right && mr >= l && mt <= bottom && mb >= t
         };
         let Some(doc) = self.tab().doc.as_ref() else { return Vec::new() };
+        let size = doc.strip.size_of(page);
+        // A page-covering shape is the page's background, not something a
+        // marquee means to pick up — the same rule `thing_at` applies. Without
+        // it, crossing selection would take the background on *every* drag.
+        let background = |r: &pdf_core::document::Rect| {
+            size.is_some_and(|page| Self::covers_the_page(r, page))
+        };
         let mut out = Vec::new();
         if let Ok(words) = doc.session.text_run_rects(page) {
             out.extend(
                 words
                     .into_iter()
-                    .filter(|(_, r)| contains(r))
+                    .filter(|(_, r)| touches(r))
                     .map(|(object, rect)| Selected { page, object, rect, what: "the words" }),
             );
         }
         if let Ok(images) = doc.session.images_on(page) {
-            out.extend(images.into_iter().filter(|image| contains(&image.rect)).map(|image| {
+            out.extend(images.into_iter().filter(|image| touches(&image.rect)).map(|image| {
                 Selected { page, object: image.object, rect: image.rect, what: "the picture" }
             }));
         }
@@ -6171,12 +6179,80 @@ impl PagifyApp {
                 shapes
                     .into_iter()
                     .filter(|d| {
-                        d.depth == 0 && d.kind == pdf_core::document::DrawnKind::Shape && contains(&d.rect)
+                        d.depth == 0
+                            && d.kind == pdf_core::document::DrawnKind::Shape
+                            && touches(&d.rect)
+                            && !background(&d.rect)
                     })
                     .map(|d| Selected { page, object: d.object, rect: d.rect, what: "the shape" }),
             );
         }
         out
+    }
+
+    /// A marquee that covers only **part** of a run of text takes that part,
+    /// by first splitting the run into its letters. Without this the whole
+    /// run comes with it: on the DIALux report the row
+    /// "M 1.5 (Ceiling) 77 lx 0.63" is one text object, so dragging over the
+    /// `0.63` column also selected `M 1.5 (Ceiling) 77 lx` — reported from
+    /// use with two screenshots, "i only selected 1 column of text but the
+    /// app selected the whole text box."
+    ///
+    /// Only a run that is **crossed** — some of its box outside the
+    /// rectangle, some inside — is split; a run wholly inside stays one
+    /// object, exactly as before. Runs of one letter are left alone (nothing
+    /// to split; the split call would only pay to open the page again), which
+    /// matters after an earlier marquee already split a run into letters.
+    ///
+    /// Highest object number first: splitting renumbers the page's objects
+    /// from the run's own place onward, never before it, so every run still
+    /// to do keeps the number it was read with. A run the engine declines to
+    /// split stays whole, and is then selected whole by
+    /// [`Self::things_in`]'s crossing rule — the same honest decline a click
+    /// gets.
+    ///
+    /// Not done while extending a selection (Shift-drag): members already
+    /// picked name objects by number, and a split would renumber them under
+    /// the selection. There the marquee takes whole runs, as it did before
+    /// this existed.
+    fn split_runs_clipped_by(&mut self, page: usize, rect: pdf_core::document::Rect) {
+        let norm = |r: &pdf_core::document::Rect| {
+            (r.left.min(r.right), r.top.min(r.bottom), r.left.max(r.right), r.top.max(r.bottom))
+        };
+        let (ml, mt, mr, mb) = norm(&rect);
+        let touches = |r: &pdf_core::document::Rect| {
+            let (l, t, right, bottom) = norm(r);
+            ml <= right && mr >= l && mt <= bottom && mb >= t
+        };
+        let contains = |r: &pdf_core::document::Rect| {
+            let (l, t, right, bottom) = norm(r);
+            ml <= l && mr >= right && mt <= t && mb >= bottom
+        };
+        let Some(doc) = self.tab().doc.as_ref() else { return };
+        // One read of the page's words for the letter counts, rather than
+        // opening the page once per candidate inside `split_run_into_characters`.
+        let Ok(words) = doc.session.text_runs(page) else { return };
+        let mut clipped: Vec<usize> = words
+            .iter()
+            .filter(|run| {
+                touches(&run.rect) && !contains(&run.rect) && run.text.trim().chars().count() > 1
+            })
+            .map(|run| run.object)
+            .collect();
+        if clipped.is_empty() {
+            return;
+        }
+        clipped.sort_unstable_by(|a, b| b.cmp(a));
+        let before = doc.session.undo_generation();
+        for object in clipped {
+            let Some(doc) = self.tab().doc.as_ref() else { return };
+            let _ = doc.session.split_run_into_characters(page, object);
+        }
+        if let Some(doc) = &mut self.tab_mut().doc {
+            if doc.session.undo_generation() != before {
+                doc.rendered_is_stale();
+            }
+        }
     }
 
     /// What a marquee drag from `start` to `end` picked up. One thing (or
@@ -6185,8 +6261,8 @@ impl PagifyApp {
     /// dragged over a single word is not a worse way to select it than
     /// clicking. More than one becomes [`Self::group`].
     /// `extend`: fold onto the selection already in hand (Shift held) rather
-    /// than replace it — added members only, since [`Self::things_in`] only
-    /// ever returns what is fully inside the rectangle in the first place.
+    /// than replace it — members already in it are not added twice, since
+    /// [`Self::things_in`] returns every object the rectangle touches.
     fn select_group_in(&mut self, page: usize, start: AppPoint, end: AppPoint, extend: bool) {
         let rect = pdf_core::document::Rect {
             left: start.x.min(end.x) as f32,
@@ -6194,6 +6270,9 @@ impl PagifyApp {
             right: start.x.max(end.x) as f32,
             bottom: start.y.max(end.y) as f32,
         };
+        if !extend {
+            self.split_runs_clipped_by(page, rect);
+        }
         let mut found = self.things_in(page, rect);
         if extend {
             let mut members = std::mem::take(&mut self.tab_mut().selection.group);
@@ -13713,7 +13792,15 @@ impl PagifyApp {
         let commands = commands_for(
             edit.page,
             recolour,
-            line_edits_with(&plan.fates, &edit.lines, &edit.twins, &style, justified, &spans_for),
+            line_edits_with_pieces(
+                &plan.fates,
+                &edit.lines,
+                &edit.twins,
+                &style,
+                justified,
+                &spans_for,
+                &edit.piece_texts,
+            ),
         );
 
         // Surplus typed lines in the touched middle with no original line

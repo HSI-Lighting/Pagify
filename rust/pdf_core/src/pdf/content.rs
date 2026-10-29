@@ -815,18 +815,7 @@ pub fn tracking(
     width: usize,
     spaces: &[bool],
 ) -> Option<Tracking> {
-    // The number straight after each code, if there is one.
-    let mut after: Vec<Option<f32>> = Vec::new();
-    for piece in pieces(operation) {
-        match piece {
-            Piece::Codes(bytes) => after.extend(bytes.chunks(width.max(1)).map(|_| None)),
-            Piece::Kern(number) => {
-                if let Some(last) = after.last_mut() {
-                    *last = Some(last.unwrap_or(0.0) + number);
-                }
-            }
-        }
-    }
+    let after = gaps_after(operation, width);
     // The gaps *inside* the stretch: after every code but its last.
     let inside = after.get(range.start..range.end.saturating_sub(1))?;
     if inside.iter().flatten().count() < 3 {
@@ -858,23 +847,72 @@ pub fn tracking(
     (found.glyph != 0.0 || found.space != 0.0).then_some(found)
 }
 
+/// The `TJ` number straight after each code, if there is one, in the
+/// operator's own code order. This is where a table row keeps its columns:
+/// the gap that opens "Luminaire name" to ":" is one number after the "e",
+/// not a space code, and the median in [`tracking`] must not blur it with
+/// the ordinary word spaces.
+pub fn gaps_after(operation: &Operation, width: usize) -> Vec<Option<f32>> {
+    let mut after: Vec<Option<f32>> = Vec::new();
+    for piece in pieces(operation) {
+        match piece {
+            Piece::Codes(bytes) => after.extend(bytes.chunks(width.max(1)).map(|_| None)),
+            Piece::Kern(number) => {
+                if let Some(last) = after.last_mut() {
+                    *last = Some(last.unwrap_or(0.0) + number);
+                }
+            }
+        }
+    }
+    after
+}
+
 /// `codes` as pieces, the [`Tracking`] after every glyph but the last (the number
 /// after the stretch's last glyph is the original's, which the rebuild keeps).
 /// `text` is what `codes` spell, a character to a code; where it is not, or there
 /// is no tracking, one run of codes as given.
 pub fn tracked(codes: &[u8], width: usize, tracking: Option<Tracking>, text: &str) -> Vec<Piece> {
+    tracked_with_spaces(codes, width, tracking, &[], text)
+}
+
+/// [`tracked`], with each of the old line's spaces carrying **its own** gap,
+/// in order. A table row spaces its words unevenly — an ordinary gap between
+/// "Luminaire" and "name", a column-wide one before the ":" — and the median
+/// in [`tracking`] repeated after every space spread the retyped row across
+/// the page (reported from use). Spaces past the end of `space_gaps` fall
+/// back to the median, and `tracking`'s glyph gap still applies to glyphs.
+pub fn tracked_with_spaces(
+    codes: &[u8],
+    width: usize,
+    tracking: Option<Tracking>,
+    space_gaps: &[f32],
+    text: &str,
+) -> Vec<Piece> {
     let glyphs: Vec<&[u8]> = codes.chunks(width.max(1)).collect();
     let chars: Vec<char> = text.chars().collect();
-    let Some(tracking) = tracking.filter(|_| chars.len() == glyphs.len()) else {
+    if chars.len() != glyphs.len() {
         return vec![Piece::Codes(codes.to_vec())];
-    };
+    }
+    let (glyph, space) = tracking.map_or((0.0, 0.0), |t| (t.glyph, t.space));
+    // Only while the new words have no more spaces than the old line: a
+    // person who pads a value with typed spaces is not asking for the
+    // old line's column gap after each of them.
+    let space_gaps: &[f32] =
+        if chars.iter().filter(|c| c.is_whitespace()).count() <= space_gaps.len() { space_gaps } else { &[] };
+    let mut spaces_seen = 0usize;
     let mut out: Vec<Piece> = Vec::new();
-    for (at, glyph) in glyphs.iter().enumerate() {
+    for (at, glyph_bytes) in glyphs.iter().enumerate() {
         match out.last_mut() {
-            Some(Piece::Codes(bytes)) => bytes.extend_from_slice(glyph),
-            _ => out.push(Piece::Codes(glyph.to_vec())),
+            Some(Piece::Codes(bytes)) => bytes.extend_from_slice(glyph_bytes),
+            _ => out.push(Piece::Codes(glyph_bytes.to_vec())),
         }
-        let number = if chars[at].is_whitespace() { tracking.space } else { tracking.glyph };
+        let number = if chars[at].is_whitespace() {
+            let old = space_gaps.get(spaces_seen).copied();
+            spaces_seen += 1;
+            old.unwrap_or(space)
+        } else {
+            glyph
+        };
         if at + 1 < glyphs.len() && number != 0.0 {
             out.push(Piece::Kern(number));
         }
@@ -2257,6 +2295,26 @@ mod tests {
         // And not at all where there was none to carry, or the text and codes disagree.
         assert_eq!(tracked(b"X Y", 1, None, "X Y"), vec![Piece::Codes(b"X Y".to_vec())]);
         assert_eq!(tracked(b"X Y", 1, tracking, "XY"), vec![Piece::Codes(b"X Y".to_vec())]);
+        // **Each space keeps its own gap**, in order: a table row's word space
+        // and the column gap before its ":" are not the same number, and the
+        // median repeated after both spread the row (reported from use).
+        assert_eq!(
+            tracked_with_spaces(
+                b"A B C",
+                1,
+                Some(Tracking { glyph: 0.0, space: -9.0 }),
+                &[-1.0, -1344.0],
+                "A B C"
+            ),
+            vec![
+                Piece::Codes(b"A ".to_vec()),
+                Piece::Kern(-1.0),
+                Piece::Codes(b"B ".to_vec()),
+                Piece::Kern(-1344.0),
+                Piece::Codes(b"C".to_vec()),
+            ],
+            "the two spaces should carry their own gaps"
+        );
         // A number after the spaces only leaves the letters run together.
         let gaps = Some(Tracking { glyph: 0.0, space: -113.0 });
         assert_eq!(
