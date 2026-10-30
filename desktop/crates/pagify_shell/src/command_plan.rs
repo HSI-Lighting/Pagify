@@ -132,6 +132,8 @@ pub enum Effect {
     ArmWhiteout,
     /// Arm the arrow drawing tool.
     ArmDrawArrow,
+    /// Arm the cloud drawing tool.
+    ArmDrawCloud,
     /// Toggle whether new rectangles and circles are drawn filled.
     ToggleFill,
     /// Arm the redaction tool.
@@ -335,6 +337,7 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::Certify(path) => vec![Effect::RunCertify(path.clone())],
         Verb::Whiteout => vec![Effect::ArmWhiteout],
         Verb::DrawArrow => vec![Effect::ArmDrawArrow],
+        Verb::DrawCloud => vec![Effect::ArmDrawCloud],
         Verb::ToggleFill => vec![Effect::ToggleFill],
         Verb::Redact => vec![Effect::ArmRedact],
         Verb::Lock => vec![Effect::LockWords],
@@ -568,6 +571,7 @@ mod tests {
             (Verb::Certify(None), vec![Effect::RunCertify(None)]),
             (Verb::Whiteout, vec![Effect::ArmWhiteout]),
             (Verb::DrawArrow, vec![Effect::ArmDrawArrow]),
+            (Verb::DrawCloud, vec![Effect::ArmDrawCloud]),
             (Verb::ToggleFill, vec![Effect::ToggleFill]),
             (Verb::Redact, vec![Effect::ArmRedact]),
             (Verb::Lock, vec![Effect::LockWords]),

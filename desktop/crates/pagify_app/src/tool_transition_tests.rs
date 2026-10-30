@@ -64,16 +64,21 @@ fn placing_a_signature_picture_or_text_box_disarms_the_tool() {
 #[test]
 fn rules_1_3_and_4_are_interaction_level_and_tested_elsewhere() {}
 
-/// **Rule: `Draw(Polyline)`, `Draw(Spline)`, and `Measure(Area)` end on
-/// Enter and re-arm per `repeats`** — and, per the mentor's own research
-/// (`Pagify-Phase2-Handoff.md` §2b), these are *exactly* the three, not
-/// "at least" these three: `ends_on_enter()` is derived from
-/// `wants_points() == usize::MAX`, so this also pins down that no other
-/// kind has (or should gain, without updating this test) an unbounded
-/// point count.
+/// **Rule: `Draw(Polyline)`, `Draw(Spline)`, `Draw(Cloud)` and
+/// `Measure(Area)` end on Enter and re-arm per `repeats`** — and, per the
+/// mentor's own research (`Pagify-Phase2-Handoff.md` §2b), these are
+/// *exactly* the four, not "at least" these four: `ends_on_enter()` is
+/// derived from `wants_points() == usize::MAX`, so this also pins down that
+/// no other kind has (or should gain, without updating this test) an
+/// unbounded point count.
 #[test]
-fn polyline_spline_and_area_end_on_enter_and_repeat() {
-    for tool in [Tool::Draw(DrawKind::Polyline), Tool::Draw(DrawKind::Spline), Tool::Measure(MeasureKind::Area)] {
+fn polyline_spline_cloud_and_area_end_on_enter_and_repeat() {
+    for tool in [
+        Tool::Draw(DrawKind::Polyline),
+        Tool::Draw(DrawKind::Spline),
+        Tool::Draw(DrawKind::Cloud),
+        Tool::Measure(MeasureKind::Area),
+    ] {
         assert!(tool.ends_on_enter(), "should end on Enter");
         assert!(tool.repeats(), "should stay armed for the next one");
     }
@@ -129,6 +134,7 @@ fn every_tool_ids_ribbon_command_matches_what_the_ribbon_table_expects() {
         (Tool::Draw(DrawKind::Polyline), "pline"),
         (Tool::Draw(DrawKind::Arrow), "arrow"),
         (Tool::Draw(DrawKind::Spline), "spline"),
+        (Tool::Draw(DrawKind::Cloud), "cloud"),
         (Tool::EraseMark, "erase"),
         (Tool::Measure(MeasureKind::Distance), "measure distance"),
         (Tool::Measure(MeasureKind::Area), "measure area"),

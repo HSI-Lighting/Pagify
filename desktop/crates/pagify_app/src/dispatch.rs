@@ -275,6 +275,14 @@ impl crate::PagifyApp {
                     self.arm_tool(Tool::Draw(DrawKind::Arrow), page);
                 }
             }
+            Effect::ArmDrawCloud => {
+                if self.tab_mut().doc.is_none() {
+                    self.say_error("nothing open.");
+                } else {
+                    let page = self.tab_mut().view_state.page;
+                    self.arm_tool(Tool::Draw(DrawKind::Cloud), page);
+                }
+            }
             Effect::ToggleFill => {
                 self.prefs_state.draw_fill = !self.prefs_state.draw_fill;
                 self.say_info(if self.prefs_state.draw_fill {

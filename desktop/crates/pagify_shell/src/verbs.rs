@@ -334,6 +334,12 @@ pub enum Verb {
     /// than a `Command::SetTool(ToolKind::_)` the kernel already recognises
     /// the way `line`/`circle`/`pline` are.
     DrawArrow,
+    /// Arm the Draw tab's Cloud tool — a closed revision cloud: click a ring
+    /// of points and Enter closes it, as Foxit's Cloud markup does.
+    ///
+    /// Pagify's own word for the same reason `DrawArrow` is: the kernel knows
+    /// lines, circles and polylines, but not a cloudy border.
+    DrawCloud,
     /// Find things on the pages somebody would not want to send out.
     ///
     /// `redact` is the form that acts on them. Two words rather than one for
@@ -1064,6 +1070,7 @@ fn parse_fill_and_sign(head: &str, rest: &[&str], tail: &str) -> Option<Result<V
     Some(match head {
         "fill" => Ok(Verb::ToggleFill),
         "arrow" => Ok(Verb::DrawArrow),
+        "cloud" => Ok(Verb::DrawCloud),
         "signrectangle" => Ok(Verb::SignRectangle),
         "signline" => Ok(Verb::SignLine),
         // **Not `move`.** That word belongs to the drawing kernel, where it

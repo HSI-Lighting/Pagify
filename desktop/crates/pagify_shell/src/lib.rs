@@ -16,6 +16,7 @@ pub mod appearance;
 pub mod passphrase;
 pub mod block_input;
 pub mod blocks;
+pub mod cloud;
 pub mod command;
 pub mod command_plan;
 pub mod commit;

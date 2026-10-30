@@ -130,7 +130,7 @@ impl Tool {
             | Tool::Lock
             | Tool::ArticleBox => 2,
             Tool::Draw(DrawKind::Line | DrawKind::Circle | DrawKind::Rectangle | DrawKind::Arrow) => 2,
-            Tool::Draw(DrawKind::Polyline | DrawKind::Spline) => usize::MAX,
+            Tool::Draw(DrawKind::Polyline | DrawKind::Spline | DrawKind::Cloud) => usize::MAX,
             Tool::Measure(MeasureKind::Distance) => 2,
             Tool::Measure(MeasureKind::Area) => usize::MAX,
             Tool::Modify(pick) => pick.points,
@@ -218,6 +218,12 @@ impl Tool {
                 }
                 (DrawKind::Spline, n) => {
                     format!("spline: point {} — Enter to finish", n + 1)
+                }
+                // Foxit's Cloud is an irregular shape too: a ring of clicks,
+                // closed back on the first. Enter is this app's "done" for
+                // every open-ended pick, so it is the cloud's too.
+                (DrawKind::Cloud, n) => {
+                    format!("cloud: point {} — Enter to close", n + 1)
                 }
             },
             Tool::EraseMark => {
@@ -317,6 +323,7 @@ impl Tool {
             Tool::Draw(DrawKind::Rectangle) => None,
             Tool::Draw(DrawKind::Arrow) => Some(ToolId::Arrow),
             Tool::Draw(DrawKind::Spline) => Some(ToolId::Spline),
+            Tool::Draw(DrawKind::Cloud) => Some(ToolId::Cloud),
             Tool::EraseMark => Some(ToolId::EraseMark),
             Tool::Measure(MeasureKind::Distance) => Some(ToolId::MeasureDistance),
             Tool::Measure(MeasureKind::Area) => Some(ToolId::MeasureArea),
@@ -669,6 +676,32 @@ impl Tool {
                             Ok(format!("spline of {count} points added."))
                         }
                     }
+                    // Foxit's Cloud markup: the clicked ring, with every edge
+                    // drawn as outward scallops. `pagify_shell::cloud` turns
+                    // the ring into ordinary points, so what is stored is a
+                    // plain closed polyline — selectable, movable, saved and
+                    // reopened like any other drawn shape.
+                    DrawKind::Cloud => {
+                        if p.len() < 3 {
+                            Err("cloud: needs at least three points.".into())
+                        } else {
+                            let ring = pagify_shell::cloud::outline(&p);
+                            if ring.len() < 3 {
+                                Err("cloud: those points enclose no area.".into())
+                            } else {
+                                let count = ring.len();
+                                layer.add(cad_kernel::Geom::Polyline(cad_kernel::Polyline {
+                                    vertices: ring
+                                        .into_iter()
+                                        .map(|pos| cad_kernel::PolyVertex { pos, bulge: 0.0 })
+                                        .collect(),
+                                    closed: true,
+                                    widths: Vec::new(),
+                                }));
+                                Ok(format!("cloud of {count} points added."))
+                            }
+                        }
+                    }
                 };
                 // Close the checkpoint a draw opened, and drop it if the
                 // draw refused, so a failed draw leaves no half-made step
@@ -798,6 +831,36 @@ impl Tool {
                     }
                 }
             }
+            // The cloud being drawn, scalloped exactly as the finished one
+            // will be: the points already clicked plus the pointer. Fewer
+            // than three points is not a ring yet, so it trails like a
+            // polyline until there is something to close.
+            Tool::Draw(DrawKind::Cloud) => {
+                let mut ring_points: Vec<AppPoint> = points.to_vec();
+                ring_points.push(at);
+                let scallops = if ring_points.len() >= 3 {
+                    let ring: Vec<cad_kernel::Vec2> = ring_points
+                        .iter()
+                        .map(|p| cad_kernel::Vec2::new(p.x, p.y))
+                        .collect();
+                    pagify_shell::cloud::outline(&ring)
+                } else {
+                    Vec::new()
+                };
+                let path: Vec<egui::Pos2> = if scallops.len() >= 3 {
+                    let mut path: Vec<egui::Pos2> = scallops
+                        .iter()
+                        .map(|v| view.to_screen(AppPoint::new(v.x, v.y)))
+                        .collect();
+                    if let Some(first) = path.first().copied() {
+                        path.push(first);
+                    }
+                    path
+                } else {
+                    ring_points.iter().map(|p| view.to_screen(*p)).collect()
+                };
+                ui.painter().add(egui::Shape::line(path, egui::Stroke::new(1.0, theme::violet_bright())));
+            }
             // A polyline keeps what is already placed and trails the last
             // leg. A spline's control polygon, not the curve itself — the
             // curve isn't known until enough points exist to tessellate
@@ -926,6 +989,7 @@ pub(crate) enum ToolId {
     Polyline,
     Arrow,
     Spline,
+    Cloud,
     EraseMark,
     MeasureDistance,
     MeasureArea,
@@ -1000,5 +1064,10 @@ pub(crate) enum DrawKind {
     /// Polyline is (any number of points, Enter to finish); the difference
     /// is only in what the points become.
     Spline,
+    /// A revision cloud — Foxit's Cloud markup. Picked the same way a
+    /// Polyline is (any number of points, Enter to close), and stored as a
+    /// closed polyline whose points are the scalloped outline
+    /// (`pagify_shell::cloud`).
+    Cloud,
 }
 

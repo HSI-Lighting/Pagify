@@ -80,6 +80,85 @@ fn a_polyline_takes_any_number_of_clicks_and_then_finishes() {
     assert_eq!(marks(&app), 1, "polyline never finished:\n{}", said(&app));
 }
 
+/// Foxit's Cloud markup, as the Draw tab now offers it: a ring of clicks,
+/// Enter to close, and every edge drawn as outward scallops. One shape, so
+/// it can be picked up, moved and saved like any other drawing.
+#[test]
+fn the_cloud_tool_draws_a_closed_scalloped_ring() {
+    let mut app = app("single-page.pdf");
+    app.submit("cloud");
+    assert!(
+        matches!(app.tab().tool.as_ref().map(|t| &t.kind), Some(Tool::Draw(DrawKind::Cloud))),
+        "cloud did not arm:\n{}",
+        said(&app)
+    );
+
+    let corners = [(60.0, 60.0), (200.0, 60.0), (200.0, 160.0), (60.0, 160.0)];
+    for (x, y) in corners {
+        app.take_pick(at(x, y));
+    }
+    assert_eq!(marks(&app), 0, "a cloud finished on its own");
+    app.submit("done");
+    assert_eq!(marks(&app), 1, "cloud never finished:\n{}", said(&app));
+
+    let layer = app.tab().markup.existing(0).expect("layer");
+    let cad_kernel::Geom::Polyline(polyline) = &layer.objects()[0].geom else {
+        panic!("a cloud should be one polyline");
+    };
+    assert!(polyline.closed, "the cloud was left open");
+    assert!(
+        polyline.vertices.len() > corners.len() * 3,
+        "too few points to be scalloped: {}",
+        polyline.vertices.len()
+    );
+
+    // Every side's scallops stand outside the clicked ring, not inside it.
+    let space = layer.space();
+    let (mut min_x, mut max_x, mut min_y, mut max_y) =
+        (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
+    for v in &polyline.vertices {
+        min_x = min_x.min(v.pos.x);
+        max_x = max_x.max(v.pos.x);
+        min_y = min_y.min(v.pos.y);
+        max_y = max_y.max(v.pos.y);
+    }
+    let clicked: Vec<cad_kernel::Vec2> =
+        corners.iter().map(|&(x, y)| space.to_kernel(at(x, y))).collect();
+    let (mut cmin_x, mut cmax_x, mut cmin_y, mut cmax_y) =
+        (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
+    for p in &clicked {
+        cmin_x = cmin_x.min(p.x);
+        cmax_x = cmax_x.max(p.x);
+        cmin_y = cmin_y.min(p.y);
+        cmax_y = cmax_y.max(p.y);
+    }
+    assert!(
+        min_x < cmin_x - 1.0 && max_x > cmax_x + 1.0,
+        "the scallops did not stand outside left and right: {min_x}..{max_x} in {cmin_x}..{cmax_x}"
+    );
+    assert!(
+        min_y < cmin_y - 1.0 && max_y > cmax_y + 1.0,
+        "the scallops did not stand outside top and bottom: {min_y}..{max_y} in {cmin_y}..{cmax_y}"
+    );
+}
+
+/// Two clicks are a line, not an area. The refusal leaves the tool in hand
+/// with its clicks spent, so the next ring can start at once.
+#[test]
+fn a_cloud_needs_three_points_and_says_so() {
+    let mut app = app("single-page.pdf");
+    app.submit("cloud");
+    app.take_pick(at(60.0, 60.0));
+    app.take_pick(at(200.0, 60.0));
+    app.submit("done");
+
+    assert_eq!(marks(&app), 0, "two points made a cloud");
+    assert!(said(&app).contains("three points"), "no reason given:\n{}", said(&app));
+    let armed = app.tab().tool.as_ref().expect("the cloud tool let go after refusing");
+    assert!(matches!(armed.kind, Tool::Draw(DrawKind::Cloud)), "a different tool came back");
+    assert!(armed.points.is_empty(), "the refused clicks were kept");
+}
+
 /// Fillet needs two *objects*, not two points — the picking path is a
 /// different one, and it is the path that was silently performing a move.
 /// Every coordinate here arrives the way the pointer delivers it.

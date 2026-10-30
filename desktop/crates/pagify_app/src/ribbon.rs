@@ -409,6 +409,12 @@ impl Tab {
                 ("\u{E922}", "Polyline", Command::Tool(ToolId::Polyline, "pline")),
                 ("\u{E5C8}", "Arrow", Command::Tool(ToolId::Arrow, "arrow")),
                 ("\u{F757}", "Spline", Command::Tool(ToolId::Spline, "spline")),
+                // Foxit's Cloud markup: a ring of clicks, closed back on the
+                // first, with a scalloped border. See `Tool::Draw(Cloud)`.
+                // `\u{F15C}` is Material Symbols' own cloud (`wb_cloudy`),
+                // already in the icon subset — `\u{E753}` belonged to no
+                // Material Symbol and failed `every_ribbon_glyph_can_actually_be_drawn`.
+                ("\u{F15C}", "Cloud", Command::Tool(ToolId::Cloud, "cloud")),
                 ("\u{E14E}", "Trim", Command::Verb("trim")),
                 ("\u{E920}", "Fillet", Command::Verb("fillet")),
                 ("\u{E2EC}", "Offset", Command::Verb("offset")),
@@ -447,9 +453,9 @@ impl Tab {
     pub(crate) fn button_group_starts(self) -> &'static [usize] {
         match self {
             // 0 Line, 1 Circle, 2 Rectangle, 3 Fill, 4 Polyline, 5 Arrow,
-            // 6 Spline | 7 Trim, 8 Fillet, 9 Offset, 10 Erase | 11 Calibrate,
-            // 12 Distance, 13 Area, 14 Page Scale.
-            Tab::Draw => &[7, 11],
+            // 6 Spline, 7 Cloud | 8 Trim, 9 Fillet, 10 Offset, 11 Erase |
+            // 12 Calibrate, 13 Distance, 14 Area, 15 Page Scale.
+            Tab::Draw => &[8, 12],
             _ => &[],
         }
     }

@@ -678,9 +678,9 @@ fn every_ribbon_glyph_can_actually_be_drawn() {
 fn draws_divider_group_starts_point_at_the_tools_named_in_their_own_comment() {
     let buttons = Tab::Draw.buttons();
     let starts = Tab::Draw.button_group_starts();
-    assert_eq!(starts, &[7, 11]);
-    assert_eq!(buttons[7].1, "Trim");
-    assert_eq!(buttons[11].1, "Calibrate");
+    assert_eq!(starts, &[8, 12]);
+    assert_eq!(buttons[8].1, "Trim");
+    assert_eq!(buttons[12].1, "Calibrate");
 }
 
 /// No ribbon button's own glyph-plus-label content is taller than the
