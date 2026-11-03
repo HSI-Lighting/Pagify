@@ -599,6 +599,27 @@ pub(crate) fn active_window() -> Option<::windows::Win32::Foundation::HWND> {
     (!hwnd.is_null()).then(|| ::windows::Win32::Foundation::HWND(hwnd))
 }
 
+/// Put `hwnd` in front. False when it is no longer a window.
+///
+/// Windows may still refuse a program that has no right to the foreground; it
+/// then flashes the taskbar button instead, which is all such a program gets.
+#[cfg(target_os = "windows")]
+fn set_foreground(hwnd: usize) -> bool {
+    #[link(name = "user32")]
+    extern "system" {
+        fn IsWindow(hwnd: *mut std::ffi::c_void) -> i32;
+        fn SetForegroundWindow(hwnd: *mut std::ffi::c_void) -> i32;
+    }
+    let hwnd = hwnd as *mut std::ffi::c_void;
+    unsafe {
+        if IsWindow(hwnd) == 0 {
+            return false;
+        }
+        SetForegroundWindow(hwnd);
+    }
+    true
+}
+
 // -- the hub ------------------------------------------------------------------
 
 /// Where a window's native window is made, and how big.
@@ -618,6 +639,9 @@ struct Window {
     vp: ViewportId,
     app: PagifyApp,
     place: Place,
+    /// Its `HWND`, read while it had the focus (see [`Hub::note_focus`]); none
+    /// until it first has.
+    hwnd: Option<usize>,
 }
 
 /// What eframe runs: the program, with however many windows it has.
@@ -662,7 +686,7 @@ impl Hub {
         app.lend(&mut shared);
         Hub {
             shared,
-            windows: vec![Window { vp: ViewportId::ROOT, app, place: Place::default() }],
+            windows: vec![Window { vp: ViewportId::ROOT, app, place: Place::default(), hwnd: None }],
             mru: vec![ViewportId::ROOT],
             next_serial: 1,
             handover,
@@ -697,7 +721,36 @@ impl Hub {
         let focused = ctx.input(|i| i.raw.viewports.iter().find(|(_, v)| v.focused == Some(true)).map(|(id, _)| *id));
         if let Some(id) = focused.filter(|id| self.windows.iter().any(|w| w.vp == *id)) {
             self.touch(id);
+            // eframe makes and draws every window on this one thread, so the
+            // thread's active window is the one egui says has the focus.
+            #[cfg(target_os = "windows")]
+            if let (Some(window), Some(hwnd)) = (self.windows.iter_mut().find(|w| w.vp == id), active_window()) {
+                window.hwnd = Some(hwnd.0 as usize);
+            }
         }
+    }
+
+    /// Bring window `vp` forward, out of the taskbar if it was minimised.
+    ///
+    /// **Not `ViewportCommand::Focus` on Windows.** For a window that is not in
+    /// front, winit answers that by faking a press and release of Alt — the key
+    /// Windows lets unlock the foreground (`force_window_active`). On a PC that
+    /// remaps Alt to the Windows key, that fake key is a tap of the Windows key:
+    /// the Start menu opened every time a PDF was opened from Explorer.
+    /// `SetForegroundWindow` needs no key: a launch hands its own right to the
+    /// foreground on (`instance::allow_foreground`), and a move between
+    /// Pagify's own windows is Pagify's to make. `Focus` is left for a window
+    /// whose `HWND` is not known yet — one just made, which Windows has already
+    /// put in front, so winit fakes nothing for it.
+    fn bring_forward(&self, ctx: &egui::Context, vp: ViewportId) {
+        ctx.send_viewport_cmd_to(vp, egui::ViewportCommand::Minimized(false));
+        #[cfg(target_os = "windows")]
+        if let Some(hwnd) = self.windows.iter().find(|w| w.vp == vp).and_then(|w| w.hwnd) {
+            if set_foreground(hwnd) {
+                return;
+            }
+        }
+        ctx.send_viewport_cmd_to(vp, egui::ViewportCommand::Focus);
     }
 
     /// Every window with a known place on the screen, most recently used first.
@@ -773,8 +826,7 @@ impl Hub {
             app.say_info(format!("{name} moved here from another window."));
         });
         self.touch(into);
-        ctx.send_viewport_cmd_to(into, egui::ViewportCommand::Minimized(false));
-        ctx.send_viewport_cmd_to(into, egui::ViewportCommand::Focus);
+        self.bring_forward(ctx, into);
         ctx.request_repaint();
     }
 
@@ -797,7 +849,7 @@ impl Hub {
         // the logo and the name come first, and the window has a frame above.
         let grab = egui::vec2(140.0, 64.0);
         let place = Place { at: Some(at - grab), size: size.max(egui::vec2(640.0, 480.0)) };
-        self.windows.push(Window { vp, app, place });
+        self.windows.push(Window { vp, app, place, hwnd: None });
         let index = self.windows.len() - 1;
         self.with_window(index, |app| app.say_info(format!("{name} moved into a window of its own.")));
         self.touch(vp);
@@ -846,8 +898,7 @@ impl Hub {
                         app.say_info(format!("{} is already open.", file.display()));
                     });
                     self.touch(vp);
-                    ctx.send_viewport_cmd_to(vp, egui::ViewportCommand::Minimized(false));
-                    ctx.send_viewport_cmd_to(vp, egui::ViewportCommand::Focus);
+                    self.bring_forward(ctx, vp);
                 }
                 None => rest.push(file.clone()),
             }
@@ -858,11 +909,14 @@ impl Hub {
         let vp = self.windows[used_last].vp;
         let request = Request { files: rest, commands: request.commands };
         let (number, of) = (self.windows[used_last].app.hub_state.win.serial + 1, self.windows.len());
+        // Forward before opening: the launch's right to the foreground is
+        // passed on as it hands over, and a big document takes a while to open.
+        self.bring_forward(ctx, vp);
         self.with_window(used_last, |app| {
             // In the session log only: which window a document went to is what
             // someone asks when it "opened in the wrong place".
             app.recording_state.session_log.record("hub", &format!("handed over to window {number} of {of}."));
-            app.open_handed_over(&request, ctx, vp)
+            app.open_handed_over(&request)
         });
         self.touch(vp);
     }
@@ -908,8 +962,7 @@ impl Hub {
             self.with_window(i, |app| app.ask_to_leave(Leaving::Program));
             // Whatever it asks, it asks where it can be seen.
             if self.windows[i].app.hub_state.win.leaving.is_none() {
-                ctx.send_viewport_cmd_to(vp, egui::ViewportCommand::Minimized(false));
-                ctx.send_viewport_cmd_to(vp, egui::ViewportCommand::Focus);
+                self.bring_forward(ctx, vp);
             }
         }
         for &i in plan.close.iter().rev() {
@@ -943,6 +996,15 @@ impl eframe::App for Hub {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.mark_hints(&ctx);
+        // The first window's `HWND` is known from the start, focused or not — a
+        // Pagify started behind another program (see `bring_forward`).
+        #[cfg(target_os = "windows")]
+        if let Some(first) = self.windows.iter_mut().find(|w| w.vp == ViewportId::ROOT && w.hwnd.is_none()) {
+            use raw_window_handle::HasWindowHandle as _;
+            if let Ok(raw_window_handle::RawWindowHandle::Win32(h)) = frame.window_handle().map(|h| h.as_raw()) {
+                first.hwnd = Some(h.hwnd.get() as usize);
+            }
+        }
         let others = self.windows.len().saturating_sub(1);
         let mut root_close_asked = false;
         for i in 0..self.windows.len() {
@@ -965,7 +1027,7 @@ impl eframe::App for Hub {
             }
         }
         if let Some(vp) = self.focus_next.take() {
-            ctx.send_viewport_cmd_to(vp, egui::ViewportCommand::Focus);
+            self.bring_forward(&ctx, vp);
         }
         // The first window's close button ends the program — unless there is
         // another window, which it is not allowed to take with it.

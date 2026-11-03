@@ -1192,3 +1192,64 @@ fn two_windows_are_drawn_in_one_frame_each_with_its_own_tabs() {
     // What is lent is back where it belongs after the frame.
     assert!(h.state().windows.iter().all(|w| w.app.library_state.recent.entries.is_empty()));
 }
+
+// -- bringing a window forward ----------------------------------------------
+
+/// What a pass that brings the first window forward asks of it.
+fn commands_bringing_forward(hub: &Hub) -> Vec<egui::ViewportCommand> {
+    let ctx = egui::Context::default();
+    let out = ctx.run_ui(Default::default(), |ui| hub.bring_forward(ui.ctx(), ViewportId::ROOT));
+    out.viewport_output.get(&ViewportId::ROOT).map(|v| v.commands.clone()).unwrap_or_default()
+}
+
+/// A real `HWND` that can never come to the front: a message-only window, so
+/// the test cannot take the focus from whatever is on the screen.
+#[cfg(target_os = "windows")]
+fn message_only_window() -> usize {
+    #[link(name = "user32")]
+    extern "system" {
+        fn CreateWindowExW(
+            ex: u32, class: *const u16, name: *const u16, style: u32, x: i32, y: i32, w: i32, h: i32,
+            parent: isize, menu: isize, instance: isize, param: isize,
+        ) -> isize;
+    }
+    const HWND_MESSAGE: isize = -3;
+    let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+    let hwnd = unsafe { CreateWindowExW(0, class.as_ptr(), std::ptr::null(), 0, 0, 0, 0, 0, HWND_MESSAGE, 0, 0, 0) };
+    assert_ne!(hwnd, 0, "no window made");
+    hwnd as usize
+}
+
+#[test]
+fn a_window_whose_hwnd_is_not_known_yet_is_asked_to_take_the_focus() {
+    let hub = hub_of(&["single-page.pdf"]);
+    let commands = commands_bringing_forward(&hub);
+    assert!(commands.contains(&egui::ViewportCommand::Minimized(false)), "{commands:?}");
+    assert!(commands.contains(&egui::ViewportCommand::Focus), "{commands:?}");
+}
+
+/// For a window not in front winit answers `Focus` by faking a press of Alt,
+/// which a PC that remaps Alt to the Windows key turns into the Start menu.
+#[cfg(target_os = "windows")]
+#[test]
+fn a_window_whose_hwnd_is_known_comes_forward_without_focus_so_no_alt_is_faked() {
+    let mut hub = hub_of(&["single-page.pdf"]);
+    hub.windows[0].hwnd = Some(message_only_window());
+    let commands = commands_bringing_forward(&hub);
+    assert!(commands.contains(&egui::ViewportCommand::Minimized(false)), "a minimised window stays down: {commands:?}");
+    assert!(!commands.contains(&egui::ViewportCommand::Focus), "Focus fakes an Alt press: {commands:?}");
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn a_window_whose_hwnd_has_gone_is_asked_to_take_the_focus() {
+    #[link(name = "user32")]
+    extern "system" {
+        fn DestroyWindow(hwnd: isize) -> i32;
+    }
+    let mut hub = hub_of(&["single-page.pdf"]);
+    let gone = message_only_window();
+    assert_ne!(unsafe { DestroyWindow(gone as isize) }, 0);
+    hub.windows[0].hwnd = Some(gone);
+    assert!(commands_bringing_forward(&hub).contains(&egui::ViewportCommand::Focus));
+}

@@ -513,14 +513,17 @@ impl PagifyApp {
         }
         for request in self.hub_state.handover.take() {
             let window = self.hub_state.handover.target_window();
-            self.open_handed_over(&request, ctx, window);
+            self.open_handed_over(&request);
+            // A window with no `Hub` around it, which only tests make; the hub
+            // brings its windows forward without `Focus` (`Hub::bring_forward`).
+            ctx.send_viewport_cmd_to(window, egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd_to(window, egui::ViewportCommand::Focus);
         }
     }
 
-    /// Open what `request` asks for in this window, and bring `window` — the
-    /// viewport this app is drawn in — forward. With several windows the `Hub`
-    /// calls this on the one used last; alone, that is only ever the first.
-    pub(crate) fn open_handed_over(&mut self, request: &Request, ctx: &egui::Context, window: egui::ViewportId) {
+    /// Open what `request` asks for in this window. With several windows the
+    /// `Hub` calls this on the one used last, and brings that window forward.
+    pub(crate) fn open_handed_over(&mut self, request: &Request) {
         // **A question that is up stays up.** "Close this document?" is drawn
         // for the active tab alone; a document that arrived and took the focus
         // away from it would hide the question until somebody found their way
@@ -555,8 +558,6 @@ impl PagifyApp {
                 self.active_tab = index;
             }
         }
-        ctx.send_viewport_cmd_to(window, egui::ViewportCommand::Minimized(false));
-        ctx.send_viewport_cmd_to(window, egui::ViewportCommand::Focus);
     }
 
     /// The tab that already has `path` open, if any.
