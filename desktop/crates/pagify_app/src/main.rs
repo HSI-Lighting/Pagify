@@ -3814,6 +3814,18 @@ impl PagifyApp {
                         if self.tab_mut().doc.is_some() {
                             ui.checkbox(&mut self.prefs_state.ortho, "Ortho");
                             ui.checkbox(&mut self.ui_state.show_thumbs, "Pages");
+                            let exact = ui.checkbox(&mut self.prefs_state.exact_pages, "Exact").on_hover_text(
+                                "Draw pages with PDFium only — exactly what prints — instead of the faster hayro where it draws them the same.",
+                            );
+                            if exact.changed() {
+                                if !cfg!(test) {
+                                    pagify_shell::preview::save_exact_pages(self.prefs_state.exact_pages);
+                                }
+                                // Every picture drawn again, by the renderer now chosen.
+                                for doc in self.tabs.iter_mut().filter_map(|t| t.doc.as_mut()) {
+                                    doc.rendered_is_stale();
+                                }
+                            }
                         }
 
                         // **One row of tabs, the newest on the left.** Reported
@@ -4712,7 +4724,7 @@ impl PagifyApp {
             } else {
                 pagify_shell::session_log::SessionLog::start()
             }, },
-            prefs_state: PrefsState { ortho: false, defaults: tools::Defaults::default(), draw_fill: false, snaps: SnapSet::defaults(), grid_pt: 0.0, exact_pages: false, },
+            prefs_state: PrefsState { ortho: false, defaults: tools::Defaults::default(), draw_fill: false, snaps: SnapSet::defaults(), grid_pt: 0.0, exact_pages: if cfg!(test) { false } else { pagify_shell::preview::load_exact_pages() }, },
             render_state: RenderState { renders: None, facts: None, previews: None, async_render: !cfg!(test), render_stats: RenderStats::default(), },
             ui_state: UiState { show_thumbs: true, organize_open: false, show_layers: false, command_open: false, errors_said: 0, },
             clipboard_state: ClipboardState { object_clipboard: None, paste_count: 0, page_clipboard: None, paste_ghost: None, clipboard_dir: if cfg!(test) {

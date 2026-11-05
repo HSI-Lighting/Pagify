@@ -155,6 +155,31 @@ impl Preview {
     }
 }
 
+/// Where "Exact" — every page picture drawn by PDFium only — is remembered,
+/// beside `appearance.json` and in the same shape.
+pub fn exact_pages_path() -> Option<std::path::PathBuf> {
+    crate::state::state_dir().map(|dir| dir.join("exact-pages.json"))
+}
+
+/// A missing or unreadable file is off, never an error.
+pub fn load_exact_pages_from(path: &std::path::Path) -> bool {
+    std::fs::read_to_string(path).ok().and_then(|text| serde_json::from_str::<bool>(&text).ok()).unwrap_or(false)
+}
+
+pub fn save_exact_pages_to(path: &std::path::Path, on: bool) -> std::io::Result<()> {
+    crate::state::write_own(path, if on { b"true" } else { b"false" })
+}
+
+pub fn load_exact_pages() -> bool {
+    exact_pages_path().is_some_and(|path| load_exact_pages_from(&path))
+}
+
+pub fn save_exact_pages(on: bool) {
+    if let Some(path) = exact_pages_path() {
+        let _ = save_exact_pages_to(&path, on);
+    }
+}
+
 /// `raster` turned a quarter clockwise a step, as PDFium's view rotation turns
 /// a page.
 pub fn turned(raster: PageRaster, rotation: pdf_core::Rotation) -> PageRaster {
@@ -637,6 +662,22 @@ mod tests {
                 assert!(!c.differs(), "{name} page {page} middle: {c:?}");
             }
         }
+    }
+
+    /// "Exact" is remembered between runs; a missing or unreadable file is off,
+    /// never an error.
+    #[test]
+    fn the_exact_switch_is_remembered() {
+        let dir = std::env::temp_dir().join(format!("pagify-exact-pages-{}", std::process::id()));
+        let path = dir.join("exact-pages.json");
+        assert!(!load_exact_pages_from(&path));
+        save_exact_pages_to(&path, true).expect("write");
+        assert!(load_exact_pages_from(&path));
+        save_exact_pages_to(&path, false).expect("write");
+        assert!(!load_exact_pages_from(&path));
+        std::fs::write(&path, b"not json").expect("write");
+        assert!(!load_exact_pages_from(&path));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// What hayro cannot read is `None`, not a panic.
