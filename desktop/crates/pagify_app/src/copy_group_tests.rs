@@ -282,7 +282,8 @@ fn edge_energy(raster: &pagify_shell::session::PageRaster) -> f64 {
 #[test]
 fn the_lens_is_copied_and_pasted_as_lines() {
     let Some(mut app) = vivo() else { return };
-    app.select_group_in(0, AppPoint { x: 415.0, y: 106.0 }, AppPoint { x: 490.0, y: 180.0 }, false);
+    // Right to left: a crossing marquee, which takes what it touches.
+    app.select_group_in(0, AppPoint { x: 490.0, y: 106.0 }, AppPoint { x: 415.0, y: 180.0 }, false);
     assert!(app.tab().selection.group.len() > 50);
     assert!(app.copy_object_selection());
     let Some(ObjectClipboard::Group(items)) = &app.clipboard_state.object_clipboard else { panic!("not a group") };
@@ -320,7 +321,8 @@ fn the_lens_is_copied_and_pasted_as_lines() {
 #[test]
 fn the_pasted_lens_is_as_sharp_as_the_original_at_every_zoom() {
     let Some(mut app) = vivo() else { return };
-    app.select_group_in(0, AppPoint { x: 415.0, y: 106.0 }, AppPoint { x: 490.0, y: 180.0 }, false);
+    // Right to left: a crossing marquee, which takes what it touches.
+    app.select_group_in(0, AppPoint { x: 490.0, y: 106.0 }, AppPoint { x: 415.0, y: 180.0 }, false);
     let members: Vec<Selected> = app.tab().selection.group.clone();
     // The drawing alone, so the box measured holds nothing else of the page's.
     let drawn: Vec<Selected> = members.into_iter().filter(|s| s.what != "the words").collect();

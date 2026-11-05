@@ -637,16 +637,6 @@ struct SelectionState {
     /// on all of them, at the same place on each, while only one page's drag was
     /// real.
     marquee: Option<(usize, AppPoint, AppPoint)>,
-    /// The handle under the pointer as of the last frame it was only
-    /// *hovering* — read by [`Self::interact_objects`] when a drag starts,
-    /// instead of hit-testing the drag's own current position. Same reason
-    /// as [`Self::signature_hover_handle`]: `egui` only decides a press has
-    /// become a drag once the pointer has moved a few pixels, and by then an
-    /// eight-pixel resize handle is already behind it — a fresh hit-test at
-    /// that point reads a corner-aimed resize as a body drag instead. This
-    /// tool shared `Handle`/`Grab` with the signature one but not the fix,
-    /// so an ordinary picture's handles were exactly this bug, unfixed.
-    object_hover_handle: Option<Handle>,
     /// Whether Shift was held on the last frame of a turn: the angle is then
     /// snapped to 15 degrees, in what is drawn and in what is applied.
     rotate_snap: bool,
@@ -707,20 +697,6 @@ struct SelectionState {
     /// same meaning as [`Self::grab`], kept separate because the two
     /// selections are independent and a signature is never page content.
     signature_grab: Option<Grab>,
-    /// The handle under the pointer as of the last frame it was only
-    /// *hovering* — read by [`Self::interact_signatures`] when a drag
-    /// starts, instead of hit-testing the drag's own current position.
-    ///
-    /// **Why this is not the same thing.** `egui` only decides a press has
-    /// become a drag once the pointer has moved past its own threshold, and
-    /// `drag_started()` reports the position *by then* — already a few
-    /// pixels off from wherever the button actually went down. Against an
-    /// eight-pixel handle that is enough to miss it entirely: a resize
-    /// aimed precisely at a corner was silently read as a body drag
-    /// instead, because by the time the drag was recognised the reported
-    /// point had already slid past the handle and onto the rect it sits
-    /// on. This is what was under the pointer just before that slide.
-    signature_hover_handle: Option<Handle>,
     /// The same mechanism as [`Self::signature_selected`], for a plain
     /// placed picture rather than one carrying a signature's name — see
     /// [`PlacedImageSelected`].
@@ -728,8 +704,6 @@ struct SelectionState {
     /// A drag in progress on [`Self::placed_image_selected`] — see
     /// [`Self::signature_grab`].
     placed_image_grab: Option<Grab>,
-    /// See [`Self::signature_hover_handle`].
-    placed_image_hover_handle: Option<Handle>,
     /// When the arrow keys last moved the selection, on egui's clock — set while
     /// their moves are still building up in whichever `*_grab` they filled in.
     /// See `nudge.rs`.
@@ -1023,7 +997,7 @@ impl DocTab {
             secure_state: SecureState { asking_to_secure: None, secure_in_place_confirmed: false, asking_to_redact: None, awaiting_password: None, held_passcode: None, password_typed: zeroize::Zeroizing::new(String::new()), password_field_focused: false, password_problem: None, password_plus: false, },
             tool_state: ToolState { object_tool: None, hand_shown_before_any_tool_is_picked: false },
             undo_state: UndoState { prefer_layer_undo: false, last_layer_edits: 0, last_doc_generation: 0 },
-            selection: SelectionState { selected: None, group: Vec::new(), grab: None, marquee: None, object_hover_handle: None, rotate_snap: false, group_grab: None, text_selection: None, text_drag: None, drag_from: None, markup_grab: None, last_snap: None, right_clicked_at: None, right_click_text_actions: None, opacity_draft: None, selected_image: None, picked_layer: None, signature_selected: None, signature_grab: None, signature_hover_handle: None, placed_image_selected: None, placed_image_grab: None, nudge_at: None, placed_image_hover_handle: None, },
+            selection: SelectionState { selected: None, group: Vec::new(), grab: None, marquee: None, rotate_snap: false, group_grab: None, text_selection: None, text_drag: None, drag_from: None, markup_grab: None, last_snap: None, right_clicked_at: None, right_click_text_actions: None, opacity_draft: None, selected_image: None, picked_layer: None, signature_selected: None, signature_grab: None, placed_image_selected: None, placed_image_grab: None, nudge_at: None, },
             ribbon: Tab::Home,
             closing: None,
             reading: None,
@@ -6169,26 +6143,27 @@ impl PagifyApp {
         }
     }
 
-    /// Every word-run, picture, and shape on a page whose rectangle overlaps
-    /// `rect` at all — what dragging a rectangle over empty page area
-    /// collects, for [`Self::group`]. Leaves out anything drawn inside
+    /// Every word-run, picture, and shape on a page that `rect` takes — what
+    /// dragging a rectangle over empty page area collects, for
+    /// [`Self::group`]. `crossing`: whatever the rectangle touches; otherwise
+    /// only what lies wholly inside it (see [`Self::select_group_in`]).
+    /// Leaves out anything drawn inside
     /// another object's group (`drawn_objects` depth > 0): a marquee is for
     /// loose page content, and a form's own panels are reached the one-at-
     /// a-time way [`Self::thing_at`]'s own `grouped` closure already reaches
     /// them.
-    fn things_in(&self, page: usize, rect: pdf_core::document::Rect) -> Vec<Selected> {
+    fn things_in(&self, page: usize, rect: pdf_core::document::Rect, crossing: bool) -> Vec<Selected> {
         let norm = |r: &pdf_core::document::Rect| {
             (r.left.min(r.right), r.top.min(r.bottom), r.left.max(r.right), r.top.max(r.bottom))
         };
         let (ml, mt, mr, mb) = norm(&rect);
-        // **Touched, not merely enclosed.** A marquee takes every object whose
-        // box it crosses, so a rectangle dragged over part of a line of text,
-        // a picture or a shape takes that thing without having to enclose the
-        // whole of it. (The owner's report: text could only be selected by
-        // enclosing its entire box, which swept in the box's other text.)
         let touches = |r: &pdf_core::document::Rect| {
             let (l, t, right, bottom) = norm(r);
-            ml <= right && mr >= l && mt <= bottom && mb >= t
+            if crossing {
+                ml <= right && mr >= l && mt <= bottom && mb >= t
+            } else {
+                ml <= l && mr >= right && mt <= t && mb >= bottom
+            }
         };
         let Some(doc) = self.tab().doc.as_ref() else { return Vec::new() };
         let size = doc.strip.size_of(page);
@@ -6299,8 +6274,15 @@ impl PagifyApp {
     /// dragged over a single word is not a worse way to select it than
     /// clicking. More than one becomes [`Self::group`].
     /// `extend`: fold onto the selection already in hand (Shift held) rather
-    /// than replace it — members already in it are not added twice, since
-    /// [`Self::things_in`] returns every object the rectangle touches.
+    /// than replace it — members already in it are not added twice.
+    ///
+    /// **AutoCAD's rule, by the direction of the drag** (the owner's choice,
+    /// 2026-11-05). Dragged to the right, a *window*: only what lies wholly
+    /// inside. Dragged to the left, *crossing*: whatever it touches, with a
+    /// run it only part-covers split into its letters first — the DIALux
+    /// report's "select one column of a row" (§42), which a window cannot
+    /// do. App x runs the way screen x does, so `end.x < start.x` is a
+    /// leftward drag on screen.
     fn select_group_in(&mut self, page: usize, start: AppPoint, end: AppPoint, extend: bool) {
         let rect = pdf_core::document::Rect {
             left: start.x.min(end.x) as f32,
@@ -6308,10 +6290,11 @@ impl PagifyApp {
             right: start.x.max(end.x) as f32,
             bottom: start.y.max(end.y) as f32,
         };
-        if !extend {
+        let crossing = end.x < start.x;
+        if crossing && !extend {
             self.split_runs_clipped_by(page, rect);
         }
-        let mut found = self.things_in(page, rect);
+        let mut found = self.things_in(page, rect, crossing);
         if extend {
             let mut members = std::mem::take(&mut self.tab_mut().selection.group);
             if let Some(sel) = self.tab_mut().selection.selected.take() {
@@ -6731,7 +6714,7 @@ impl PagifyApp {
         // something else on them (see `dragged_by`).
         let keep_ratio = keep_ratio && sel.what == "the picture";
         // `handle: None` here is exactly the "aimed at a corner, landed on
-        // the body" failure mode `Self::object_hover_handle` exists to
+        // the body" failure mode `Self::pressed_at` exists to
         // prevent — logged before the outcome message below, which only
         // ever says "moved"/"resized" and cannot by itself say which one a
         // reporter actually meant to happen.
@@ -7487,13 +7470,22 @@ impl PagifyApp {
 
         if let Some((_, start, current)) = self.tab_mut().selection.marquee.filter(|(on, ..)| *on == page) {
             let rect = egui::Rect::from_two_pos(view.to_screen(start), view.to_screen(current));
-            painter.rect_filled(rect, egui::CornerRadius::ZERO, theme::violet().gamma_multiply(0.08));
-            painter.rect_stroke(
-                rect,
-                egui::CornerRadius::ZERO,
-                egui::Stroke::new(1.0, theme::violet()),
-                egui::StrokeKind::Outside,
-            );
+            // AutoCAD's look: a window (dragged right) is solid, a crossing
+            // marquee (dragged left, takes what it touches) is dashed and green.
+            if current.x < start.x {
+                let green = egui::Color32::from_rgb(40, 170, 80);
+                painter.rect_filled(rect, egui::CornerRadius::ZERO, green.gamma_multiply(0.10));
+                let ring = [rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom(), rect.left_top()];
+                painter.extend(egui::Shape::dashed_line(&ring, egui::Stroke::new(1.0, green), 5.0, 3.0));
+            } else {
+                painter.rect_filled(rect, egui::CornerRadius::ZERO, theme::violet().gamma_multiply(0.08));
+                painter.rect_stroke(
+                    rect,
+                    egui::CornerRadius::ZERO,
+                    egui::Stroke::new(1.0, theme::violet()),
+                    egui::StrokeKind::Outside,
+                );
+            }
         }
 
         let Some(bounds) = self.group_bounds(page) else { return };

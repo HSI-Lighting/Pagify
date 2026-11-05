@@ -1635,6 +1635,56 @@ fn dragging_an_object_handle_through_the_real_pointer_path_resizes_it() {
     );
 }
 
+/// **A handle had to be held still before it would resize** (reported from
+/// use, 2026-11-05; the session log showed `handle=None` on most drags of a
+/// placed picture). A hand moves a pixel or two a frame: egui calls the press
+/// a drag only after 6 px (or 0.8 s held), and the handle is 4 px, so the
+/// pointer had left it by the time the drag began and the press was read
+/// from there. `drag` above jumps a quarter of the way in one frame, which
+/// hid it; this one goes a pixel a frame, at sixty frames a second.
+#[test]
+fn a_handle_dragged_a_pixel_a_frame_resizes_rather_than_moves() {
+    use egui::{Event, PointerButton};
+    let mut h = harness_60fps(&fixture("pictures.pdf"), false);
+    h.state_mut().submit("editobject");
+    h.run_steps(2);
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
+    let image = h.state().tab().doc.as_ref().unwrap().session.images_on(0).unwrap().remove(0);
+    click(&mut h, view.to_screen(AppPoint {
+        x: ((image.rect.left + image.rect.right) / 2.0) as f64,
+        y: ((image.rect.top + image.rect.bottom) / 2.0) as f64,
+    }));
+    assert!(h.state().tab().selection.selected.is_some(), "the picture was not selected");
+
+    let corner = view.to_screen(AppPoint { x: image.rect.right as f64, y: image.rect.bottom as f64 });
+    let button = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Default::default() };
+    h.input_mut().events.push(Event::PointerMoved(corner));
+    h.run_steps(1);
+    h.input_mut().events.push(button(corner, true));
+    h.run_steps(1);
+    let steps = 20;
+    for i in 1..=steps {
+        h.input_mut().events.push(Event::PointerMoved(corner - egui::vec2(i as f32, 0.0)));
+        h.run_steps(1);
+    }
+    h.input_mut().events.push(button(corner - egui::vec2(steps as f32, 0.0), false));
+    h.run_steps(2);
+
+    let after = h.state().tab().doc.as_ref().unwrap().session.images_on(0).unwrap().remove(0);
+    assert!(
+        (after.rect.left - image.rect.left).abs() < 0.5,
+        "the picture moved instead of resizing: before {:?}, after {:?}",
+        image.rect,
+        after.rect
+    );
+    assert!(
+        after.rect.right < image.rect.right - 5.0,
+        "the right edge did not follow the handle: before {:?}, after {:?}",
+        image.rect,
+        after.rect
+    );
+}
+
 /// **Reported from use: a drawn shape could only be moved by typing
 /// `move` and clicking twice — a mouse drag on it did nothing but start
 /// a marquee.** Through the real pointer path this time, not the typed

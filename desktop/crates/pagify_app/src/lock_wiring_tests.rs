@@ -3791,10 +3791,10 @@ fn splitting_a_run_leaves_its_letters_recoverable_as_one_paragraph() {
     );
 }
 
-/// **A marquee takes what it touches, not only what it encloses.** A
-/// rectangle that merely crosses a picture's right half selects it — the
-/// owner's report: requiring the whole box meant a marquee had to sweep in
-/// everything else the box held.
+/// **Dragged to the left, a marquee takes what it touches** (AutoCAD's
+/// crossing selection). A rectangle that merely crosses a picture's right
+/// half selects it — the owner's report: requiring the whole box meant a
+/// marquee had to sweep in everything else the box held.
 #[test]
 fn a_marquee_that_only_clips_a_picture_still_selects_it() {
     let mut app = app("pictures.pdf");
@@ -3802,8 +3802,33 @@ fn a_marquee_that_only_clips_a_picture_still_selects_it() {
     let pictures = app.tab_mut().doc.as_ref().expect("open").session.images_on(0).expect("images");
     let target = pictures[0].clone();
 
-    // The right half of the target's own bounding box: its left edge is
-    // outside this rectangle, so it is crossed, not enclosed.
+    // The right half of the target's own bounding box, dragged right to
+    // left: its left edge is outside this rectangle, so it is crossed.
+    let mid_x = (target.rect.left + target.rect.right) / 2.0;
+    app.select_group_in(
+        0,
+        AppPoint { x: (target.rect.right + 5.0) as f64, y: (target.rect.top - 5.0) as f64 },
+        AppPoint { x: mid_x as f64, y: (target.rect.bottom + 5.0) as f64 },
+        false,
+    );
+    assert_eq!(
+        app.tab_mut().selection.selected.as_ref().map(|s| s.object),
+        Some(target.object),
+        "a picture half inside the marquee was not selected"
+    );
+}
+
+/// **Dragged to the right, a marquee takes only what lies wholly inside it**
+/// (AutoCAD's window; the owner's report, 2026-11-05: "whatever the marquee
+/// touches gets selected"). The same rectangle as above, dragged the other
+/// way, leaves the half-covered picture out and splits nothing.
+#[test]
+fn a_marquee_dragged_to_the_right_takes_only_what_it_encloses() {
+    let mut app = app("pictures.pdf");
+    app.submit("editobject");
+    let pictures = app.tab_mut().doc.as_ref().expect("open").session.images_on(0).expect("images");
+    let target = pictures[0].clone();
+
     let mid_x = (target.rect.left + target.rect.right) / 2.0;
     app.select_group_in(
         0,
@@ -3811,10 +3836,49 @@ fn a_marquee_that_only_clips_a_picture_still_selects_it() {
         AppPoint { x: (target.rect.right + 5.0) as f64, y: (target.rect.bottom + 5.0) as f64 },
         false,
     );
-    assert_eq!(
-        app.tab_mut().selection.selected.as_ref().map(|s| s.object),
-        Some(target.object),
-        "a picture half inside the marquee was not selected"
+    let picked: Vec<usize> = app.tab().selection.selected.iter()
+        .chain(app.tab().selection.group.iter())
+        .map(|s| s.object)
+        .collect();
+    assert!(!picked.contains(&target.object), "a window took a picture only half inside it: {picked:?}");
+
+    // Wholly inside, it is taken.
+    app.select_group_in(
+        0,
+        AppPoint { x: (target.rect.left - 5.0) as f64, y: (target.rect.top - 5.0) as f64 },
+        AppPoint { x: (target.rect.right + 5.0) as f64, y: (target.rect.bottom + 5.0) as f64 },
+        false,
+    );
+    let picked: Vec<usize> = app.tab().selection.selected.iter()
+        .chain(app.tab().selection.group.iter())
+        .map(|s| s.object)
+        .collect();
+    assert!(picked.contains(&target.object), "a window did not take a picture wholly inside it: {picked:?}");
+}
+
+/// A window over the right half of a line of text takes nothing of it and
+/// leaves the run whole: only a crossing marquee splits runs into letters.
+#[test]
+fn a_window_over_part_of_a_line_does_not_split_it() {
+    let mut app = app("text-lines.pdf");
+    app.submit("editobject");
+    let session = &app.tab().doc.as_ref().expect("open").session;
+    let before = session.text_runs(0).expect("runs").len();
+    let (_, rect) = session.text_run_rects(0).expect("runs").into_iter()
+        .min_by(|(_, a), (_, b)| a.top.total_cmp(&b.top)).expect("a run");
+
+    let mid_x = (rect.left + rect.right) / 2.0;
+    app.select_group_in(
+        0,
+        AppPoint { x: mid_x as f64, y: (rect.top - 5.0) as f64 },
+        AppPoint { x: (rect.right + 5.0) as f64, y: (rect.bottom + 5.0) as f64 },
+        false,
+    );
+    let after = app.tab().doc.as_ref().expect("open").session.text_runs(0).expect("runs").len();
+    assert_eq!(after, before, "a window split a run it only part-covered");
+    assert!(
+        app.tab().selection.selected.is_none() && app.tab().selection.group.is_empty(),
+        "a window took a run only half inside it"
     );
 }
 
@@ -3828,11 +3892,12 @@ fn a_marquee_that_only_clips_a_line_of_text_takes_only_what_it_covers() {
     let runs = app.tab_mut().doc.as_ref().expect("open").session.text_run_rects(0).expect("runs");
     let (_, rect) = runs.into_iter().min_by(|(_, a), (_, b)| a.top.total_cmp(&b.top)).expect("a run");
 
+    // Dragged right to left: crossing.
     let mid_x = (rect.left + rect.right) / 2.0;
     app.select_group_in(
         0,
-        AppPoint { x: mid_x as f64, y: (rect.top - 5.0) as f64 },
-        AppPoint { x: (rect.right + 5.0) as f64, y: (rect.bottom + 5.0) as f64 },
+        AppPoint { x: (rect.right + 5.0) as f64, y: (rect.top - 5.0) as f64 },
+        AppPoint { x: mid_x as f64, y: (rect.bottom + 5.0) as f64 },
         false,
     );
     let picked: Vec<Selected> = app
@@ -3918,12 +3983,12 @@ fn a_marquee_over_one_column_of_the_lux_table_takes_that_column_only() {
     app.submit("editobject");
     let page = 1;
 
-    // The right-hand column, dragged from just left of its own numbers down
-    // the table — the owner's marquee.
+    // The right-hand column, from just left of its own numbers down the
+    // table — the owner's marquee, dragged right to left (crossing).
     app.select_group_in(
         page,
-        AppPoint { x: 322.0, y: 565.0 },
-        AppPoint { x: 360.0, y: 735.0 },
+        AppPoint { x: 360.0, y: 565.0 },
+        AppPoint { x: 322.0, y: 735.0 },
         false,
     );
     let picked: Vec<Selected> = app

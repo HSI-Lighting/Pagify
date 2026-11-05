@@ -88,6 +88,12 @@ impl crate::PagifyApp {
         if shift && grab.handle.is_none() { Self::one_axis(by) } else { by }
     }
 
+    /// Where the button went down for the drag starting now, on the page —
+    /// `at` only if egui has lost it.
+    fn pressed_at(ui: &egui::Ui, view: PageView, at: AppPoint) -> AppPoint {
+        ui.input(|i| i.pointer.press_origin()).map_or(at, |p| view.to_page(p))
+    }
+
     /// Forget what the object tool has picked. A placed picture or signature
     /// is selected by the same pointer, and two selections at once means
     /// Delete, Copy and the handles disagree about which one they mean.
@@ -107,72 +113,49 @@ impl crate::PagifyApp {
         at: AppPoint,
         view: PageView,
     ) {
-        // Read before the hover block below can overwrite it — see
-        // `Self::object_hover_handle`'s own doc for why a drag that has just
-        // started must be classified against *that*, not against a fresh
-        // hit-test at `at`. Mirrors `Self::interact_signatures`.
-        let remembered_handle = self.tab_mut().selection.object_hover_handle;
-
         // The cursor says what a press here would do.
         if self.tab_mut().selection.grab.is_none() && self.tab_mut().selection.group_grab.is_none() {
             if let Some(rect) = self.tab().selection.selected.as_ref().filter(|s| s.page == page).map(|s| s.rect) {
-                let handle = self.handle_at(at, view);
-                self.tab_mut().selection.object_hover_handle = handle;
-                if let Some(handle) = handle {
+                if let Some(handle) = self.handle_at(at, view) {
                     ui.output_mut(|o| o.cursor_icon = handle.cursor());
                 } else if Self::point_in_rect(at, &rect) {
                     ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grab);
                 }
             } else if let Some(bounds) = self.group_bounds(page) {
-                let handle = Self::handle_near(at, view, &bounds);
-                self.tab_mut().selection.object_hover_handle = handle;
-                if let Some(handle) = handle {
+                if let Some(handle) = Self::handle_near(at, view, &bounds) {
                     ui.output_mut(|o| o.cursor_icon = handle.cursor());
                 } else if Self::point_in_rect(at, &bounds) {
                     ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grab);
                 }
-            } else {
-                self.tab_mut().selection.object_hover_handle = None;
             }
         }
 
         if response.drag_started() {
-            let on_handle = self.tab_mut()
-                .selection
-                .selected
-                .as_ref()
+            // **What the press landed on, not what the pointer is over now.**
+            // egui calls a press a drag only once it has moved 6 px or been
+            // held 0.8 s; a hand moves those 6 px over several frames, and by
+            // then it is off a 4 px handle. Hit-testing anything later than
+            // the press turned an aimed resize into a move unless the button
+            // was held still first (reported from use, 2026-11-05). Everything
+            // is also measured from the press, so what is dragged stays under
+            // the pointer instead of trailing it by the 6 px.
+            let pressed = Self::pressed_at(ui, view, at);
+            let on_handle = self.tab().selection.selected.as_ref()
                 .filter(|s| s.page == page)
-                .and_then(|_| remembered_handle);
-            let on_body = self.tab_mut().selection.selected.as_ref().is_some_and(|s| {
-                s.page == page
-                    && at.x >= s.rect.left as f64
-                    && at.x <= s.rect.right as f64
-                    && at.y >= s.rect.top as f64
-                    && at.y <= s.rect.bottom as f64
-            });
+                .and_then(|_| self.handle_at(pressed, view));
+            let on_body = self.tab().selection.selected.as_ref()
+                .is_some_and(|s| s.page == page && Self::point_in_rect(pressed, &s.rect));
             let group_bounds = self.group_bounds(page);
-            // A group's handles read from `remembered_handle` too — it is
-            // whichever of the two hover branches above last ran, and
-            // `self.tab_mut().selection.selected`/`self.tab_mut().selection.group` are never both populated at
-            // once, so it always means the right one.
-            let on_group_handle = group_bounds.is_some().then(|| remembered_handle).flatten();
+            let on_group_handle = group_bounds.as_ref().and_then(|b| Self::handle_near(pressed, view, b));
             let on_group_body = on_group_handle.is_none()
-                && group_bounds.as_ref().is_some_and(|b| Self::point_in_rect(at, b));
+                && group_bounds.as_ref().is_some_and(|b| Self::point_in_rect(pressed, b));
             if on_group_handle.is_some() || on_group_body {
-                self.tab_mut().selection.group_grab = Some(Grab { handle: on_group_handle, from: at, by: (0.0, 0.0) });
+                self.tab_mut().selection.group_grab = Some(Grab { handle: on_group_handle, from: pressed, by: (0.0, 0.0) });
             } else if on_handle.is_some() || on_body {
                 // A drag on the current selection's own body or a handle:
                 // move or resize it.
                 self.tab_mut().selection.group = Vec::new();
-                // **A turn is measured from where the pointer went down, not from
-                // where egui decided it was a drag** — a few pixels along already,
-                // which at the handle's distance from the middle is several
-                // degrees the shape would jump by the moment it began to turn.
-                let from = match (on_handle, ui.input(|i| i.pointer.press_origin())) {
-                    (Some(Handle::Rotate), Some(pressed)) => view.to_page(pressed),
-                    _ => at,
-                };
-                self.tab_mut().selection.grab = Some(Grab { handle: on_handle, from, by: (0.0, 0.0) });
+                self.tab_mut().selection.grab = Some(Grab { handle: on_handle, from: pressed, by: (0.0, 0.0) });
             } else {
                 // **Reported from use: dragging out a marquee across
                 // several objects kept grabbing and moving whichever one
@@ -194,7 +177,7 @@ impl crate::PagifyApp {
                 if !ui.input(|i| i.modifiers.shift || i.modifiers.command) {
                     self.tab_mut().selection.group = Vec::new();
                 }
-                self.tab_mut().selection.marquee = Some((page, at, at));
+                self.tab_mut().selection.marquee = Some((page, pressed, at));
             }
         }
 
@@ -285,54 +268,35 @@ impl crate::PagifyApp {
         at: AppPoint,
         view: PageView,
     ) -> bool {
-        // Read before the hover block below can overwrite it — see
-        // `Self::signature_hover_handle`'s own doc for why a drag that has
-        // just started must be classified against *that*, not against a
-        // fresh hit-test at `at`.
-        let remembered_handle = self.tab_mut().selection.signature_hover_handle;
-
         if self.tab_mut().selection.signature_grab.is_none() {
             if let Some(rect) = self.tab().selection.signature_selected.as_ref().filter(|s| s.page == page).map(|s| s.rect) {
-                let handle = self.signature_handle_at(at, view);
-                self.tab_mut().selection.signature_hover_handle = handle;
-                if let Some(handle) = handle {
+                if let Some(handle) = self.signature_handle_at(at, view) {
                     ui.output_mut(|o| o.cursor_icon = handle.cursor());
                 } else if Self::point_in_rect(at, &rect) {
                     ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grab);
                 }
-            } else {
-                self.tab_mut().selection.signature_hover_handle = None;
             }
         }
 
         if response.drag_started() {
-            // **Not a fresh hit-test at `at`.** `egui` only decides a press
-            // has become a drag once the pointer has moved past its own
-            // threshold, and by then `at` has already slid off an
-            // eight-pixel handle and onto the rect it sits on — silently
-            // turning an aimed resize into a body move. `remembered_handle`
-            // is whatever was under the pointer the frame before that
-            // slide, which for a real press is exactly where it went down.
-            let on_handle = self.tab_mut()
-                .selection.signature_selected
-                .as_ref()
+            // What the press landed on — see `Self::interact_objects`.
+            let pressed = Self::pressed_at(ui, view, at);
+            let on_handle = self.tab().selection.signature_selected.as_ref()
                 .filter(|s| s.page == page)
-                .and_then(|_| remembered_handle);
-            let on_body = self.tab_mut()
-                .selection.signature_selected
-                .as_ref()
-                .is_some_and(|s| s.page == page && Self::point_in_rect(at, &s.rect));
+                .and_then(|_| self.signature_handle_at(pressed, view));
+            let on_body = self.tab().selection.signature_selected.as_ref()
+                .is_some_and(|s| s.page == page && Self::point_in_rect(pressed, &s.rect));
             if on_handle.is_some() || on_body {
-                self.tab_mut().selection.signature_grab = Some(Grab { handle: on_handle, from: at, by: (0.0, 0.0) });
+                self.tab_mut().selection.signature_grab = Some(Grab { handle: on_handle, from: pressed, by: (0.0, 0.0) });
                 return true;
             }
             // A drag starting fresh on an unselected signature selects it
             // and carries the gesture on — the object tool's own rule for
             // the same reason: one gesture, not two.
-            if let Some((index, rect, rotation)) = self.signature_at(page, at) {
+            if let Some((index, rect, rotation)) = self.signature_at(page, pressed) {
                 self.tab_mut().selection.signature_selected = Some(SignatureSelected { page, index, rect, rotation });
                 self.drop_object_selection();
-                self.tab_mut().selection.signature_grab = Some(Grab { handle: None, from: at, by: (0.0, 0.0) });
+                self.tab_mut().selection.signature_grab = Some(Grab { handle: None, from: pressed, by: (0.0, 0.0) });
                 return true;
             }
         }
@@ -389,40 +353,32 @@ impl crate::PagifyApp {
         at: AppPoint,
         view: PageView,
     ) -> bool {
-        let remembered_handle = self.tab_mut().selection.placed_image_hover_handle;
-
         if self.tab_mut().selection.placed_image_grab.is_none() {
             if let Some(rect) = self.tab().selection.placed_image_selected.as_ref().filter(|s| s.page == page).map(|s| s.rect) {
-                let handle = self.placed_image_handle_at(at, view);
-                self.tab_mut().selection.placed_image_hover_handle = handle;
-                if let Some(handle) = handle {
+                if let Some(handle) = self.placed_image_handle_at(at, view) {
                     ui.output_mut(|o| o.cursor_icon = handle.cursor());
                 } else if Self::point_in_rect(at, &rect) {
                     ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grab);
                 }
-            } else {
-                self.tab_mut().selection.placed_image_hover_handle = None;
             }
         }
 
         if response.drag_started() {
-            let on_handle = self.tab_mut()
-                .selection.placed_image_selected
-                .as_ref()
+            // What the press landed on — see `Self::interact_objects`.
+            let pressed = Self::pressed_at(ui, view, at);
+            let on_handle = self.tab().selection.placed_image_selected.as_ref()
                 .filter(|s| s.page == page)
-                .and_then(|_| remembered_handle);
-            let on_body = self.tab_mut()
-                .selection.placed_image_selected
-                .as_ref()
-                .is_some_and(|s| s.page == page && Self::point_in_rect(at, &s.rect));
+                .and_then(|_| self.placed_image_handle_at(pressed, view));
+            let on_body = self.tab().selection.placed_image_selected.as_ref()
+                .is_some_and(|s| s.page == page && Self::point_in_rect(pressed, &s.rect));
             if on_handle.is_some() || on_body {
-                self.tab_mut().selection.placed_image_grab = Some(Grab { handle: on_handle, from: at, by: (0.0, 0.0) });
+                self.tab_mut().selection.placed_image_grab = Some(Grab { handle: on_handle, from: pressed, by: (0.0, 0.0) });
                 return true;
             }
-            if let Some((index, rect, rotation)) = self.placed_image_at(page, at) {
+            if let Some((index, rect, rotation)) = self.placed_image_at(page, pressed) {
                 self.tab_mut().selection.placed_image_selected = Some(PlacedImageSelected { page, index, rect, rotation });
                 self.drop_object_selection();
-                self.tab_mut().selection.placed_image_grab = Some(Grab { handle: None, from: at, by: (0.0, 0.0) });
+                self.tab_mut().selection.placed_image_grab = Some(Grab { handle: None, from: pressed, by: (0.0, 0.0) });
                 return true;
             }
         }
