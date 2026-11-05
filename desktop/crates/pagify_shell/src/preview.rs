@@ -75,6 +75,80 @@ impl Preview {
     }
 }
 
+/// Above this average difference a channel, two pictures of a page differ.
+/// Antialiasing alone, the two renderers' edges a pixel apart, came to under 6
+/// on every fixture at thumbnail size.
+pub const DIFF_MEAN: f64 = 6.0;
+/// hayro's inked pixels over PDFium's, inside which the two drew about as much.
+/// A pixel is inked when any of its channels is below 160.
+pub const INK_RATIO: std::ops::RangeInclusive<f64> = 0.8..=1.25;
+/// The share of inked pixels with no ink of the other picture within a pixel,
+/// above which a mark is missing or somewhere else, whatever the average says.
+pub const INK_MOVED: f64 = 0.05;
+
+/// How far hayro's picture of a page is from PDFium's.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Comparison {
+    /// The average difference a channel, 0–255.
+    pub mean_diff: f64,
+    /// hayro's inked pixels over PDFium's; 1 when both inked fewer than 20.
+    pub ink_ratio: f64,
+    /// The share of inked pixels, of both pictures, with no ink of the other
+    /// picture within a pixel.
+    pub ink_moved: f64,
+}
+
+impl Comparison {
+    pub fn differs(&self) -> bool {
+        self.mean_diff > DIFF_MEAN || !INK_RATIO.contains(&self.ink_ratio) || self.ink_moved > INK_MOVED
+    }
+}
+
+/// hayro's picture of a page against PDFium's, over the area both cover;
+/// `None` when the two differ in size by more than a pixel either way.
+pub fn compare(hayro: &PageRaster, pdfium: &PageRaster) -> Option<Comparison> {
+    if hayro.width.abs_diff(pdfium.width) > 1 || hayro.height.abs_diff(pdfium.height) > 1 {
+        return None;
+    }
+    let (w, h) = (hayro.width.min(pdfium.width) as usize, hayro.height.min(pdfium.height) as usize);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let mut total = 0u64;
+    for y in 0..h {
+        for x in 0..w {
+            let (a, b) = ((y * hayro.width as usize + x) * 4, (y * pdfium.width as usize + x) * 4);
+            for c in 0..3 {
+                total += hayro.pixels[a + c].abs_diff(pdfium.pixels[b + c]) as u64;
+            }
+        }
+    }
+    let inked = |r: &PageRaster| -> Vec<bool> {
+        (0..h)
+            .flat_map(|y| (0..w).map(move |x| (y, x)))
+            .map(|(y, x)| r.pixels[(y * r.width as usize + x) * 4..][..3].iter().any(|&c| c < 160))
+            .collect()
+    };
+    let (a, b) = (inked(hayro), inked(pdfium));
+    // Inked pixels of `of` with no ink of `other` in the 3×3 around them.
+    let lost = |of: &[bool], other: &[bool]| {
+        (0..h * w)
+            .filter(|&i| of[i])
+            .filter(|&i| {
+                let (y, x) = (i / w, i % w);
+                !(y.saturating_sub(1)..=(y + 1).min(h - 1))
+                    .any(|y| (x.saturating_sub(1)..=(x + 1).min(w - 1)).any(|x| other[y * w + x]))
+            })
+            .count()
+    };
+    let (a_ink, b_ink) = (a.iter().filter(|&&i| i).count(), b.iter().filter(|&&i| i).count());
+    Some(Comparison {
+        mean_diff: total as f64 / (w * h * 3) as f64,
+        ink_ratio: if a_ink < 20 && b_ink < 20 { 1.0 } else { a_ink as f64 / b_ink.max(1) as f64 },
+        ink_moved: (lost(&a, &b) + lost(&b, &a)) as f64 / (a_ink + b_ink).max(1) as f64,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,37 +173,53 @@ mod tests {
                 let ours = preview.render(page, 160).unwrap_or_else(|| panic!("{name} page {page}: hayro drew nothing"));
                 let width_pt = session.page_size(page).expect("size").width_pt;
                 let theirs = session.render_page(page, 160.0 / width_pt).expect("PDFium");
-                assert!(
-                    ours.width.abs_diff(theirs.width) <= 1 && ours.height.abs_diff(theirs.height) <= 1,
-                    "{name} page {page}: {}x{} against PDFium's {}x{}",
-                    ours.width, ours.height, theirs.width, theirs.height
-                );
-                let (w, h) = (ours.width.min(theirs.width) as usize, ours.height.min(theirs.height) as usize);
-                let mut total = 0u64;
-                for y in 0..h {
-                    for x in 0..w {
-                        for c in 0..3 {
-                            let a = ours.pixels[(y * ours.width as usize + x) * 4 + c] as i64;
-                            let b = theirs.pixels[(y * theirs.width as usize + x) * 4 + c] as i64;
-                            total += (a - b).unsigned_abs();
-                        }
-                    }
-                }
-                let mean = total as f64 / (w * h * 3) as f64;
-                assert!(mean < 6.0, "{name} page {page}: hayro and PDFium differ by {mean:.1} a channel on average");
+                let c = compare(&ours, &theirs).unwrap_or_else(|| {
+                    panic!("{name} page {page}: {}x{} against PDFium's {}x{}", ours.width, ours.height, theirs.width, theirs.height)
+                });
+                assert!(c.mean_diff < DIFF_MEAN, "{name} page {page}: hayro and PDFium differ by {:.1} a channel on average", c.mean_diff);
                 // A mostly white page drawn blank would pass the average alone:
-                // the ink has to be there too, and about as much of it.
-                let ink = |r: &PageRaster| r.pixels.chunks_exact(4).filter(|p| p[..3].iter().any(|&c| c < 160)).count();
-                let (ours_ink, theirs_ink) = (ink(&ours), ink(&theirs));
-                if theirs_ink > 20 {
-                    let ratio = ours_ink as f64 / theirs_ink as f64;
-                    assert!(
-                        (0.5..=2.0).contains(&ratio),
-                        "{name} page {page}: hayro inked {ours_ink} pixels where PDFium inked {theirs_ink}"
-                    );
+                // the ink has to be there too, and about as much of it — looser
+                // than `INK_RATIO`, as a 160-pixel thumbnail has little ink.
+                assert!((0.5..=2.0).contains(&c.ink_ratio), "{name} page {page}: hayro inked {:.2} of PDFium's ink", c.ink_ratio);
+            }
+        }
+    }
+
+    /// A white page `w` by `h` with a black 20-pixel square at each of `squares`.
+    fn squares(w: u32, h: u32, squares: &[(u32, u32)]) -> PageRaster {
+        let mut pixels = vec![255u8; (w * h * 4) as usize];
+        for &(left, top) in squares {
+            for y in top..top + 20 {
+                for x in left..left + 20 {
+                    let at = ((y * w + x) * 4) as usize;
+                    pixels[at..at + 3].fill(0);
                 }
             }
         }
+        PageRaster { width: w, height: h, pixels, from_cache: false }
+    }
+
+    /// The same picture does not differ, nor one a pixel to the side (two
+    /// renderers' antialiasing puts an edge a pixel apart); a page hayro left
+    /// blank does, and so does a mark one of them left out.
+    #[test]
+    fn two_pictures_alike_do_not_differ_and_a_missing_mark_does() {
+        let a = squares(100, 100, &[(10, 10)]);
+        let same = compare(&a, &a).expect("same size");
+        assert_eq!(same, Comparison { mean_diff: 0.0, ink_ratio: 1.0, ink_moved: 0.0 });
+        assert!(!same.differs());
+
+        let shifted = compare(&a, &squares(100, 100, &[(11, 10)])).expect("same size");
+        assert!(!shifted.differs(), "a square a pixel to the side differs: {shifted:?}");
+
+        let blank = compare(&squares(100, 100, &[]), &a).expect("same size");
+        assert_eq!(blank.ink_ratio, 0.0);
+        assert!(blank.differs(), "a page hayro left blank does not differ: {blank:?}");
+
+        let missing = compare(&a, &squares(100, 100, &[(10, 10), (60, 60)])).expect("same size");
+        assert!(missing.differs(), "a square left out does not differ: {missing:?}");
+
+        assert_eq!(compare(&squares(100, 100, &[]), &squares(103, 100, &[])), None);
     }
 
     /// What hayro cannot read is `None`, not a panic.
