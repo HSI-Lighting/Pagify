@@ -17,6 +17,7 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use hayro::hayro_interpret::InterpreterSettings;
+use hayro::hayro_syntax::object::{Array, Dict, Name, ObjectIdentifier, Stream};
 use hayro::hayro_syntax::Pdf;
 use hayro::vello_cpu::color::palette::css::WHITE;
 use hayro::{PixmapSettings, RenderCache, RenderSettings};
@@ -73,6 +74,118 @@ impl Preview {
         }));
         drawn.ok().flatten()
     }
+
+    /// Why hayro may draw page `page` differently from PDFium — what prints —
+    /// or `None` when nothing on it is known to. Read from the page's
+    /// dictionaries, not by drawing it; the first reason found is the answer.
+    ///
+    /// PDF layers (optional content) are deliberately not a reason: CAD sets are
+    /// full of them, Pagify never turns one on or off, and hayro shows the ones
+    /// the file shows.
+    pub fn differs_because(&self, page: usize) -> Option<Difference> {
+        let found = catch_unwind(AssertUnwindSafe(|| {
+            let page = self.pdf.pages().get(page)?;
+            let annots: Vec<Dict> =
+                page.raw().get::<Array>(b"Annots").map(|a| a.iter::<Dict>().collect()).unwrap_or_default();
+            let unseen = |a: &Dict| a.get::<u32>(b"F").is_some_and(|f| f & (2 | 32) != 0);
+            let subtype = |a: &Dict| a.get::<Name>(b"Subtype").map(|n| n.as_ref().to_vec()).unwrap_or_default();
+            if annots.iter().any(|a| {
+                !matches!(&subtype(a)[..], b"Link" | b"Popup") && !a.contains_key(b"AP") && !unseen(a)
+            }) {
+                return Some(Difference::AnnotationWithoutAppearance);
+            }
+            let xref = self.pdf.xref();
+            let needs = xref
+                .get::<Dict>(xref.root_id())
+                .and_then(|c| c.get::<Dict>(b"AcroForm"))
+                .and_then(|f| f.get::<bool>(b"NeedAppearances"))
+                == Some(true);
+            if needs && annots.iter().any(|a| subtype(a) == b"Widget") {
+                return Some(Difference::FormNeedsAppearances);
+            }
+            let r = page.resources();
+            let mut seen = std::collections::HashSet::new();
+            if font_not_embedded(&r.fonts, &r.x_objects, 8, &mut seen) {
+                return Some(Difference::FontNotEmbedded);
+            }
+            None
+        }));
+        found.ok().flatten()
+    }
+}
+
+/// Why hayro may draw a page differently from PDFium.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Difference {
+    /// A font the file does not hold, which each renderer draws from fonts of
+    /// its own.
+    FontNotEmbedded,
+    /// An annotation without an appearance stream, which PDFium draws from
+    /// what the annotation says and hayro does not draw.
+    AnnotationWithoutAppearance,
+    /// A form that asks for its fields to be drawn afresh, which PDFium does
+    /// and hayro does not.
+    FormNeedsAppearances,
+}
+
+impl Difference {
+    /// For the session log: "page N drawn by PDFium: <reason>".
+    pub fn reason(self) -> &'static str {
+        match self {
+            Difference::FontNotEmbedded => "a font on it is not in the file",
+            Difference::AnnotationWithoutAppearance => "an annotation on it has no appearance of its own",
+            Difference::FormNeedsAppearances => "its form asks for its fields to be drawn afresh",
+        }
+    }
+}
+
+/// Whether a font of `fonts`, or of a form drawn through `x_objects` (to
+/// `depth` forms deep), is neither in the file nor one both renderers carry.
+fn font_not_embedded(
+    fonts: &Dict,
+    x_objects: &Dict,
+    depth: u8,
+    seen: &mut std::collections::HashSet<ObjectIdentifier>,
+) -> bool {
+    let not_embedded = |font: Dict| {
+        if font.get::<Name>(b"Subtype").is_some_and(|n| n.as_ref() == b"Type3") {
+            return false;
+        }
+        let descriptor = if font.get::<Name>(b"Subtype").is_some_and(|n| n.as_ref() == b"Type0") {
+            font.get::<Array>(b"DescendantFonts")
+                .and_then(|d| d.iter::<Dict>().next())
+                .and_then(|d| d.get::<Dict>(b"FontDescriptor"))
+        } else {
+            font.get::<Dict>(b"FontDescriptor")
+        };
+        let held = descriptor
+            .is_some_and(|d| [&b"FontFile"[..], b"FontFile2", b"FontFile3"].iter().any(|k| d.contains_key(k)));
+        !held && !font.get::<Name>(b"BaseFont").is_some_and(|n| standard_like(n.as_ref()))
+    };
+    if fonts.keys().any(|k| fonts.get::<Dict>(&k).is_some_and(not_embedded)) {
+        return true;
+    }
+    depth > 0
+        && x_objects.keys().any(|k| {
+            let Some(form) = x_objects.get::<Stream>(&k) else { return false };
+            let d = form.dict();
+            if !d.get::<Name>(b"Subtype").is_some_and(|n| n.as_ref() == b"Form") || !seen.insert(form.obj_id()) {
+                return false;
+            }
+            let r = d.get::<Dict>(b"Resources").unwrap_or_default();
+            let (f, x) = (r.get::<Dict>(b"Font").unwrap_or_default(), r.get::<Dict>(b"XObject").unwrap_or_default());
+            font_not_embedded(&f, &x, depth - 1, seen)
+        })
+}
+
+/// A font name both renderers draw alike without the file holding it: the
+/// standard fonts and their usual stand-ins, after any `ABCDEF+` subset prefix.
+fn standard_like(name: &[u8]) -> bool {
+    let name = match name.get(..7) {
+        Some(p) if p[6] == b'+' && p[..6].iter().all(u8::is_ascii_uppercase) => &name[7..],
+        _ => name,
+    };
+    ["Helvetica", "Arial", "Times", "Courier", "Symbol", "ZapfDingbats"].iter().any(|s| name.starts_with(s.as_bytes()))
 }
 
 /// Above this average difference a channel, two pictures of a page differ.
@@ -220,6 +333,89 @@ mod tests {
         assert!(missing.differs(), "a square left out does not differ: {missing:?}");
 
         assert_eq!(compare(&squares(100, 100, &[]), &squares(103, 100, &[])), None);
+    }
+
+    /// A one-page PDF: `catalog` and `page` added to the catalog's and the
+    /// page's dictionaries, `objects` numbered from 4.
+    fn pdf_with(catalog: &str, page: &str, objects: &[&str]) -> Vec<u8> {
+        let mut all = vec![
+            format!("<< /Type /Catalog /Pages 2 0 R {catalog} >>"),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 300] {page} >>"),
+        ];
+        all.extend(objects.iter().map(|o| o.to_string()));
+        let mut out = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, body) in all.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", i + 1).as_bytes());
+        }
+        let xref_at = out.len();
+        out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", all.len() + 1).as_bytes());
+        for offset in &offsets {
+            out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF\n", all.len() + 1).as_bytes(),
+        );
+        out
+    }
+
+    fn differs_because(catalog: &str, page: &str, objects: &[&str]) -> Option<Difference> {
+        Preview::new(pdf_with(catalog, page, objects)).expect("hayro reads it").differs_because(0)
+    }
+
+    /// A font that is not in the file is drawn by each renderer from fonts of
+    /// its own — alike for the standard fonts, which both carry, but not for
+    /// anything else (Calibri), wherever on the page it is used.
+    #[test]
+    fn a_font_not_in_the_file_is_a_difference_unless_both_renderers_carry_it() {
+        let fonts = "/Resources << /Font << /F1 4 0 R >> >>";
+        let helvetica = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>";
+        assert_eq!(differs_because("", fonts, &[helvetica]), None);
+        let calibri = "<< /Type /Font /Subtype /TrueType /BaseFont /Calibri /FontDescriptor 5 0 R >>";
+        let bare = "<< /Type /FontDescriptor /FontName /Calibri /Flags 32 >>";
+        assert_eq!(differs_because("", fonts, &[calibri, bare]), Some(Difference::FontNotEmbedded));
+        let embedded = "<< /Type /FontDescriptor /FontName /Calibri /Flags 32 /FontFile2 6 0 R >>";
+        let file = "<< /Length 4 >>\nstream\nabcd\nendstream";
+        assert_eq!(differs_because("", fonts, &[calibri, embedded, file]), None);
+
+        let form = "<< /Type /XObject /Subtype /Form /BBox [0 0 10 10] /Resources << /Font << /F1 5 0 R >> >> /Length 0 >>\nstream\n\nendstream";
+        let subset = "<< /Type /Font /Subtype /TrueType /BaseFont /ABCDEF+Calibri /FontDescriptor 6 0 R >>";
+        assert_eq!(
+            differs_because("", "/Resources << /XObject << /X1 4 0 R >> >>", &[form, subset, bare]),
+            Some(Difference::FontNotEmbedded)
+        );
+    }
+
+    /// An annotation without an appearance of its own is drawn by PDFium from
+    /// what it says (a highlight's colour and quads); hayro draws nothing. A
+    /// link, a pop-up or a hidden annotation is drawn by neither.
+    #[test]
+    fn an_annotation_without_an_appearance_is_a_difference() {
+        let annots = "/Annots [4 0 R]";
+        let highlight = "<< /Type /Annot /Subtype /Highlight /Rect [10 10 50 20] /QuadPoints [10 20 50 20 10 10 50 10] /C [1 1 0] >>";
+        assert_eq!(differs_because("", annots, &[highlight]), Some(Difference::AnnotationWithoutAppearance));
+        let drawn = "<< /Type /Annot /Subtype /Highlight /Rect [10 10 50 20] /AP << /N 5 0 R >> >>";
+        let appearance = "<< /Type /XObject /Subtype /Form /BBox [0 0 40 10] /Length 0 >>\nstream\n\nendstream";
+        assert_eq!(differs_because("", annots, &[drawn, appearance]), None);
+        let link = "<< /Type /Annot /Subtype /Link /Rect [10 10 50 20] /Border [0 0 0] >>";
+        assert_eq!(differs_because("", annots, &[link]), None);
+        let hidden = "<< /Type /Annot /Subtype /Highlight /Rect [10 10 50 20] /F 2 >>";
+        assert_eq!(differs_because("", annots, &[hidden]), None);
+    }
+
+    /// A form that asks for its fields to be drawn afresh is, by PDFium, from
+    /// the fields' values; hayro draws the appearances stored in the file.
+    #[test]
+    fn a_form_that_needs_appearances_is_a_difference() {
+        let widget = "<< /Type /Annot /Subtype /Widget /FT /Tx /T (a) /V (b) /Rect [10 10 50 20] /AP << /N 5 0 R >> >>";
+        let appearance = "<< /Type /XObject /Subtype /Form /BBox [0 0 40 10] /Length 0 >>\nstream\n\nendstream";
+        assert_eq!(
+            differs_because("/AcroForm << /Fields [4 0 R] /NeedAppearances true >>", "/Annots [4 0 R]", &[widget, appearance]),
+            Some(Difference::FormNeedsAppearances)
+        );
+        assert_eq!(differs_because("/AcroForm << /Fields [4 0 R] >>", "/Annots [4 0 R]", &[widget, appearance]), None);
     }
 
     /// What hayro cannot read is `None`, not a panic.

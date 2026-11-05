@@ -105,6 +105,24 @@ fn a_heavy_page_thumbnail_drawn_by_hayro() {
     assert!(hayro * 2 < pdfium, "hayro took {hayro:?} against PDFium's {pdfium:?}");
 }
 
+/// Pagify writes a highlight without an appearance stream (pdf_core never calls
+/// `FPDFAnnot_SetAP`): PDFium draws it from its colour and quads, hayro does
+/// not draw it at all, so the page it is on is one for PDFium.
+#[test]
+fn pagifys_own_highlight_is_one_hayro_may_draw_differently() {
+    use pagify_shell::preview::{Difference, Preview};
+    use pdf_core::document::{Color, Rect};
+    let fixture = format!("{}/../../../rust/pdf_core/fixtures/two-column.pdf", env!("CARGO_MANIFEST_DIR"));
+    let session = Session::open(fixture).expect("open");
+    let before = Preview::new(session.current_bytes().expect("bytes")).expect("hayro reads it");
+    assert_eq!(before.differs_because(0), None);
+    session
+        .highlight(0, vec![Rect { left: 72.0, top: 72.0, right: 200.0, bottom: 90.0 }], Color { r: 255, g: 230, b: 0, a: 255 })
+        .expect("highlight");
+    let after = Preview::new(session.current_bytes().expect("bytes")).expect("hayro reads it");
+    assert_eq!(after.differs_because(0), Some(Difference::AnnotationWithoutAppearance));
+}
+
 /// What the pointer needs to know about a page of 720,000 lines, read in one
 /// load of it, says what the four reads said, in a fraction of their time.
 #[test]
