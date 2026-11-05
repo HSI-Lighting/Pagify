@@ -39,6 +39,8 @@ mod edit_text_hardening_tests;
 mod tool_state_gap_tests;
 #[cfg(test)]
 mod tool_transition_tests;
+#[cfg(test)]
+mod render_queue_tests;
 #[cfg(target_os = "windows")]
 mod print_window;
 #[cfg(target_os = "windows")]
@@ -15823,46 +15825,45 @@ impl RenderWorker {
         std::thread::Builder::new()
             .name("pagify-render".into())
             .spawn(move || {
-                while let Ok(first) = queue.recv() {
-                    // Everything asked for while the last render ran. A zoom asks
-                    // for a new size faster than a heavy page renders, and only the
-                    // newest ask for a page is worth the time it takes.
-                    let mut batch = vec![first];
-                    batch.extend(queue.try_iter());
-                    let mut newest: Vec<RenderJob> = Vec::new();
-                    for job in batch.into_iter().rev() {
-                        let same = |n: &RenderJob| {
-                            n.doc == job.doc
-                                && n.page == job.page
-                                && n.crop.is_some() == job.crop.is_some()
-                                && (n.step >= THUMB_STEP_BASE) == (job.step >= THUMB_STEP_BASE)
-                                && n.hide.is_some() == job.hide.is_some()
-                        };
-                        if !newest.iter().any(same) {
-                            newest.push(job);
+                let mut pending: Vec<RenderJob> = Vec::new();
+                loop {
+                    if pending.is_empty() {
+                        match queue.recv() {
+                            Ok(job) => pending.push(job),
+                            Err(_) => return,
                         }
                     }
-                    // The pages first, then the rail's thumbnails: a thumbnail of a
-                    // heavy page is as long a wait for the lock as the page itself.
-                    newest.sort_by_key(|j| (j.step >= THUMB_STEP_BASE, j.hide.is_none()));
-                    for job in newest {
-                        let started = std::time::Instant::now();
-                        // A refusal must not mean a blank page: smaller, as the
-                        // render on the UI thread always did, until it is not
-                        // refused.
-                        let mut scale = job.scale;
-                        let raster = loop {
-                            let attempt = match (&job.hide, job.crop) {
-                                (Some(hide), _) => job.session.render_page_hiding(job.page, scale, job.rotation, hide),
-                                (None, None) => job.session.render_page_rotated(job.page, scale, job.rotation),
-                                (None, Some(crop)) => job.session.render_page_region(job.page, crop, scale),
-                            };
-                            match attempt {
-                                Err(_) if scale > 0.08 => scale *= 0.5,
-                                other => break other,
-                            }
+                    // Everything asked for while the last render ran, **after every
+                    // render**, not once a batch: a batch ran to its end, so the page
+                    // scrolled to waited behind every thumbnail already taken — on a
+                    // CAD set, 4.7 s of them (reported from use, 2026-11-05).
+                    pending.extend(queue.try_iter());
+                    let Some(job) = next_render(&mut pending) else { continue };
+                    let started = std::time::Instant::now();
+                    // A refusal must not mean a blank page: smaller, as the
+                    // render on the UI thread always did, until it is not
+                    // refused.
+                    let mut scale = job.scale;
+                    let raster = loop {
+                        let attempt = match (&job.hide, job.crop) {
+                            (Some(hide), _) => job.session.render_page_hiding(job.page, scale, job.rotation, hide),
+                            (None, None) => job.session.render_page_rotated(job.page, scale, job.rotation),
+                            (None, Some(crop)) => job.session.render_page_region(job.page, crop, scale),
                         };
-                        let image = raster.map(|r| page_to_image(&r)).map_err(|e| e.to_string());
+                        match attempt {
+                            Err(_) if scale > 0.08 => scale *= 0.5,
+                            other => break other,
+                        }
+                    };
+                    let image = raster.map(|r| page_to_image(&r)).map_err(|e| e.to_string());
+                    let took = started.elapsed();
+                    // A thumbnail asked for while the page was drawing counts too.
+                    pending.extend(queue.try_iter());
+                    let started = std::time::Instant::now();
+                    let thumb = image.as_ref().ok().and_then(|picture| thumb_from(&mut pending, &job, picture));
+                    let mut answers = vec![(job, image, took)];
+                    answers.extend(thumb.map(|(job, picture)| (job, Ok(picture), started.elapsed())));
+                    for (job, image, took) in answers {
                         let sent = reply.send(RenderDone {
                             doc: job.doc,
                             epoch: job.epoch,
@@ -15871,21 +15872,96 @@ impl RenderWorker {
                             rotation: job.rotation,
                             crop: job.crop,
                             hide: job.hide.clone(),
-                            took: started.elapsed(),
+                            took,
                             image,
                         });
                         if sent.is_err() {
                             return;
                         }
-                        // The answer is only seen on the next frame, and nothing
-                        // else may be asking for one.
-                        ctx.request_repaint();
                     }
+                    // The answer is only seen on the next frame, and nothing
+                    // else may be asking for one.
+                    ctx.request_repaint();
                 }
             })
             .ok()?;
         Some(RenderWorker { jobs, done, in_flight: HashMap::new(), failed: Default::default() })
     }
+}
+
+/// The render worker's next job, taken out of `pending` (oldest ask first).
+/// Only the newest ask for a page and kind is worth the time it takes — a zoom
+/// asks for a new size faster than a heavy page renders. The editor's textless
+/// picture goes first, then pages, then the rail's thumbnails: a thumbnail of a
+/// heavy page is as long a wait for the lock as the page itself. Newest first
+/// within each.
+fn next_render(pending: &mut Vec<RenderJob>) -> Option<RenderJob> {
+    let same = |a: &RenderJob, b: &RenderJob| {
+        a.doc == b.doc
+            && a.page == b.page
+            && a.crop.is_some() == b.crop.is_some()
+            && (a.step >= THUMB_STEP_BASE) == (b.step >= THUMB_STEP_BASE)
+            && a.hide.is_some() == b.hide.is_some()
+    };
+    let mut newest: Vec<RenderJob> = Vec::new();
+    for job in pending.drain(..).rev() {
+        if !newest.iter().any(|n| same(n, &job)) {
+            newest.push(job);
+        }
+    }
+    let rank = |j: &RenderJob| (j.step >= THUMB_STEP_BASE, j.hide.is_none());
+    let first = (0..newest.len()).min_by_key(|&i| (rank(&newest[i]), i))?;
+    let job = newest.remove(first);
+    newest.reverse();
+    *pending = newest;
+    Some(job)
+}
+
+/// A thumbnail asked for of the page just drawn, in the same state, made from
+/// its picture instead of a render of its own — which on a heavy page costs
+/// what the page did (1.8 s of a CAD set's page, reported from use). Taken out
+/// of `pending` with the picture it gets; `None` when there is none to make, or
+/// the picture is turned or smaller than the thumbnail.
+fn thumb_from(pending: &mut Vec<RenderJob>, done: &RenderJob, picture: &egui::ColorImage) -> Option<(RenderJob, egui::ColorImage)> {
+    if done.step >= THUMB_STEP_BASE || done.crop.is_some() || done.hide.is_some() || done.rotation != Rotation::None {
+        return None;
+    }
+    let at = pending.iter().position(|j| {
+        j.step >= THUMB_STEP_BASE && j.doc == done.doc && j.page == done.page && j.epoch == done.epoch && j.rotation == Rotation::None
+    })?;
+    let [w, h] = picture.size;
+    let width = (pending[at].step - THUMB_STEP_BASE) as usize;
+    if width == 0 || width >= w {
+        return None;
+    }
+    let height = ((h * width + w / 2) / w).clamp(1, h);
+    Some((pending.remove(at), shrink(picture, width, height)))
+}
+
+/// `image` made `width` × `height` (no larger than it is) by averaging the
+/// pixels each new one covers.
+fn shrink(image: &egui::ColorImage, width: usize, height: usize) -> egui::ColorImage {
+    let [w, h] = image.size;
+    let span = |i: usize, of: usize, to: usize| (i * of / to, ((i + 1) * of / to).max(i * of / to + 1));
+    let mut pixels = Vec::with_capacity(width * height);
+    for y in 0..height {
+        let (y0, y1) = span(y, h, height);
+        for x in 0..width {
+            let (x0, x1) = span(x, w, width);
+            let mut sum = [0u32; 4];
+            for row in y0..y1 {
+                for p in &image.pixels[row * w + x0..row * w + x1] {
+                    for (s, c) in sum.iter_mut().zip(p.to_array()) {
+                        *s += c as u32;
+                    }
+                }
+            }
+            let n = ((y1 - y0) * (x1 - x0)) as u32;
+            let [r, g, b, a] = sum.map(|s| (s / n) as u8);
+            pixels.push(egui::Color32::from_rgba_premultiplied(r, g, b, a));
+        }
+    }
+    egui::ColorImage::new([width, height], pixels)
 }
 
 /// Counters for how pages were rendered — read by tests, and by the session log
