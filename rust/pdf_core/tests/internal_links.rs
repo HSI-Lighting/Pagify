@@ -62,6 +62,35 @@ fn linked_pdf() -> Vec<u8> {
     out
 }
 
+/// `page_reads` answers from one load of the page exactly what the four reads
+/// answer from four: links, annotations, a turned page and words included.
+#[test]
+fn reading_a_page_once_answers_what_the_four_reads_do() {
+    let Some(()) = skip_without_pdfium() else { return };
+    let _lock = serial();
+    let docs: Vec<(&str, Box<dyn Document>)> = vec![
+        ("links", Box::new(PdfiumDocument::open_bytes(linked_pdf(), None).expect("open"))),
+        ("hidden-things.pdf", harness::open_fixture(&(), "hidden-things.pdf")),
+        ("pages-ladder.pdf", harness::open_fixture(&(), "pages-ladder.pdf")),
+        ("text-lines.pdf", harness::open_fixture(&(), "text-lines.pdf")),
+    ];
+    let mut annotations = 0;
+    for (name, doc) in &docs {
+        for page in 0..doc.page_count() {
+            let once = doc.page_reads(page);
+            let at = format!("{name} page {page}");
+            assert_eq!(once.scale.expect(&at), doc.page_scale(page).expect(&at), "{at}: scale");
+            let marks = once.annotations.expect(&at);
+            assert_eq!(marks, doc.annotations(page).expect(&at), "{at}: annotations");
+            assert_eq!(once.links.expect(&at), doc.internal_links(page).expect(&at), "{at}: links");
+            let characters = doc.page(page).and_then(|p| p.characters()).expect(&at);
+            assert_eq!(once.characters.expect(&at), characters, "{at}: characters");
+            annotations += marks.len();
+        }
+    }
+    assert!(annotations > 0, "no page here had an annotation to compare");
+}
+
 #[test]
 fn links_to_other_pages_are_read_with_where_they_are_and_where_they_go() {
     let Some(()) = skip_without_pdfium() else { return };

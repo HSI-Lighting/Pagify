@@ -1486,19 +1486,28 @@ impl Document for PdfiumDocument {
         let page_number = i32::try_from(page_index).map_err(|_| {
             PdfError::InvalidArgument(format!("page index {page_index} is out of range"))
         })?;
-        let raw = RawPage::open(self.document.handle(), page_number)?;
-        let bindings = pdfium()?.bindings();
-        let count = unsafe { bindings.FPDFPage_CountObjects(raw.handle) }.max(0);
-        let mut text_objects = 0usize;
-        for index in 0..count {
-            let handle = unsafe { bindings.FPDFPage_GetObject(raw.handle, index) };
-            if !handle.is_null()
-                && unsafe { bindings.FPDFPageObj_GetType(handle) } == pdfium_render::prelude::FPDF_PAGEOBJ_TEXT as i32
-            {
-                text_objects += 1;
-            }
+        Self::page_scale_on(&RawPage::open(self.document.handle(), page_number)?)
+    }
+
+    /// One load of the page for all four, the raw reads through the handle
+    /// of the `PdfPage` the other two need. Nothing outlives the call, so no
+    /// later edit can find a page read before it.
+    fn page_reads(&self, page_index: usize) -> crate::document::PageReads {
+        let page = self
+            .validate_page_index(page_index)
+            .ok()
+            .and_then(|_| i32::try_from(page_index).ok())
+            .and_then(|number| self.document.pages().get(number).ok());
+        let Some(page) = page else { return crate::document::reads_apart(self, page_index) };
+        // Never closed: the handle is the `PdfPage`'s, which closes it once.
+        let raw = std::mem::ManuallyDrop::new(RawPage { handle: page.page_handle() });
+        let page = PdfiumPage { page };
+        crate::document::PageReads {
+            scale: Self::page_scale_on(&raw),
+            annotations: self.annotations_on(&raw),
+            links: Self::internal_links_on(&raw, &page.page),
+            characters: page.characters(),
         }
-        Ok(crate::document::PageScale { text_objects, page_objects: count as usize })
     }
 
     /// Uses `FPDF_GetPageSizeByIndexF`, which reads the page tree without
@@ -1731,31 +1740,7 @@ impl Document for PdfiumDocument {
             count: self.page_count,
         })?;
 
-        let page = RawPage::open(self.document.handle(), page_number)?;
-        let space = page.space()?;
-        let bindings = pdfium()?.bindings();
-        let count = unsafe { bindings.FPDFPage_GetAnnotCount(page.handle) };
-
-        let mut marks = Vec::new();
-        for i in 0..count.max(0) {
-            let annot = unsafe { bindings.FPDFPage_GetAnnot(page.handle, i) };
-            if annot.is_null() {
-                continue;
-            }
-            let read = self.read_annotation(annot, &space);
-            unsafe { bindings.FPDFPage_CloseAnnot(annot) };
-
-            // The index carried is PDFium's, not this list's. A page holding one
-            // form widget followed by one highlight yields a single entry whose
-            // index is 1 — addressing it as 0 would delete the widget.
-            if let Some(annotation) = read? {
-                marks.push(IndexedAnnotation {
-                    index: i as usize,
-                    annotation,
-                });
-            }
-        }
-        Ok(marks)
+        self.annotations_on(&RawPage::open(self.document.handle(), page_number)?)
     }
 
     fn internal_links(&self, page_index: usize) -> Result<Vec<InternalLink>> {
@@ -1764,38 +1749,15 @@ impl Document for PdfiumDocument {
             index: page_index,
             count: self.page_count,
         })?;
-        let space = RawPage::open(self.document.handle(), number)?.space()?;
         let page = self
             .document
             .pages()
             .get(number)
             .map_err(|e| PdfError::Pdfium(e.to_string()))?;
-
-        let mut out = Vec::new();
-        for link in page.links().iter() {
-            // A link names its place either directly (`/Dest`) or through a
-            // `/GoTo` action; a `/URI`, a launch or a link to another file has
-            // neither and is not this method's to report.
-            let target = link.destination().and_then(|d| d.page_index().ok()).or_else(|| {
-                let action = link.action()?;
-                let local = action.as_local_destination_action()?;
-                local.destination().ok()?.page_index().ok()
-            });
-            let Some(target) = target else { continue };
-            let Ok(bounds) = link.rect() else { continue };
-            let (left, top) = space.to_top_left(bounds.left().value, bounds.top().value);
-            let (right, bottom) = space.to_top_left(bounds.right().value, bounds.bottom().value);
-            out.push(InternalLink {
-                rect: Rect {
-                    left: left.min(right),
-                    top: top.min(bottom),
-                    right: left.max(right),
-                    bottom: top.max(bottom),
-                },
-                page: target as usize,
-            });
-        }
-        Ok(out)
+        // The page's own handle for its boxes: this used to load it a second
+        // time, which on a heavy page is a second parse of everything it draws.
+        let raw = std::mem::ManuallyDrop::new(RawPage { handle: page.page_handle() });
+        Self::internal_links_on(&raw, &page)
     }
 
     fn bookmarks(&self) -> Result<Vec<(String, usize)>> {
@@ -7051,6 +7013,83 @@ const FILLMODE_WINDING: c_int = 2;
 /// an early return that leaked the page would hold a reference to the document
 /// for as long as it stayed open — which, since the registry lock is dropped
 /// afterwards, would eventually be blamed on something else entirely.
+impl PdfiumDocument {
+    /// [`Document::page_scale`] on a page already loaded.
+    fn page_scale_on(raw: &RawPage) -> Result<crate::document::PageScale> {
+        let bindings = pdfium()?.bindings();
+        let count = unsafe { bindings.FPDFPage_CountObjects(raw.handle) }.max(0);
+        let mut text_objects = 0usize;
+        for index in 0..count {
+            let handle = unsafe { bindings.FPDFPage_GetObject(raw.handle, index) };
+            if !handle.is_null()
+                && unsafe { bindings.FPDFPageObj_GetType(handle) } == pdfium_render::prelude::FPDF_PAGEOBJ_TEXT as i32
+            {
+                text_objects += 1;
+            }
+        }
+        Ok(crate::document::PageScale { text_objects, page_objects: count as usize })
+    }
+
+    /// [`Document::annotations`] on a page already loaded.
+    fn annotations_on(&self, page: &RawPage) -> Result<Vec<IndexedAnnotation>> {
+        let space = page.space()?;
+        let bindings = pdfium()?.bindings();
+        let count = unsafe { bindings.FPDFPage_GetAnnotCount(page.handle) };
+
+        let mut marks = Vec::new();
+        for i in 0..count.max(0) {
+            let annot = unsafe { bindings.FPDFPage_GetAnnot(page.handle, i) };
+            if annot.is_null() {
+                continue;
+            }
+            let read = self.read_annotation(annot, &space);
+            unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+
+            // The index carried is PDFium's, not this list's. A page holding one
+            // form widget followed by one highlight yields a single entry whose
+            // index is 1 — addressing it as 0 would delete the widget.
+            if let Some(annotation) = read? {
+                marks.push(IndexedAnnotation {
+                    index: i as usize,
+                    annotation,
+                });
+            }
+        }
+        Ok(marks)
+    }
+
+    /// [`Document::internal_links`] on a page already loaded: `raw` is
+    /// `page`'s own handle.
+    fn internal_links_on(raw: &RawPage, page: &PdfPage<'_>) -> Result<Vec<InternalLink>> {
+        let space = raw.space()?;
+        let mut out = Vec::new();
+        for link in page.links().iter() {
+            // A link names its place either directly (`/Dest`) or through a
+            // `/GoTo` action; a `/URI`, a launch or a link to another file has
+            // neither and is not this method's to report.
+            let target = link.destination().and_then(|d| d.page_index().ok()).or_else(|| {
+                let action = link.action()?;
+                let local = action.as_local_destination_action()?;
+                local.destination().ok()?.page_index().ok()
+            });
+            let Some(target) = target else { continue };
+            let Ok(bounds) = link.rect() else { continue };
+            let (left, top) = space.to_top_left(bounds.left().value, bounds.top().value);
+            let (right, bottom) = space.to_top_left(bounds.right().value, bounds.bottom().value);
+            out.push(InternalLink {
+                rect: Rect {
+                    left: left.min(right),
+                    top: top.min(bottom),
+                    right: left.max(right),
+                    bottom: top.max(bottom),
+                },
+                page: target as usize,
+            });
+        }
+        Ok(out)
+    }
+}
+
 struct RawPage {
     handle: FPDF_PAGE,
 }

@@ -221,4 +221,28 @@ impl Session {
         links.iter_mut().for_each(|l| f.link(l));
         Ok(links)
     }
+
+    /// [`Self::page_scale`], [`Self::annotations`], [`Self::internal_links`]
+    /// and the characters [`Self::characters`] builds on, from one load of
+    /// the page — see [`pdf_core::document::Document::page_reads`]. Each part
+    /// in the page's frame, as those give it.
+    pub fn page_reads(&self, page: usize) -> Result<pdf_core::document::PageReads> {
+        let mut reads = registry::with_session(self.handle, |s| Ok(s.document.page_reads(page)))?;
+        let f = self.frame(page);
+        if !f.is_identity() {
+            reads.annotations = reads.annotations.map(|marks| {
+                marks
+                    .into_iter()
+                    .map(|m| pdf_core::document::IndexedAnnotation { index: m.index, annotation: m.annotation.turned(f) })
+                    .collect()
+            });
+        }
+        if let Ok(links) = &mut reads.links {
+            links.iter_mut().for_each(|l| f.link(l));
+        }
+        if let Ok(characters) = &mut reads.characters {
+            f.characters(characters);
+        }
+        Ok(reads)
+    }
 }

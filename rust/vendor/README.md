@@ -1,12 +1,18 @@
 # Vendored `pdfium-render`
 
-A copy of `pdfium-render` 0.9.3 with **one change**, pulled in through
+A copy of `pdfium-render` 0.9.3 with **two changes**, pulled in through
 `[patch.crates-io]` in `rust/pdf_core/Cargo.toml`.
 
-## The change
+## The changes
 
 `PdfDocument::handle()` is `pub` instead of `pub(crate)`.
 See `src/pdf/document.rs`; the doc comment there explains why.
+
+`PdfPage::page_handle()` is `pub` instead of `pub(crate)` (2026-11-05). Every
+load of a page parses its whole content stream, and `PdfiumDocument::page_reads`
+answers four questions from one load: two through this crate's `PdfPage`, two
+through the raw bindings, which need the page's handle. Measured on a CAD page
+of 720,000 lines: 0.76 s for the one load, 5.3 s for the four reads apart.
 
 ## Why it was necessary
 
@@ -38,7 +44,7 @@ reordering and incremental save together.
 Upstream 0.9.3 is the newest release as of this writing. To move to a later one:
 
 1. copy the new version over this directory;
-2. re-apply the single `pub(crate) fn handle` → `pub fn handle` change;
+2. re-apply the two `pub(crate)` → `pub` changes (`fn handle`, `fn page_handle`);
 3. run `cargo test` in `rust/pdf_core` — `round_trip.rs` covers everything the
    patch unblocks, including the byte-prefix property that distinguishes an
    incremental save from a rewrite.

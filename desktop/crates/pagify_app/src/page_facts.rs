@@ -73,12 +73,15 @@ pub(crate) fn foreign_rects(marks: &[IndexedAnnotation]) -> Vec<(usize, Vec<Rect
 }
 
 impl PageFacts {
-    /// Read `page` — each part separately, so the engine is let go of between them
-    /// and a render waiting for it gets in. **Slow on a heavy page; never call it on
-    /// the UI thread.**
+    /// Read `page`, from **one** load of it. Each part was its own read, so that a
+    /// render waiting for the engine got in between them — but each read loads the
+    /// page whole: five parses of a CAD page's 720,000 lines, where one does.
+    /// **Slow on a heavy page; never call it on the UI thread.**
     fn read(session: &Session, page: usize, epoch: u64, generation: u64) -> Self {
-        let weight = session.page_scale(page).ok();
-        let marks = session.annotations(page).unwrap_or_default();
+        let Ok(reads) = session.page_reads(page) else {
+            return PageFacts { epoch, generation, weight: None, foreign: Vec::new(), link_numbers: HashSet::new(), links: Vec::new(), characters: None };
+        };
+        let marks = reads.annotations.unwrap_or_default();
         let link_numbers = marks
             .iter()
             .enumerate()
@@ -86,9 +89,15 @@ impl PageFacts {
             .map(|(n, _)| n + 1)
             .collect();
         let foreign = foreign_rects(&marks);
-        let links = session.internal_links(page).unwrap_or_default();
-        let characters = session.characters(page).ok();
-        PageFacts { epoch, generation, weight, foreign, link_numbers, links, characters }
+        PageFacts {
+            epoch,
+            generation,
+            weight: reads.scale.ok(),
+            foreign,
+            link_numbers,
+            links: reads.links.unwrap_or_default(),
+            characters: reads.characters.ok().map(Characters::new),
+        }
     }
 
     /// Whether a link — a web address or another page — is under `at`. The same

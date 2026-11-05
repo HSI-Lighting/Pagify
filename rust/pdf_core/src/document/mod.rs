@@ -803,6 +803,14 @@ pub trait Document: Send + Sync {
         Ok(PageScale::default())
     }
 
+    /// [`Self::page_scale`], [`Self::annotations`], [`Self::internal_links`]
+    /// and the page's characters together. Asked one by one, each loads the
+    /// page, and a load parses its whole content stream; an engine that can
+    /// answer all four from one load should.
+    fn page_reads(&self, page_index: usize) -> PageReads {
+        reads_apart(self, page_index)
+    }
+
     /// Every text mark on a page, as the blobs the app stored beside them.
     ///
     /// Empty by default, and empty for every page this app has never written
@@ -2581,6 +2589,26 @@ pub struct PageScale {
     /// Every object the page itself lists: text, paths, pictures, forms,
     /// shadings. A form counts as one, whatever it holds.
     pub page_objects: usize,
+}
+
+/// What [`Document::page_reads`] read, each part with its own answer, so
+/// that one refused part costs none of the others.
+#[derive(Debug)]
+pub struct PageReads {
+    pub scale: Result<PageScale>,
+    pub annotations: Result<Vec<IndexedAnnotation>>,
+    pub links: Result<Vec<InternalLink>>,
+    pub characters: Result<PageCharacters>,
+}
+
+/// [`Document::page_reads`] as four reads of their own, one load each.
+pub(crate) fn reads_apart<D: Document + ?Sized>(doc: &D, page_index: usize) -> PageReads {
+    PageReads {
+        scale: doc.page_scale(page_index),
+        annotations: doc.annotations(page_index),
+        links: doc.internal_links(page_index),
+        characters: doc.page(page_index).and_then(|page| page.characters()),
+    }
 }
 
 /// Something sealed on a page, as the page needs to show it.

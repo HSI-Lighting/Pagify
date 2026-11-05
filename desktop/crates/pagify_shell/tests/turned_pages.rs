@@ -129,6 +129,23 @@ fn characters_and_runs_agree_on_a_turned_page() {
     }
 }
 
+/// The facts read from one load of the page are in the page's frame, as the
+/// four reads of their own are — at every turn.
+#[test]
+fn reading_a_turned_page_once_answers_what_the_four_reads_do() {
+    for quarters in 0..4u8 {
+        let session = turned(quarters);
+        let reads = session.page_reads(0).expect("reads");
+        assert_eq!(reads.scale.expect("scale"), session.page_scale(0).expect("scale"), "turn {quarters}");
+        assert_eq!(reads.annotations.expect("marks"), session.annotations(0).expect("marks"), "turn {quarters}");
+        assert_eq!(reads.links.expect("links"), session.internal_links(0).expect("links"), "turn {quarters}");
+        let once = pagify_shell::reader::Characters::new(reads.characters.expect("characters"));
+        let apart = session.characters(0).expect("characters");
+        assert_eq!(once.text(), apart.text(), "turn {quarters}");
+        assert_eq!(once.line_rects(0..once.len()), apart.line_rects(0..apart.len()), "turn {quarters}: boxes");
+    }
+}
+
 #[test]
 fn a_move_to_the_right_moves_the_word_to_the_right_in_the_picture() {
     for quarters in 0..4u8 {

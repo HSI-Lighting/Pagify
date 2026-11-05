@@ -225,8 +225,11 @@ impl<'a> PdfPage<'a> {
     }
 
     /// Returns the internal `FPDF_PAGE` handle for this [PdfPage].
+    ///
+    /// Pagify: `pub` instead of `pub(crate)`, so that one load of a page can
+    /// serve both this crate's API and the raw bindings (`rust/vendor/README.md`).
     #[inline]
-    pub(crate) fn page_handle(&self) -> FPDF_PAGE {
+    pub fn page_handle(&self) -> FPDF_PAGE {
         self.page_handle
     }
 
