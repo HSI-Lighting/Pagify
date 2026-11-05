@@ -843,6 +843,13 @@ pub trait Document: Send + Sync {
         true
     }
 
+    /// The document as it stands, as bytes another reader can open: unsaved
+    /// edits included, no password. For a second renderer to draw from
+    /// (`pagify_shell::preview`); `Unsupported` where there is no such copy.
+    fn current_bytes(&self) -> Result<Vec<u8>> {
+        Err(PdfError::Unsupported("this document has no copy to give"))
+    }
+
     /// What this document permits, when it is encrypted.
     ///
     /// `None` for a document with no password, and that is not the same as

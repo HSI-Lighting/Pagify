@@ -18,3 +18,8 @@ sha2 = "0.10"
 # of its own (a hasher). See `third_party/dict/README.md`.
 spellbook = "0.4"
 zeroize = "1"
+# Draws the rail's thumbnails (`preview`), on threads of their own: pure Rust,
+# Apache-2.0 OR MIT, the renderer PdfCraft draws with. PDFium can draw on one
+# thread at a time and every use of it waits behind the same lock; a thumbnail
+# of a CAD page cost what the page did (1.8 s). The pages stay PDFium's.
+hayro = "0.9.0"

@@ -962,6 +962,12 @@ impl Document for PdfiumDocument {
         std::fs::read(path).map_or(true, |bytes| crate::pdf::content::may_name(&bytes, TEXT_MARK_NAME.as_bytes()))
     }
 
+    /// PDFium's own account of the document, with no password — what an edit
+    /// through Pagify's own writer starts from too ([`Self::readable_bytes`]).
+    fn current_bytes(&self) -> Result<Vec<u8>> {
+        self.readable_bytes()
+    }
+
     fn page_count(&self) -> usize {
         self.page_count
     }

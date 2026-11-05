@@ -31,6 +31,7 @@ pub mod page_space;
 pub mod paragraph_align;
 pub mod paragraph_lines;
 pub mod predefined;
+pub mod preview;
 pub mod print_layout;
 pub mod pdfium;
 pub mod reader;

@@ -1422,6 +1422,7 @@ impl crate::PagifyApp {
             tab.zoom_settle.zoom_changed_at = now;
         }
         self.collect_renders(ctx);
+        self.collect_previews(ctx);
         self.collect_facts();
     }
 

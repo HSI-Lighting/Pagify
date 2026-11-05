@@ -28,6 +28,7 @@ mod logo;
 mod os_clipboard;
 mod overlay;
 mod page_facts;
+mod previews;
 mod edit;
 mod panels;
 mod picking;
@@ -1188,6 +1189,9 @@ struct RenderState {
     /// The thread that reads what the pointer needs to know about a page — see
     /// [`page_facts`]. Started on first use.
     facts: Option<page_facts::FactsWorker>,
+    /// The threads that draw the rail's thumbnails with hayro — see
+    /// [`previews`]. Started on first use.
+    previews: Option<previews::PreviewWorker>,
     /// Whether pages are rendered off the UI thread at all. On everywhere but
     /// in the tests, where a render that lands on some later frame would make
     /// every test that looks at what was drawn depend on timing; the tests that
@@ -4706,7 +4710,7 @@ impl PagifyApp {
                 pagify_shell::session_log::SessionLog::start()
             }, },
             prefs_state: PrefsState { ortho: false, defaults: tools::Defaults::default(), draw_fill: false, snaps: SnapSet::defaults(), grid_pt: 0.0, },
-            render_state: RenderState { renders: None, facts: None, async_render: !cfg!(test), render_stats: RenderStats::default(), },
+            render_state: RenderState { renders: None, facts: None, previews: None, async_render: !cfg!(test), render_stats: RenderStats::default(), },
             ui_state: UiState { show_thumbs: true, organize_open: false, show_layers: false, command_open: false, errors_said: 0, },
             clipboard_state: ClipboardState { object_clipboard: None, paste_count: 0, page_clipboard: None, paste_ghost: None, clipboard_dir: if cfg!(test) {
                 static APPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -15655,7 +15659,12 @@ impl PagifyApp {
             // **By the worker, not here.** This was a render on the UI thread for every
             // page in the rail: opening a drawing of 700,000 lines stood the window
             // still for nine seconds. What is held, at whatever size, is shown meanwhile.
+            // **And by hayro, on threads of its own, where it can** (`previews.rs`): a
+            // thumbnail of a heavy page held PDFium's one thread for what the page cost.
             let (doc_id, epoch, session) = (doc.id, doc.render_epoch, doc.session.clone());
+            if self.ask_for_preview(ctx, page, width_px) {
+                return held;
+            }
             self.ask_for_render(ctx, RenderJob {
                 doc: doc_id,
                 epoch,
@@ -16020,6 +16029,8 @@ struct RenderStats {
     dropped: u64,
     /// The longest a render took in the worker, in milliseconds.
     slowest_ms: u128,
+    /// Thumbnails drawn by hayro ([`previews`]) and put in the rail.
+    previewed: u64,
 }
 
 /// How long the zoom must hold still before a new picture is rendered for it.

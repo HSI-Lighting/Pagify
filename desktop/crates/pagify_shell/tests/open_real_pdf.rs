@@ -74,6 +74,37 @@ fn a_heavy_page_render_told_to_stop_lets_go_at_once() {
     assert!(let_go < Duration::from_millis(500), "it went on for {let_go:?} after it was told to stop");
 }
 
+/// A thumbnail of a page of 720,000 lines drawn by hayro (`pagify_shell::preview`),
+/// against PDFium's: about as much ink, in a fraction of the time, and without
+/// PDFium's lock.
+#[test]
+fn a_heavy_page_thumbnail_drawn_by_hayro() {
+    use std::time::Instant;
+    if !std::path::Path::new(SET).is_file() {
+        eprintln!("skipped: the set is not at {SET}");
+        return;
+    }
+    let session = Session::open(SET).expect("open");
+    let started = Instant::now();
+    let preview = pagify_shell::preview::Preview::new(session.current_bytes().expect("bytes")).expect("hayro reads it");
+    let read = started.elapsed();
+    let started = Instant::now();
+    let ours = preview.render(1, 160).expect("hayro draws it");
+    let hayro = started.elapsed();
+    let started = Instant::now();
+    let width_pt = session.page_size(1).expect("size").width_pt;
+    let theirs = session.render_page(1, 160.0 / width_pt).expect("PDFium draws it");
+    let pdfium = started.elapsed();
+    let ink = |r: &pagify_shell::PageRaster| r.pixels.chunks_exact(4).filter(|p| p[..3].iter().any(|&c| c < 160)).count();
+    eprintln!(
+        "read by hayro {read:?}; its thumbnail {hayro:?} ({}x{}, {} inked); PDFium's {pdfium:?} ({}x{}, {} inked)",
+        ours.width, ours.height, ink(&ours), theirs.width, theirs.height, ink(&theirs)
+    );
+    let ratio = ink(&ours) as f64 / ink(&theirs).max(1) as f64;
+    assert!((0.5..=2.0).contains(&ratio), "hayro inked {} pixels where PDFium inked {}", ink(&ours), ink(&theirs));
+    assert!(hayro * 2 < pdfium, "hayro took {hayro:?} against PDFium's {pdfium:?}");
+}
+
 /// What the pointer needs to know about a page of 720,000 lines, read in one
 /// load of it, says what the four reads said, in a fraction of their time.
 #[test]

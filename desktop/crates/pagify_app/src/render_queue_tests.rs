@@ -80,6 +80,54 @@ fn a_render_gives_up_for_a_newer_ask_of_its_picture_or_a_more_urgent_one() {
     assert!(!overtaken(&thumbnail, &[job(&s, 4, thumb, 0)]), "another thumbnail waits its turn");
 }
 
+/// Frames until every page has a thumbnail, or give up.
+fn until_every_page_has_a_thumbnail(h: &mut egui_kittest::Harness<'static, PagifyApp>) -> bool {
+    for _ in 0..1000 {
+        let doc = h.state().tab().doc.as_ref().expect("doc");
+        if (0..doc.page_count).all(|p| doc.caches.thumbs.contains_key(&p)) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        h.run_steps(1);
+    }
+    false
+}
+
+/// **The rail's thumbnails are drawn by hayro, beside PDFium** (the owner's
+/// choice, 2026-11-05): with pages rendered off the UI thread, they come back
+/// from the preview threads.
+#[test]
+fn the_rails_thumbnails_are_drawn_by_hayro() {
+    let mut h = crate::ui_tests::async_harness(&crate::ui_tests::fixture("pages-ladder.pdf"));
+    assert!(until_every_page_has_a_thumbnail(&mut h), "the rail never filled");
+    let thumbs = h.state().tab().doc.as_ref().expect("doc").caches.thumbs.len() as u64;
+    let previewed = h.state().render_state.render_stats.previewed;
+    assert!(previewed >= thumbs && thumbs > 0, "{previewed} thumbnails came from hayro of the {thumbs} in the rail");
+}
+
+/// A page hayro cannot draw still gets its thumbnail — from PDFium, as before.
+#[test]
+fn a_thumbnail_hayro_cannot_draw_is_drawn_by_pdfium() {
+    let mut h = crate::ui_tests::async_harness(&crate::ui_tests::fixture("pages-ladder.pdf"));
+    let ctx = h.ctx.clone();
+    let (doc, epoch) = {
+        let d = h.state().tab().doc.as_ref().expect("doc");
+        (d.id, d.render_epoch)
+    };
+    // hayro has already said no to the first page, in this state of the document.
+    h.state_mut().tab_mut().doc.as_mut().expect("doc").caches.thumbs.clear();
+    let mut worker = crate::previews::PreviewWorker::start(&ctx).expect("threads");
+    worker.refused.insert((doc, epoch, 0));
+    h.state_mut().render_state.previews = Some(worker);
+    h.state_mut().render_state.render_stats.previewed = 0;
+    assert!(until_every_page_has_a_thumbnail(&mut h), "the page hayro refused got no thumbnail");
+    let pages = h.state().tab().doc.as_ref().expect("doc").page_count as u64;
+    assert!(
+        h.state().render_state.render_stats.previewed < pages || pages == 1,
+        "the refused page's thumbnail was counted as hayro's"
+    );
+}
+
 #[test]
 fn a_shrunk_picture_averages_what_each_pixel_covers() {
     let (black, white) = (egui::Color32::BLACK, egui::Color32::WHITE);

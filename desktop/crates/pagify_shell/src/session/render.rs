@@ -36,6 +36,13 @@ impl Session {
         registry::with_session(self.handle, |s| engine::page_pixel_size(s, index, &request))
     }
 
+    /// The document as it stands, as bytes — unsaved edits included, no
+    /// password — for [`crate::preview`], which draws thumbnails from a copy
+    /// of its own.
+    pub fn current_bytes(&self) -> Result<Vec<u8>> {
+        registry::with_session(self.handle, |s| s.document.current_bytes())
+    }
+
     /// Rasterise a page at `scale`, where 1.0 is 72 dpi.
     pub fn render_page(&self, index: usize, scale: f32) -> Result<PageRaster> {
         self.render_page_rotated(index, scale, Rotation::None)
