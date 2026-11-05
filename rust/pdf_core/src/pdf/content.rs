@@ -893,6 +893,26 @@ pub fn tracked_with_spaces(
     if chars.len() != glyphs.len() {
         return vec![Piece::Codes(codes.to_vec())];
     }
+    let mut out: Vec<Piece> = Vec::new();
+    for (glyph_bytes, number) in glyphs.iter().zip(numbers_after(&chars, tracking, space_gaps)) {
+        match out.last_mut() {
+            Some(Piece::Codes(bytes)) => bytes.extend_from_slice(glyph_bytes),
+            _ => out.push(Piece::Codes(glyph_bytes.to_vec())),
+        }
+        if number != 0.0 {
+            out.push(Piece::Kern(number));
+        }
+    }
+    out
+}
+
+/// The spacing number [`tracked_with_spaces`] puts after each of `chars`
+/// (0 after the last): the one rule for how retyped words are spaced, so that
+/// a line spread to a width afterwards (`Stretch::spread`) is written with
+/// exactly the spacing it was measured with. When it was not, a line whose
+/// spaces had their own gaps measured 12 pt wider than it was then written,
+/// and was spread 12 pt short of its width.
+pub fn numbers_after(chars: &[char], tracking: Option<Tracking>, space_gaps: &[f32]) -> Vec<f32> {
     let (glyph, space) = tracking.map_or((0.0, 0.0), |t| (t.glyph, t.space));
     // Only while the new words have no more spaces than the old line: a
     // person who pads a value with typed spaces is not asking for the
@@ -900,24 +920,20 @@ pub fn tracked_with_spaces(
     let space_gaps: &[f32] =
         if chars.iter().filter(|c| c.is_whitespace()).count() <= space_gaps.len() { space_gaps } else { &[] };
     let mut spaces_seen = 0usize;
-    let mut out: Vec<Piece> = Vec::new();
-    for (at, glyph_bytes) in glyphs.iter().enumerate() {
-        match out.last_mut() {
-            Some(Piece::Codes(bytes)) => bytes.extend_from_slice(glyph_bytes),
-            _ => out.push(Piece::Codes(glyph_bytes.to_vec())),
-        }
-        let number = if chars[at].is_whitespace() {
-            let old = space_gaps.get(spaces_seen).copied();
-            spaces_seen += 1;
-            old.unwrap_or(space)
-        } else {
-            glyph
-        };
-        if at + 1 < glyphs.len() && number != 0.0 {
-            out.push(Piece::Kern(number));
-        }
-    }
-    out
+    chars
+        .iter()
+        .enumerate()
+        .map(|(at, c)| {
+            let number = if c.is_whitespace() {
+                let old = space_gaps.get(spaces_seen).copied();
+                spaces_seen += 1;
+                old.unwrap_or(space)
+            } else {
+                glyph
+            };
+            if at + 1 < chars.len() { number } else { 0.0 }
+        })
+        .collect()
 }
 
 /// [`replacing_codes`] with the replacement given as pieces — codes and the

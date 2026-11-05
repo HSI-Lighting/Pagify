@@ -10605,6 +10605,7 @@ fn font_to_unicode(
                     before: moved,
                     points_per_unit,
                     tracking,
+                    space_gaps: old_space_gaps.clone(),
                 });
             }
 
@@ -12778,9 +12779,11 @@ struct Stretch {
     /// size, the magnification of the text matrix and the page's transform, and
     /// the horizontal scaling, over a thousand.
     points_per_unit: f32,
-    /// The spacing the old words were tracked with, carried by the plain
-    /// version this is measured against, so it is carried by the spread one too.
+    /// The spacing the old words were tracked with, and the gap each of the old
+    /// line's spaces carried, as the plain version this is measured against was
+    /// written with them (`content::numbers_after`), so the spread one is too.
     tracking: Option<crate::pdf::content::Tracking>,
+    space_gaps: Vec<f32>,
 }
 
 impl Stretch {
@@ -12848,14 +12851,10 @@ impl Stretch {
         }
         let mut pieces: Vec<Piece> = Vec::new();
         let mut run: Vec<u8> = Vec::new();
+        let spacing = content::numbers_after(&chars, self.tracking, &self.space_gaps);
         for (j, bytes) in self.encoded.chunks(per_char).enumerate() {
             run.extend_from_slice(bytes);
-            let mut number = match self.tracking {
-                Some(t) if j + 1 < chars.len() => {
-                    if chars[j].is_whitespace() { t.space } else { t.glyph }
-                }
-                _ => 0.0,
-            };
+            let mut number = spacing[j];
             if kern != 0.0 && gaps.binary_search(&j).is_ok() {
                 number += kern;
             }
