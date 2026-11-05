@@ -75,10 +75,12 @@ impl PreviewWorker {
                         Ok(Ok(job)) => job,
                         _ => return,
                     };
-                    // A newer state of the document has been read since this was
-                    // asked: the page as it was is no use to anyone.
-                    let Some(preview) = preview_of(&read, &job) else { continue };
                     let started = std::time::Instant::now();
+                    // `None`: a newer state of the document has been read since
+                    // this was asked, and the page as it was is no use to anyone
+                    // — answered all the same, with no picture, so its slot is freed.
+                    let stale = preview_of(&read, &job);
+                    let preview = stale.clone().flatten();
                     let raster = preview.as_ref().and_then(|p| match job.crop {
                         Some(crop) => p.render_region(job.page, crop, job.scale),
                         None => p.render_scaled(job.page, job.scale).map(|r| turned(r, job.rotation)),
@@ -88,7 +90,7 @@ impl PreviewWorker {
                         Some(p) if image.is_ok() && job.step < THUMB_STEP_BASE => p.differs_because(job.page),
                         _ => None,
                     };
-                    let refused = image.is_err();
+                    let refused = image.is_err() && stale.is_some();
                     let done = RenderDone {
                         doc: job.doc,
                         epoch: job.epoch,
@@ -214,5 +216,41 @@ impl crate::PagifyApp {
             }
             self.ask_for_render(ctx, job);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// An ask for a state of the document older than one hayro has already
+    /// read is not drawn, but is still answered — without a picture — so its
+    /// slot in `in_flight` is freed. Unanswered, the slot (which does not
+    /// know the state) held the same picture's ask in the new state for good:
+    /// after an edit the page was not drawn again until the zoom changed.
+    #[test]
+    fn an_ask_for_a_state_hayro_has_moved_past_is_still_answered() {
+        let session = Arc::new(pagify_shell::Session::open(crate::ui_tests::fixture("pictures.pdf")).expect("open"));
+        let ask = |epoch| RenderJob {
+            doc: 1,
+            epoch,
+            page: 0,
+            step: crate::EXACT_STEP_BASE + 100,
+            rotation: pdf_core::Rotation::None,
+            scale: 0.2,
+            crop: None,
+            session: session.clone(),
+            hide: None,
+        };
+        let worker = PreviewWorker::start(&egui::Context::default()).expect("threads");
+        worker.jobs.send(ask(2)).expect("send");
+        let newer = worker.done.recv_timeout(Duration::from_secs(20)).expect("state 2 answered");
+        assert!(newer.done.image.is_ok());
+        worker.jobs.send(ask(1)).expect("send");
+        let older = worker.done.recv_timeout(Duration::from_secs(20)).expect("the ask for state 1 was never answered");
+        assert_eq!(older.done.epoch, 1);
+        assert!(older.done.image.is_err(), "a picture of a state hayro has moved past");
+        assert!(older.exactly.is_none(), "PDFium asked for a state nobody wants");
     }
 }
