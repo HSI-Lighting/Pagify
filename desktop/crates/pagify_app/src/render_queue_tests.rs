@@ -119,13 +119,73 @@ fn a_thumbnail_hayro_cannot_draw_is_drawn_by_pdfium() {
     let mut worker = crate::previews::PreviewWorker::start(&ctx).expect("threads");
     worker.refused.insert((doc, epoch, 0));
     h.state_mut().render_state.previews = Some(worker);
-    h.state_mut().render_state.render_stats.previewed = 0;
+    h.state_mut().render_state.render_stats.requested = 0;
     assert!(until_every_page_has_a_thumbnail(&mut h), "the page hayro refused got no thumbnail");
-    let pages = h.state().tab().doc.as_ref().expect("doc").page_count as u64;
-    assert!(
-        h.state().render_state.render_stats.previewed < pages || pages == 1,
-        "the refused page's thumbnail was counted as hayro's"
-    );
+    // hayro draws the rest, page pictures too; only the refused page is PDFium's.
+    assert!(h.state().render_state.render_stats.requested >= 1, "PDFium was never asked for the refused page");
+}
+
+/// Frames until `done` says so, or give up.
+fn until(h: &mut egui_kittest::Harness<'static, PagifyApp>, done: impl Fn(&PagifyApp) -> bool) -> bool {
+    for _ in 0..1000 {
+        if done(h.state()) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        h.run_steps(1);
+    }
+    false
+}
+
+fn page_0_pictured(app: &PagifyApp) -> bool {
+    app.tab().doc.as_ref().is_some_and(|d| d.caches.exact.keys().any(|(p, _, _)| *p == 0))
+}
+
+/// **Page pictures are drawn by hayro, where it draws them as PDFium does**
+/// (the owner's decision, 2026-11-05, after the comparison of §51): the page
+/// in view, and the rail, without PDFium.
+#[test]
+fn a_page_is_drawn_by_hayro() {
+    let mut h = crate::ui_tests::async_harness(&crate::ui_tests::fixture("pages-ladder.pdf"));
+    assert!(until(&mut h, page_0_pictured), "page 1 never got its picture");
+    let stats = h.state().render_state.render_stats;
+    assert!(stats.previewed >= 1, "{stats:?}");
+    assert_eq!(stats.requested, 0, "PDFium was asked: {stats:?}");
+}
+
+/// A page hayro may draw differently — here, Pagify's own highlight, which has
+/// no appearance stream — is shown in hayro's picture meanwhile and ends in
+/// PDFium's, under the same key.
+#[test]
+fn a_page_hayro_may_draw_differently_ends_with_pdfiums_picture() {
+    let session = Session::open(crate::ui_tests::fixture("two-column.pdf")).expect("open");
+    let mark = pdf_core::document::Rect { left: 72.0, top: 72.0, right: 200.0, bottom: 90.0 };
+    session.highlight(0, vec![mark], pdf_core::document::Color { r: 255, g: 230, b: 0, a: 255 }).expect("highlight");
+    let path = std::env::temp_dir().join(format!("pagify-highlighted-{}.pdf", std::process::id()));
+    session.save_to(&path, false).expect("save");
+    let mut h = crate::ui_tests::async_harness(path.to_str().expect("path"));
+    let pdfiums = |app: &PagifyApp| page_0_pictured(app) && app.render_state.render_stats.applied >= 1;
+    assert!(until(&mut h, pdfiums), "PDFium's picture never arrived: {:?}", h.state().render_state.render_stats);
+    let stats = h.state().render_state.render_stats;
+    assert!(stats.requested >= 1, "{stats:?}");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// With "Exact" on, every picture is PDFium's.
+#[test]
+fn with_exact_pages_on_nothing_is_drawn_by_hayro() {
+    // Before the first frame, which the harness draws as it is built.
+    let mut app = PagifyApp::new(Some(&crate::ui_tests::fixture("pages-ladder.pdf")));
+    app.render_state.async_render = true;
+    app.prefs_state.exact_pages = true;
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1400.0, 1000.0))
+        .with_step_dt(1.0 / 60.0)
+        .build_ui_state(|ui, app: &mut PagifyApp| eframe::App::ui(app, ui, &mut eframe::Frame::_new_kittest()), app);
+    assert!(until(&mut h, page_0_pictured), "page 1 never got its picture");
+    assert!(until_every_page_has_a_thumbnail(&mut h), "the rail never filled");
+    let stats = h.state().render_state.render_stats;
+    assert_eq!(stats.previewed, 0, "{stats:?}");
 }
 
 #[test]

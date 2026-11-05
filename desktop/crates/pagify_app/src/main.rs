@@ -1179,6 +1179,9 @@ struct PrefsState {
     draw_fill: bool,
     snaps: SnapSet,
     grid_pt: f64,
+    /// "Exact": every page picture drawn by PDFium — what prints — instead of
+    /// by hayro where it draws a page as PDFium does ([`previews`]).
+    exact_pages: bool,
 }
 
 /// The off-thread render worker, whether async rendering is on, and its stats.
@@ -4709,7 +4712,7 @@ impl PagifyApp {
             } else {
                 pagify_shell::session_log::SessionLog::start()
             }, },
-            prefs_state: PrefsState { ortho: false, defaults: tools::Defaults::default(), draw_fill: false, snaps: SnapSet::defaults(), grid_pt: 0.0, },
+            prefs_state: PrefsState { ortho: false, defaults: tools::Defaults::default(), draw_fill: false, snaps: SnapSet::defaults(), grid_pt: 0.0, exact_pages: false, },
             render_state: RenderState { renders: None, facts: None, previews: None, async_render: !cfg!(test), render_stats: RenderStats::default(), },
             ui_state: UiState { show_thumbs: true, organize_open: false, show_layers: false, command_open: false, errors_said: 0, },
             clipboard_state: ClipboardState { object_clipboard: None, paste_count: 0, page_clipboard: None, paste_ghost: None, clipboard_dir: if cfg!(test) {
@@ -15363,95 +15366,109 @@ impl PagifyApp {
             arrived.push(done);
         }
         for done in arrived {
-            let Ok(image) = done.image else {
+            if done.image.is_err() {
                 self.render_state.render_stats.dropped += 1;
                 if let Some(worker) = self.render_state.renders.as_mut() {
                     worker.failed.insert((done.doc, done.epoch, done.page, done.step, done.rotation as u8));
                 }
                 continue;
-            };
-            let current = self
-                .tabs
-                .iter_mut()
-                .filter_map(|t| t.doc.as_mut())
-                .find(|d| d.id == done.doc && d.render_epoch == done.epoch);
-            let Some(doc) = current else {
+            }
+            let (page, detail, took, textless) = (done.page, done.crop.is_some(), done.took, done.hide.is_some());
+            let size = done.image.as_ref().map_or([0, 0], |i| i.size);
+            if !self.file_picture(ctx, done) {
                 self.render_state.render_stats.dropped += 1;
                 continue;
-            };
-            let [width, height] = image.size;
-            let rotation = done.rotation as u8;
-            // The page without the open paragraph, for the editor: kept apart from the
-            // page's own pictures, which it must never be mistaken for.
-            if let Some(objects) = &done.hide {
-                let texture = ctx.load_texture(format!("textless{}", done.page), image, egui::TextureOptions::LINEAR);
-                doc.caches.textless = Some(crate::caches::Textless {
-                    page: done.page,
-                    objects: objects.to_vec(),
-                    epoch: done.epoch,
-                    rotation,
-                    step: done.step,
-                    texture,
-                });
-                self.render_state.render_stats.applied += 1;
-                continue;
-            }
-            match done.crop {
-                None if done.step >= THUMB_STEP_BASE => {
-                    let handle = ctx.load_texture(
-                        format!("thumb{}", done.page),
-                        image,
-                        // Mipmapped, so the stretch during a drag, and a bitmap a little
-                        // larger than it is shown, are averaged rather than aliased.
-                        egui::TextureOptions {
-                            mipmap_mode: Some(egui::TextureFilter::Linear),
-                            ..egui::TextureOptions::LINEAR
-                        },
-                    );
-                    doc.caches.thumbs.insert(done.page, handle);
-                }
-                None if done.step >= EXACT_STEP_BASE => {
-                    let handle = ctx.load_texture(
-                        format!("exact{}", done.page),
-                        image,
-                        egui::TextureOptions::LINEAR,
-                    );
-                    // One picture a page and turn: a new size replaces the old.
-                    doc.caches.exact.retain(|(p, _, r), _| !(*p == done.page && *r == rotation));
-                    doc.caches.exact.insert((done.page, done.step, rotation), handle);
-                }
-                None => {
-                    let handle = ctx.load_texture(
-                        format!("page{}", done.page),
-                        image,
-                        egui::TextureOptions::LINEAR,
-                    );
-                    doc.caches.textures.insert((done.page, done.step, rotation), handle);
-                    Self::trim_scales(doc, done.page, done.step, rotation);
-                }
-                Some(crop) => {
-                    let texture = ctx.load_texture(
-                        format!("detail{}", done.page),
-                        image,
-                        egui::TextureOptions::LINEAR,
-                    );
-                    doc.caches.detail = Some(DetailTile { page: done.page, zoom_step: done.step, crop, texture });
-                }
             }
             self.render_state.render_stats.applied += 1;
-            self.render_state.render_stats.slowest_ms = self.render_state.render_stats.slowest_ms.max(done.took.as_millis());
-            if done.took.as_millis() >= SLOW_RENDER_MS {
+            if textless {
+                continue;
+            }
+            self.render_state.render_stats.slowest_ms = self.render_state.render_stats.slowest_ms.max(took.as_millis());
+            if took.as_millis() >= SLOW_RENDER_MS {
+                let [width, height] = size;
                 self.recording_state.session_log.record(
                     "perf",
                     &format!(
                         "page {}{} rendered off the UI thread in {} ms ({width}x{height} px)",
-                        done.page + 1,
-                        if done.crop.is_some() { " detail" } else { "" },
-                        done.took.as_millis(),
+                        page + 1,
+                        if detail { " detail" } else { "" },
+                        took.as_millis(),
                     ),
                 );
             }
         }
+    }
+
+    /// A picture that came back — from the render worker or from hayro
+    /// ([`previews`]) — put in the page's caches, where the frame finds it;
+    /// `false` when it was dropped: no image, or for a document since closed or
+    /// a page as it no longer is.
+    fn file_picture(&mut self, ctx: &egui::Context, done: RenderDone) -> bool {
+        let Ok(image) = done.image else { return false };
+        let current = self
+            .tabs
+            .iter_mut()
+            .filter_map(|t| t.doc.as_mut())
+            .find(|d| d.id == done.doc && d.render_epoch == done.epoch);
+        let Some(doc) = current else { return false };
+        let rotation = done.rotation as u8;
+        // The page without the open paragraph, for the editor: kept apart from the
+        // page's own pictures, which it must never be mistaken for.
+        if let Some(objects) = &done.hide {
+            let texture = ctx.load_texture(format!("textless{}", done.page), image, egui::TextureOptions::LINEAR);
+            doc.caches.textless = Some(crate::caches::Textless {
+                page: done.page,
+                objects: objects.to_vec(),
+                epoch: done.epoch,
+                rotation,
+                step: done.step,
+                texture,
+            });
+            return true;
+        }
+        match done.crop {
+            None if done.step >= THUMB_STEP_BASE => {
+                let handle = ctx.load_texture(
+                    format!("thumb{}", done.page),
+                    image,
+                    // Mipmapped, so the stretch during a drag, and a bitmap a little
+                    // larger than it is shown, are averaged rather than aliased.
+                    egui::TextureOptions {
+                        mipmap_mode: Some(egui::TextureFilter::Linear),
+                        ..egui::TextureOptions::LINEAR
+                    },
+                );
+                doc.caches.thumbs.insert(done.page, handle);
+            }
+            None if done.step >= EXACT_STEP_BASE => {
+                let handle = ctx.load_texture(
+                    format!("exact{}", done.page),
+                    image,
+                    egui::TextureOptions::LINEAR,
+                );
+                // One picture a page and turn: a new size replaces the old.
+                doc.caches.exact.retain(|(p, _, r), _| !(*p == done.page && *r == rotation));
+                doc.caches.exact.insert((done.page, done.step, rotation), handle);
+            }
+            None => {
+                let handle = ctx.load_texture(
+                    format!("page{}", done.page),
+                    image,
+                    egui::TextureOptions::LINEAR,
+                );
+                doc.caches.textures.insert((done.page, done.step, rotation), handle);
+                Self::trim_scales(doc, done.page, done.step, rotation);
+            }
+            Some(crop) => {
+                let texture = ctx.load_texture(
+                    format!("detail{}", done.page),
+                    image,
+                    egui::TextureOptions::LINEAR,
+                );
+                doc.caches.detail = Some(DetailTile { page: done.page, zoom_step: done.step, crop, texture });
+            }
+        }
+        true
     }
 
     /// Keep a page's pictures to [`SCALES_KEPT_PER_PAGE`]: the one just made and
@@ -15592,9 +15609,11 @@ impl PagifyApp {
         Some(handle)
     }
 
-    /// Hand a render to the worker — unless it is already working on exactly
-    /// that. Starts the worker on the first ask.
+    /// Hand a render to hayro's threads where hayro draws it as PDFium does
+    /// ([`previews`]), else to the worker — unless it is already working on
+    /// exactly that. Starts the worker on the first ask.
     fn ask_for_render(&mut self, ctx: &egui::Context, job: RenderJob) {
+        let Err(job) = self.ask_for_preview(ctx, job) else { return };
         if self.render_state.renders.is_none() {
             self.render_state.renders = RenderWorker::start(ctx);
         }
@@ -15662,9 +15681,6 @@ impl PagifyApp {
             // **And by hayro, on threads of its own, where it can** (`previews.rs`): a
             // thumbnail of a heavy page held PDFium's one thread for what the page cost.
             let (doc_id, epoch, session) = (doc.id, doc.render_epoch, doc.session.clone());
-            if self.ask_for_preview(ctx, page, width_px) {
-                return held;
-            }
             self.ask_for_render(ctx, RenderJob {
                 doc: doc_id,
                 epoch,

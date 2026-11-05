@@ -1522,13 +1522,15 @@ impl crate::PagifyApp {
                 // screen — a pan would otherwise ask for a new one every frame.
                 let Some(doc) = self.tab_mut().doc.as_ref() else { return };
                 let (doc_id, epoch, session) = (doc.id, doc.render_epoch, doc.session.clone());
-                let pending_covers = self
-                    .render_state.renders
-                    .as_ref()
-                    .and_then(|w| w.in_flight.get(&(doc_id, page, crate::SLOT_DETAIL)))
-                    .is_some_and(|(step, _, pending)| {
-                        pending.is_some_and(|c| Self::detail_tile_covers(page, *step, c, page, zoom_step, visible_crop))
-                    });
+                // Asked of PDFium, or of hayro (`previews`).
+                let slot = (doc_id, page, crate::SLOT_DETAIL);
+                let asked = [
+                    self.render_state.renders.as_ref().and_then(|w| w.in_flight.get(&slot)),
+                    self.render_state.previews.as_ref().and_then(|w| w.in_flight.get(&slot)),
+                ];
+                let pending_covers = asked.into_iter().flatten().any(|(step, _, pending)| {
+                    pending.is_some_and(|c| Self::detail_tile_covers(page, *step, c, page, zoom_step, visible_crop))
+                });
                 if !pending_covers {
                     self.ask_for_render(ctx, RenderJob {
                         doc: doc_id,
