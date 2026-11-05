@@ -1,6 +1,11 @@
 //! Object manipulation and stacking: listing a page's drawn objects,
-//! scaling, removing and re-opaquing one, and the stacking order queries
-//! and restack command.
+//! re-opaquing one, and the stacking order queries and restack command.
+//!
+//! **Every edit here goes through [`Session::execute`].** Moving, resizing and
+//! removing one thing go through `Command`s the app builds; the direct
+//! `move_object` / `scale_object` / `remove_object` that wrote outside the undo
+//! history (and left stale object numbers in earlier undo records, 0.1.81) are
+//! gone.
 //!
 //! Part of the `session` module — split out of the single file the design
 //! review flagged (Phase 4, file splits). Methods keep living on `Session`.
@@ -21,27 +26,6 @@ impl Session {
         let mut lifted = registry::with_session(self.handle, |s| s.document.lift_objects(page_index, objects))?;
         self.frame(page_index).lifted(&mut lifted);
         Ok(lifted)
-    }
-
-    /// Resize one thing about a point — see
-    /// [`pdf_core::document::DocumentMut::scale_object`].
-    pub fn scale_object(
-        &self,
-        page: usize,
-        object: usize,
-        anchor: pdf_core::document::Point,
-        sx: f32,
-        sy: f32,
-    ) -> Result<()> {
-        let f = self.frame(page);
-        let (anchor, (sx, sy)) = (f.point_back(anchor), if f.swaps_axes() { (sy, sx) } else { (sx, sy) });
-        registry::with_session(self.handle, |s| s.document.scale_object(page, object, anchor, sx, sy))
-    }
-
-    /// Take one thing off the page entirely — see
-    /// [`pdf_core::document::DocumentMut::remove_object`].
-    pub fn remove_object(&self, page: usize, object: usize) -> Result<()> {
-        registry::with_session(self.handle, |s| s.document.remove_object(page, object))
     }
 
     /// Make one thing more or less see-through — see

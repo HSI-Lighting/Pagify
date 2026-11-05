@@ -65,6 +65,9 @@ pub(crate) struct DocCaches {
     /// The rectangles of every annotation on a page — see
     /// [`crate::PagifyApp::foreign_marks`].
     pub(super) foreign: Option<(usize, Vec<(usize, Vec<pdf_core::document::Rect>)>)>,
+    /// The undo generation `text`, `layers` and `foreign` were read under — see
+    /// [`Self::forget_reads_before`].
+    pub(super) reads_at: u64,
     /// The links on a page that go to another page — see
     /// [`crate::PagifyApp::internal_link_at`].
     pub(super) internal_links: Option<(usize, u64, Vec<pdf_core::document::InternalLink>)>,
@@ -148,6 +151,21 @@ impl DocCaches {
         self.textless = None;
     }
 
+    /// Forget `text`, `layers` and `foreign` if they were read under another undo
+    /// generation. Kept by page alone, they cannot refuse themselves as the stamped
+    /// caches do, and they are read straight after an edit in the same call
+    /// (restack reads the layers it has just changed), before the next frame's
+    /// [`crate::Doc::keep_up`]. Only these three: emptying everything here would
+    /// throw away what the same call has just read under the new generation.
+    pub(super) fn forget_reads_before(&mut self, generation: u64) {
+        if self.reads_at != generation {
+            self.text = None;
+            self.layers = None;
+            self.foreign = None;
+            self.reads_at = generation;
+        }
+    }
+
     /// Drop the whole-page textures and the detail crop for pages that have
     /// scrolled well clear of the window — a fifty-page document at full
     /// zoom would otherwise hold fifty full-size rasters on the GPU.
@@ -182,6 +200,31 @@ impl crate::Doc {
         // And whatever the render worker is part-way through: it is a picture
         // of the page as it was.
         self.render_epoch += 1;
+        self.caches_at = self.session.undo_generation();
+    }
+
+    /// [`Self::rendered_is_stale`], if the document's history has moved since the
+    /// caches were last emptied: a command run, undone or redone with no call
+    /// after it. Run once a frame for every tab, before anything is read or drawn;
+    /// within a call the stamped caches refuse a stale stamp themselves and the
+    /// three kept by page alone go by [`DocCaches::forget_reads_before`].
+    /// So **an edit through the history needs no call of its own.**
+    ///
+    /// A change the history's counter does not see still needs the call by hand:
+    /// the markup layer (its own undo stack), a view or render change, opening a
+    /// document, and **an undo that fails** — the history spends the record, may
+    /// have reverted part of it, and does not move the counter.
+    pub(crate) fn keep_up(&mut self) {
+        if self.caches_at != self.session.undo_generation() {
+            self.rendered_is_stale();
+        }
+    }
+
+    /// The history moved and no page did — a bookmark. Without this the next
+    /// [`Self::keep_up`] throws every page picture away for nothing, and a heavy
+    /// page shows white paper for the seconds its render takes.
+    pub(crate) fn pages_unchanged(&mut self) {
+        self.caches_at = self.session.undo_generation();
     }
 }
 
@@ -189,6 +232,7 @@ impl crate::PagifyApp {
     /// This page's characters, extracted once and kept.
     pub(crate) fn characters(&mut self, page: usize) -> Option<&pagify_shell::reader::Characters> {
         let doc = self.tab_mut().doc.as_mut()?;
+        doc.caches.forget_reads_before(doc.session.undo_generation());
         // Already read by the facts worker — on a heavy page that is the difference
         // between a drag starting at once and a wait of a second.
         let facts_have_it = doc.caches.facts.get(&page).is_some_and(|f| {
@@ -220,6 +264,7 @@ impl crate::PagifyApp {
     /// before would name things that have since moved.
     pub(crate) fn layers_on(&mut self, page: usize) -> &[pdf_core::document::DrawnObject] {
         let Some(doc) = self.tab_mut().doc.as_mut() else { return &[] };
+        doc.caches.forget_reads_before(doc.session.undo_generation());
         if doc.caches.layers.as_ref().map(|(p, _)| *p) != Some(page) {
             let found = doc.session.drawn_objects(page).ok().unwrap_or_default();
             doc.caches.layers = Some((page, found));
@@ -234,6 +279,7 @@ impl crate::PagifyApp {
     /// hundreds of times a second.
     pub(crate) fn foreign_marks(&mut self, page: usize) -> &[(usize, Vec<pdf_core::document::Rect>)] {
         let Some(doc) = self.tab_mut().doc.as_mut() else { return &[] };
+        doc.caches.forget_reads_before(doc.session.undo_generation());
         if doc.caches.foreign.as_ref().map(|(p, _)| *p) != Some(page) {
             let marks = crate::page_facts::foreign_rects(&doc.session.annotations(page).ok().unwrap_or_default());
             doc.caches.foreign = Some((page, marks));

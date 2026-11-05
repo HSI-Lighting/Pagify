@@ -195,10 +195,12 @@ impl crate::PagifyApp {
                     ));
                 }
 
+                let caches_at = session.undo_generation();
                 self.tab_mut().doc = Some(Doc {
                     session: std::sync::Arc::new(session),
                     id: NEXT_DOC_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                     render_epoch: 0,
+                    caches_at,
                     strip: Strip::new(&sizes, PAGE_GAP_PT),
                     page_count,
                     caches: Default::default(),

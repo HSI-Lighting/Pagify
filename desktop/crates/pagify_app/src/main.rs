@@ -473,6 +473,9 @@ struct Doc {
     /// Moved by every [`Doc::rendered_is_stale`], so a render started before an
     /// edit can be told from one started after it.
     render_epoch: u64,
+    /// The undo generation the caches were last emptied at — see
+    /// [`Doc::keep_up`].
+    caches_at: u64,
     strip: Strip,
     page_count: usize,
     /// Everything about this document's pages that is cheaper to keep than
@@ -3326,6 +3329,13 @@ impl PagifyApp {
         // happened — see `track_undo_recency`'s own doc for why polling only
         // when `undo` is pressed loses exactly that ordering.
         self.track_undo_recency();
+
+        // An edit through a document's history empties its caches even where
+        // nobody called `rendered_is_stale` — see `Doc::keep_up`. Every tab, so
+        // one switched to is never drawn from before an edit.
+        for doc in self.tabs.iter_mut().filter_map(|t| t.doc.as_mut()) {
+            doc.keep_up();
+        }
 
         if self.mark.is_none() {
             install_icons(&ctx);
@@ -8457,6 +8467,9 @@ impl PagifyApp {
             page_index: page,
         }) {
             Ok(_) => {
+                if let Some(doc) = self.tab_mut().doc.as_mut() {
+                    doc.pages_unchanged();
+                }
                 self.say_info(format!("bookmarked \"{title}\"."));
                 let entries = self.sync_bookmarks();
                 self.tab_mut().panels.bookmark_panel = Some(BookmarkPanel { entries });

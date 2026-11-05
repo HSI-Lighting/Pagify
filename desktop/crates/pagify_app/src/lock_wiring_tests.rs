@@ -8074,3 +8074,36 @@ fn with_nothing_selected_a_paste_still_goes_to_the_end() {
     assert_eq!(app.tab().doc.as_ref().unwrap().page_count, 3, "{}", said(&app));
     assert!(page_has_text(&app, 1) && !page_has_text(&app, 2));
 }
+
+/// **An edit through the document's history is seen without anyone saying so.**
+/// Every cache used to be emptied only by a hand-written `rendered_is_stale()`
+/// after the edit — 58 of them — and an edit path that forgot one served the
+/// page as it was (§18's "stale after undo" was one). Here the shape is removed,
+/// put back and removed again straight through the session, with no
+/// `rendered_is_stale()` at all, and the cached layers must follow each time.
+#[test]
+fn an_edit_through_the_history_is_seen_without_a_hand_written_stale_call() {
+    let mut app = app("quadrants.pdf");
+    let shape = app
+        .layers_on(0)
+        .iter()
+        .find(|d| d.depth == 0 && d.kind == pdf_core::document::DrawnKind::Shape)
+        .map(|d| d.object)
+        .expect("a shape on the page");
+    let before = app.layers_on(0).len();
+    let session = app.tab().doc.as_ref().unwrap().session.clone();
+    let fresh = || session.drawn_objects(0).expect("drawn").len();
+
+    session
+        .execute(pdf_core::command::Command::RemoveObjects { page_index: 0, objects: vec![shape] })
+        .expect("the shape is removed");
+    assert_ne!(fresh(), before, "the removal changed nothing on the page");
+    assert_eq!(app.layers_on(0).len(), fresh(), "the layers still list the removed shape");
+
+    session.undo().expect("undone");
+    assert_eq!(fresh(), before);
+    assert_eq!(app.layers_on(0).len(), before, "the layers still miss the shape the undo put back");
+
+    session.redo().expect("redone");
+    assert_eq!(app.layers_on(0).len(), fresh(), "the layers still list the shape the redo removed");
+}

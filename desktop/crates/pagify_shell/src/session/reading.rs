@@ -1,5 +1,5 @@
 //! What the text pickers read: page recognition (including drawn words),
-//! per-run fonts and styles, `move_object`, object bounds and outlines,
+//! per-run fonts and styles, object bounds and outlines,
 //! annotations and internal links.
 //!
 //! Part of the `session` module — split out of the single file the design
@@ -134,18 +134,6 @@ impl Session {
     /// substituted by whatever reader opened it.
     pub fn run_font_is_embedded(&self, page: usize, object: usize) -> Result<bool> {
         registry::with_session(self.handle, |s| s.document.run_font_is_embedded(page, object))
-    }
-
-    /// Shift one page object by a distance, in page points.
-    pub fn move_object(
-        &self,
-        page: usize,
-        object: usize,
-        by: pdf_core::document::Point,
-    ) -> Result<()> {
-        let (x, y) = self.frame(page).vector_back((by.x, by.y));
-        let by = pdf_core::document::Point { x, y };
-        registry::with_session(self.handle, |s| s.document.move_object(page, object, by))
     }
 
     /// The area one page object covers.
