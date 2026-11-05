@@ -141,6 +141,20 @@ class ContactsDatabaseTest {
         )
     }
 
+    /** The same trap on the other end of the join: renaming a group emptied it. */
+    @Test
+    fun renamingAGroupKeepsItsMembers() = runBlocking {
+        val dao = database.contacts()
+        dao.save(contact(1, "Jane Okafor"))
+        dao.saveGroup(group(10, "Expo"))
+        dao.addToGroup(MembershipRow(1, 10, 0))
+
+        dao.saveGroup(group(10, "Light + Building 2026"))
+
+        assertEquals("the rename emptied the group", 1, dao.contactsInGroup(10).size)
+        assertTrue("renaming a group unfiled its contact", dao.ungrouped().isEmpty())
+    }
+
     /** Editing must also not quietly reset what the contact has been through. */
     @Test
     fun editingAContactKeepsItsExportHistory() = runBlocking {

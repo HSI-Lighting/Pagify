@@ -159,7 +159,11 @@ interface ContactsDao {
     @Query("SELECT * FROM contact_groups ORDER BY createdAt DESC")
     fun groups(): Flow<List<GroupRow>>
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    /**
+     * Save a group, new or renamed. `@Upsert` for the same reason as [save]:
+     * REPLACE deletes the row first and the cascade empties the group.
+     */
+    @Upsert
     suspend fun saveGroup(group: GroupRow)
 
     /**
