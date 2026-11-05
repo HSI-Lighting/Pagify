@@ -23,3 +23,8 @@ zeroize = "1"
 # thread at a time and every use of it waits behind the same lock; a thumbnail
 # of a CAD page cost what the page did (1.8 s). The pages stay PDFium's.
 hayro = "0.9.0"
+
+[dev-dependencies]
+# The comparison tool (`examples/compare_renderers.rs`) saves the two pictures
+# of a page that differs; already in the tree through hayro.
+image = { version = "0.25", default-features = false, features = ["png"] }

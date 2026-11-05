@@ -41,6 +41,12 @@ impl Preview {
         self.pdf.pages().len()
     }
 
+    /// Whether the file has PDF layers (optional content), for the comparison
+    /// tool's report: they are deliberately not a reason in `differs_because`.
+    pub fn has_layers(&self) -> bool {
+        self.pdf.xref().has_optional_content_groups()
+    }
+
     /// Page `page` drawn `width` pixels wide on white, as RGBA, turned as the
     /// page turns itself (`/Rotate`), the way PDFium's thumbnail drew it; `None`
     /// where hayro cannot draw it.
@@ -105,10 +111,7 @@ impl Preview {
             }
             let r = page.resources();
             let mut seen = std::collections::HashSet::new();
-            if font_not_embedded(&r.fonts, &r.x_objects, 8, &mut seen) {
-                return Some(Difference::FontNotEmbedded);
-            }
-            None
+            resources_differ(&r.fonts, &r.x_objects, 8, &mut seen)
         }));
         found.ok().flatten()
     }
@@ -126,6 +129,10 @@ pub enum Difference {
     /// A form that asks for its fields to be drawn afresh, which PDFium does
     /// and hayro does not.
     FormNeedsAppearances,
+    /// A JPEG picture with more or fewer colour channels than its colour
+    /// space has: PDFium takes the channels it needs, hayro reads the bytes as
+    /// the colour space says and draws something else.
+    ImageNotAsDeclared,
 }
 
 impl Difference {
@@ -135,18 +142,20 @@ impl Difference {
             Difference::FontNotEmbedded => "a font on it is not in the file",
             Difference::AnnotationWithoutAppearance => "an annotation on it has no appearance of its own",
             Difference::FormNeedsAppearances => "its form asks for its fields to be drawn afresh",
+            Difference::ImageNotAsDeclared => "a JPEG picture on it has other colour channels than the file says",
         }
     }
 }
 
-/// Whether a font of `fonts`, or of a form drawn through `x_objects` (to
-/// `depth` forms deep), is neither in the file nor one both renderers carry.
-fn font_not_embedded(
+/// A font of `fonts` that is neither in the file nor one both renderers carry,
+/// or a picture of `x_objects` hayro reads otherwise than PDFium — or either in
+/// a form drawn through `x_objects`, to `depth` forms deep.
+fn resources_differ(
     fonts: &Dict,
     x_objects: &Dict,
     depth: u8,
     seen: &mut std::collections::HashSet<ObjectIdentifier>,
-) -> bool {
+) -> Option<Difference> {
     let not_embedded = |font: Dict| {
         if font.get::<Name>(b"Subtype").is_some_and(|n| n.as_ref() == b"Type3") {
             return false;
@@ -163,35 +172,110 @@ fn font_not_embedded(
         !held && !font.get::<Name>(b"BaseFont").is_some_and(|n| standard_like(n.as_ref()))
     };
     if fonts.keys().any(|k| fonts.get::<Dict>(&k).is_some_and(not_embedded)) {
-        return true;
+        return Some(Difference::FontNotEmbedded);
     }
-    depth > 0
-        && x_objects.keys().any(|k| {
-            let Some(form) = x_objects.get::<Stream>(&k) else { return false };
-            let d = form.dict();
-            if !d.get::<Name>(b"Subtype").is_some_and(|n| n.as_ref() == b"Form") || !seen.insert(form.obj_id()) {
-                return false;
+    for k in x_objects.keys() {
+        let Some(x) = x_objects.get::<Stream>(&k) else { continue };
+        if !seen.insert(x.obj_id()) {
+            continue;
+        }
+        let d = x.dict();
+        match d.get::<Name>(b"Subtype").as_ref().map(|n| n.as_ref()) {
+            Some(b"Image") if jpeg_unlike_its_colour_space(&x) => return Some(Difference::ImageNotAsDeclared),
+            Some(b"Form") if depth > 0 => {
+                let r = d.get::<Dict>(b"Resources").unwrap_or_default();
+                let (f, x) = (r.get::<Dict>(b"Font").unwrap_or_default(), r.get::<Dict>(b"XObject").unwrap_or_default());
+                if let Some(found) = resources_differ(&f, &x, depth - 1, seen) {
+                    return Some(found);
+                }
             }
-            let r = d.get::<Dict>(b"Resources").unwrap_or_default();
-            let (f, x) = (r.get::<Dict>(b"Font").unwrap_or_default(), r.get::<Dict>(b"XObject").unwrap_or_default());
-            font_not_embedded(&f, &x, depth - 1, seen)
-        })
+            _ => {}
+        }
+    }
+    None
 }
 
-/// A font name both renderers draw alike without the file holding it: the
-/// standard fonts and their usual stand-ins, after any `ABCDEF+` subset prefix.
+/// A font name both renderers draw alike without the file holding it, after
+/// any `ABCDEF+` subset prefix: a standard font, or Arial, Times New Roman or
+/// Courier New, in a style hayro draws — regular, bold, italic. hayro draws
+/// any other Arial (Black, Narrow, Unicode MS) as plain Helvetica, where PDFium
+/// has the face from Windows: "Meeting room lights", page 1, set in
+/// Arial-Black, came out regular (the comparison tool, 2026-11-05).
 fn standard_like(name: &[u8]) -> bool {
     let name = match name.get(..7) {
         Some(p) if p[6] == b'+' && p[..6].iter().all(u8::is_ascii_uppercase) => &name[7..],
         _ => name,
     };
-    ["Helvetica", "Arial", "Times", "Courier", "Symbol", "ZapfDingbats"].iter().any(|s| name.starts_with(s.as_bytes()))
+    let mut n: Vec<u8> =
+        name.iter().filter(|c| !matches!(c, b'-' | b',' | b' ' | b'_')).map(u8::to_ascii_lowercase).collect();
+    if n.ends_with(b"mt") {
+        n.truncate(n.len() - 2);
+    }
+    let families = ["helvetica", "arial", "timesnewromanps", "timesnewroman", "times", "couriernewps", "couriernew", "courier", "symbol", "zapfdingbats"];
+    let styles: [&[u8]; 9] = [b"", b"regular", b"normal", b"roman", b"bold", b"italic", b"bolditalic", b"oblique", b"boldoblique"];
+    families.iter().find_map(|f| n.strip_prefix(f.as_bytes())).is_some_and(|style| styles.contains(&style))
+}
+
+/// A JPEG picture whose colour channels are not as many as its colour space
+/// has (`DeviceGray`, `DeviceRGB`, `DeviceCMYK` or `ICCBased`; any other is
+/// not judged).
+fn jpeg_unlike_its_colour_space(image: &Stream) -> bool {
+    let d = image.dict();
+    let filters: Vec<Vec<u8>> = match d.get::<Name>(b"Filter") {
+        Some(n) => vec![n.as_ref().to_vec()],
+        None => d.get::<Array>(b"Filter").map(|a| a.iter::<Name>().map(|n| n.as_ref().to_vec()).collect()).unwrap_or_default(),
+    };
+    if !matches!(&filters[..], [only] if only == b"DCTDecode" || only == b"DCT") {
+        return false;
+    }
+    let declared = match d.get::<Name>(b"ColorSpace") {
+        Some(n) => match n.as_ref() {
+            b"DeviceGray" | b"G" => 1,
+            b"DeviceRGB" | b"RGB" => 3,
+            b"DeviceCMYK" | b"CMYK" => 4,
+            _ => return false,
+        },
+        None => {
+            let Some(space) = d.get::<Array>(b"ColorSpace") else { return false };
+            let mut parts = space.flex_iter();
+            if !parts.next::<Name>().is_some_and(|n| n.as_ref() == b"ICCBased") {
+                return false;
+            }
+            let Some(n) = parts.next::<Stream>().and_then(|s| s.dict().get::<u8>(b"N")) else { return false };
+            n
+        }
+    };
+    jpeg_channels(&image.raw_data()).is_some_and(|channels| channels != declared)
+}
+
+/// The number of colour channels a JPEG's frame header gives.
+fn jpeg_channels(data: &[u8]) -> Option<u8> {
+    if !data.starts_with(&[0xFF, 0xD8]) {
+        return None;
+    }
+    let mut at = 2;
+    while at + 4 <= data.len() {
+        if data[at] != 0xFF {
+            return None;
+        }
+        match data[at + 1] {
+            0xFF => at += 1,
+            0xC0..=0xCF if !matches!(data[at + 1], 0xC4 | 0xC8 | 0xCC) => return data.get(at + 9).copied(),
+            0xDA | 0xD9 => return None,
+            _ => at += 2 + u16::from_be_bytes([data[at + 2], data[at + 3]]) as usize,
+        }
+    }
+    None
 }
 
 /// Above this average difference a channel, two pictures of a page differ.
 /// Antialiasing alone, the two renderers' edges a pixel apart, came to under 6
-/// on every fixture at thumbnail size.
-pub const DIFF_MEAN: f64 = 6.0;
+/// on every fixture at thumbnail size, and to 6.45 at 1.5 px a point on a
+/// dense table of the owner's ("Meeting room lights", pages 12–13: the same
+/// words and rules, none moved); the least real difference found was 8.77
+/// (page 1, a title in Arial Black drawn regular). Measured with
+/// `examples/compare_renderers.rs`, 2026-11-05.
+pub const DIFF_MEAN: f64 = 7.5;
 /// hayro's inked pixels over PDFium's, inside which the two drew about as much.
 /// A pixel is inked when any of its channels is below 160.
 pub const INK_RATIO: std::ops::RangeInclusive<f64> = 0.8..=1.25;
@@ -289,7 +373,7 @@ mod tests {
                 let c = compare(&ours, &theirs).unwrap_or_else(|| {
                     panic!("{name} page {page}: {}x{} against PDFium's {}x{}", ours.width, ours.height, theirs.width, theirs.height)
                 });
-                assert!(c.mean_diff < DIFF_MEAN, "{name} page {page}: hayro and PDFium differ by {:.1} a channel on average", c.mean_diff);
+                assert!(c.mean_diff < 6.0, "{name} page {page}: hayro and PDFium differ by {:.1} a channel on average", c.mean_diff);
                 // A mostly white page drawn blank would pass the average alone:
                 // the ink has to be there too, and about as much of it — looser
                 // than `INK_RATIO`, as a 160-pixel thumbnail has little ink.
@@ -373,6 +457,17 @@ mod tests {
         let fonts = "/Resources << /Font << /F1 4 0 R >> >>";
         let helvetica = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>";
         assert_eq!(differs_because("", fonts, &[helvetica]), None);
+        for alike in ["Arial-BoldMT", "Arial,BoldItalic", "TimesNewRomanPS-BoldMT", "CourierNewPSMT", "Times-Roman"] {
+            let font = format!("<< /Type /Font /Subtype /TrueType /BaseFont /{alike} >>");
+            assert_eq!(differs_because("", fonts, &[&font]), None, "{alike}");
+        }
+        // hayro draws these as plain Helvetica; PDFium has the faces from
+        // Windows. Arial-Black was the title of "Meeting room lights", page 1:
+        // bold by PDFium, regular by hayro (the comparison tool, 2026-11-05).
+        for unlike in ["Arial-Black", "ArialNarrow-Bold", "ArialUnicodeMS", "Helvetica-Light"] {
+            let font = format!("<< /Type /Font /Subtype /TrueType /BaseFont /{unlike} >>");
+            assert_eq!(differs_because("", fonts, &[&font]), Some(Difference::FontNotEmbedded), "{unlike}");
+        }
         let calibri = "<< /Type /Font /Subtype /TrueType /BaseFont /Calibri /FontDescriptor 5 0 R >>";
         let bare = "<< /Type /FontDescriptor /FontName /Calibri /Flags 32 >>";
         assert_eq!(differs_because("", fonts, &[calibri, bare]), Some(Difference::FontNotEmbedded));
@@ -416,6 +511,20 @@ mod tests {
             Some(Difference::FormNeedsAppearances)
         );
         assert_eq!(differs_because("/AcroForm << /Fields [4 0 R] >>", "/Annots [4 0 R]", &[widget, appearance]), None);
+    }
+
+    /// A JPEG picture with three colour channels the file says is grey
+    /// (the scan fixtures, from `make_text_fixtures`): PDFium draws its first
+    /// channel, hayro reads the three as grey and draws three narrow copies,
+    /// found by the comparison tool. A picture as declared is no difference.
+    #[test]
+    fn a_picture_unlike_its_colour_space_is_a_difference() {
+        let fixtures = format!("{}/../../../rust/pdf_core/fixtures", env!("CARGO_MANIFEST_DIR"));
+        let read = |name: &str| Preview::new(std::fs::read(format!("{fixtures}/{name}")).expect("fixture")).expect("hayro reads it");
+        for name in ["scan-300dpi.pdf", "scan-lowdpi.pdf", "scan-skewed.pdf"] {
+            assert_eq!(read(name).differs_because(0), Some(Difference::ImageNotAsDeclared), "{name}");
+        }
+        assert_eq!(read("pictures.pdf").differs_because(0), None);
     }
 
     /// What hayro cannot read is `None`, not a panic.
