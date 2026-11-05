@@ -16,11 +16,14 @@
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
+use hayro::hayro_interpret::util::TransformExt;
 use hayro::hayro_interpret::InterpreterSettings;
 use hayro::hayro_syntax::object::{Array, Dict, Name, ObjectIdentifier, Stream};
 use hayro::hayro_syntax::Pdf;
+use hayro::kurbo::Affine;
 use hayro::vello_cpu::color::palette::css::WHITE;
-use hayro::{PixmapSettings, RenderCache, RenderSettings};
+use hayro::vello_cpu::{Pixmap, RasterizerSettings, RenderContext, TargetInit};
+use hayro::{RenderCache, RenderSettings};
 
 use crate::session::PageRaster;
 
@@ -51,23 +54,58 @@ impl Preview {
     /// page turns itself (`/Rotate`), the way PDFium's thumbnail drew it; `None`
     /// where hayro cannot draw it.
     pub fn render(&self, page: usize, width: u32) -> Option<PageRaster> {
+        let (w, _) = catch_unwind(AssertUnwindSafe(|| self.pdf.pages().get(page).map(|p| p.render_dimensions()))).ok()??;
+        if !(w > 0.0) || width == 0 {
+            return None;
+        }
+        self.render_scaled(page, width as f32 / w)
+    }
+
+    /// Page `page` drawn at `scale` pixels a point, as [`Self::render`] draws
+    /// it — PDFium's `render_page` of the same page and scale, before any turn
+    /// of the view ([`turned`]).
+    pub fn render_scaled(&self, page: usize, scale: f32) -> Option<PageRaster> {
+        self.draw(page, None, scale)
+    }
+
+    /// The part `crop` of page `page` (page points, top-left origin, in the
+    /// page as it turns itself), drawn at `scale` — as PDFium's
+    /// `render_page_region` draws it: the crop clipped to the page, its edges
+    /// rounded to whole pixels.
+    pub fn render_region(&self, page: usize, crop: pdf_core::document::Rect, scale: f32) -> Option<PageRaster> {
+        self.draw(page, Some(crop), scale)
+    }
+
+    fn draw(&self, page: usize, crop: Option<pdf_core::document::Rect>, scale: f32) -> Option<PageRaster> {
         let drawn = catch_unwind(AssertUnwindSafe(|| {
             let page = self.pdf.pages().get(page)?;
             let (w, h) = page.render_dimensions();
-            if !(w > 0.0 && h > 0.0) || width == 0 {
+            if !(w > 0.0 && h > 0.0 && scale.is_finite() && scale > 0.0) {
                 return None;
             }
-            let scale = width as f32 / w;
+            let (left, top, right, bottom) = match crop {
+                None => (0.0, 0.0, w, h),
+                Some(c) => (c.left.min(c.right).max(0.0), c.top.min(c.bottom).max(0.0), c.left.max(c.right).min(w), c.top.max(c.bottom).min(h)),
+            };
+            let (x0, y0) = ((left * scale).round(), (top * scale).round());
+            let (width, height) = ((right * scale).round() - x0, (bottom * scale).round() - y0);
             // hayro's pixmap is at most 65,535 pixels a side.
-            if !(h * scale >= 1.0 && h * scale <= u16::MAX as f32 && width <= u16::MAX as u32) {
+            if !(width >= 1.0 && height >= 1.0 && width <= u16::MAX as f32 && height <= u16::MAX as f32) {
                 return None;
             }
-            let pixmap = hayro::render(
-                page,
-                &RenderCache::new(),
-                &InterpreterSettings::default(),
-                &RenderSettings::default(),
-                &PixmapSettings { x_scale: scale, y_scale: scale, bg_color: WHITE },
+            // `hayro::render`, with the crop's corner moved to the pixmap's.
+            let mut ctx = RenderContext::new(width as u16, height as u16);
+            let transform = Affine::translate((-x0 as f64, -y0 as f64))
+                * Affine::scale(scale as f64)
+                * page.initial_transform(true).to_kurbo();
+            let settings = (InterpreterSettings::default(), RenderSettings::default());
+            hayro::render_into(page, &RenderCache::new(), &settings.0, &settings.1, &mut ctx, transform);
+            ctx.flush();
+            let mut pixmap = Pixmap::new(ctx.width(), ctx.height());
+            ctx.render_with(
+                &mut pixmap,
+                &mut hayro::vello_cpu::Resources::default(),
+                RasterizerSettings { target_init: TargetInit::Clear(WHITE), ..Default::default() },
             );
             Some(PageRaster {
                 width: pixmap.width() as u32,
@@ -115,6 +153,31 @@ impl Preview {
         }));
         found.ok().flatten()
     }
+}
+
+/// `raster` turned a quarter clockwise a step, as PDFium's view rotation turns
+/// a page.
+pub fn turned(raster: PageRaster, rotation: pdf_core::Rotation) -> PageRaster {
+    use pdf_core::Rotation;
+    let (w, h) = (raster.width as usize, raster.height as usize);
+    let (nw, nh) = match rotation {
+        Rotation::None => return raster,
+        Rotation::Clockwise180 => (w, h),
+        Rotation::Clockwise90 | Rotation::Clockwise270 => (h, w),
+    };
+    let mut pixels = vec![0u8; raster.pixels.len()];
+    for y in 0..h {
+        for x in 0..w {
+            let (nx, ny) = match rotation {
+                Rotation::Clockwise90 => (h - 1 - y, x),
+                Rotation::Clockwise180 => (w - 1 - x, h - 1 - y),
+                _ => (y, w - 1 - x),
+            };
+            let (from, to) = ((y * w + x) * 4, (ny * nw + nx) * 4);
+            pixels[to..to + 4].copy_from_slice(&raster.pixels[from..from + 4]);
+        }
+    }
+    PageRaster { width: nw as u32, height: nh as u32, pixels, from_cache: raster.from_cache }
 }
 
 /// Why hayro may draw a page differently from PDFium.
@@ -525,6 +588,55 @@ mod tests {
             assert_eq!(read(name).differs_because(0), Some(Difference::ImageNotAsDeclared), "{name}");
         }
         assert_eq!(read("pictures.pdf").differs_because(0), None);
+    }
+
+    /// A picture turned a quarter clockwise a step, as PDFium's view rotation
+    /// turns a page: red left of blue becomes red above blue.
+    #[test]
+    fn turned_turns_a_picture_a_quarter_clockwise_a_step() {
+        let (red, blue) = ([255, 0, 0, 255], [0, 0, 255, 255]);
+        let pair = || PageRaster { width: 2, height: 1, pixels: [red, blue].concat(), from_cache: false };
+        let shape = |r: &PageRaster| (r.width, r.height, r.pixels.clone());
+        assert_eq!(shape(&turned(pair(), pdf_core::Rotation::None)), (2, 1, [red, blue].concat()));
+        assert_eq!(shape(&turned(pair(), pdf_core::Rotation::Clockwise90)), (1, 2, [red, blue].concat()));
+        assert_eq!(shape(&turned(pair(), pdf_core::Rotation::Clockwise180)), (2, 1, [blue, red].concat()));
+        assert_eq!(shape(&turned(pair(), pdf_core::Rotation::Clockwise270)), (1, 2, [blue, red].concat()));
+    }
+
+    /// A page picture drawn by hayro — at a scale, turned, or a part of it, as
+    /// the page view asks — looks like the one PDFium draws, on fixtures with
+    /// words, pictures, forms, annotations and turned pages (`/Rotate`).
+    #[test]
+    fn a_page_drawn_by_hayro_at_a_scale_turned_or_in_part_looks_like_pdfiums() {
+        use pdf_core::Rotation;
+        if std::env::var("PAGIFY_PDFIUM_LIB").is_err() {
+            eprintln!("skipped: PAGIFY_PDFIUM_LIB is not set");
+            return;
+        }
+        let fixtures = format!("{}/../../../rust/pdf_core/fixtures", env!("CARGO_MANIFEST_DIR"));
+        for name in ["text-lines.pdf", "pictures.pdf", "forms.pdf", "hidden-things.pdf", "pages-ladder.pdf", "two-column.pdf"] {
+            let session = crate::Session::open(format!("{fixtures}/{name}")).expect("open");
+            let preview = Preview::new(session.current_bytes().expect("bytes")).expect("hayro reads it");
+            for page in 0..preview.page_count() {
+                for r in [Rotation::None, Rotation::Clockwise90, Rotation::Clockwise180, Rotation::Clockwise270] {
+                    let ours = turned(preview.render_scaled(page, 1.5).expect("hayro draws it"), r);
+                    let theirs = session.render_page_rotated(page, 1.5, r).expect("PDFium draws it");
+                    let c = compare(&ours, &theirs).unwrap_or_else(|| {
+                        panic!("{name} page {page} {r:?}: {}x{} against {}x{}", ours.width, ours.height, theirs.width, theirs.height)
+                    });
+                    assert!(!c.differs(), "{name} page {page} {r:?}: {c:?}");
+                }
+                let size = session.page_size(page).expect("size");
+                let (w, h) = (size.width_pt, size.height_pt);
+                let middle = pdf_core::document::Rect { left: w / 4.0, top: h / 4.0, right: 3.0 * w / 4.0, bottom: 3.0 * h / 4.0 };
+                let ours = preview.render_region(page, middle, 3.0).expect("hayro draws it");
+                let theirs = session.render_page_region(page, middle, 3.0).expect("PDFium draws it");
+                let c = compare(&ours, &theirs).unwrap_or_else(|| {
+                    panic!("{name} page {page} middle: {}x{} against {}x{}", ours.width, ours.height, theirs.width, theirs.height)
+                });
+                assert!(!c.differs(), "{name} page {page} middle: {c:?}");
+            }
+        }
     }
 
     /// What hayro cannot read is `None`, not a panic.
