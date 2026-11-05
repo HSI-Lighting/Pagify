@@ -1601,63 +1601,7 @@ impl Document for PdfiumDocument {
             .get(page_number)
             .map_err(|e| PdfError::Pdfium(e.to_string()))?;
 
-        // Same "read the matrix, then drop the raw handle" shape as
-        // `text_runs()`, for the same reason — see its own comment.
-        let (space, origin) = {
-            let raw = RawPage::open(self.document.handle(), page_number)?;
-            let space = raw.space()?;
-            let bindings = pdfium()?.bindings();
-            let index = i32::try_from(object).unwrap_or(-1);
-            let handle = unsafe { bindings.FPDFPage_GetObject(raw.handle, index) };
-            if handle.is_null() {
-                return Ok(None);
-            }
-            let mut m = FS_MATRIX { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
-            let read = unsafe { bindings.FPDFPageObj_GetMatrix(handle, &mut m) } != 0;
-            (space, read.then(|| space.to_top_left(m.e, m.f)))
-        };
-
-        let Ok(object_ref) = page.objects().get(object) else { return Ok(None) };
-        let Some(text_object) = object_ref.as_text_object() else { return Ok(None) };
-        // The same machinery `text_runs()` reads a run's words with — see
-        // its own comment on why this is kept even when it reports none.
-        let text_page = page.text().map_err(|e| PdfError::Pdfium(e.to_string()))?;
-        // Through the text layer just loaded, not `text_object.text()`, which
-        // loads one of its own on every call — see `text_runs_all`.
-        let words = text_page.for_object(text_object);
-        drop(text_page);
-
-        let Ok(bounds) = object_ref.bounds() else { return Ok(None) };
-        if !has_area(bounds.left().value, bounds.top().value, bounds.right().value, bounds.bottom().value) {
-            return Ok(None);
-        }
-        let (left, top) = space.to_top_left(bounds.left().value, bounds.top().value);
-        let (right, bottom) = space.to_top_left(bounds.right().value, bounds.bottom().value);
-
-        let colour = object_ref
-            .fill_color()
-            .map(|c| Color { r: c.red(), g: c.green(), b: c.blue(), a: c.alpha() })
-            .unwrap_or(Color { r: 0, g: 0, b: 0, a: 255 });
-        let origin = match origin {
-            Some((x, y)) => Point { x, y },
-            None => Point { x: left, y: bottom },
-        };
-
-        Ok(Some(crate::document::TextRun {
-            object,
-            text: words,
-            rect: Rect { left, top, right, bottom },
-            origin,
-            // The *effective* size, as `text_runs_all` and `text_runs_some` give
-            // it — not the bare `Tf` size. Every caller that divides a requested
-            // size by `run.size / found.size` (see `set_run_in_stream`'s
-            // `vertical_scale`) needs the effective one in `run.size`: for a
-            // producer that writes `1 Tf` and puts the size in the matrix, the
-            // bare one made that ratio 1 and a requested 9 pt a `9 Tf` under a
-            // 9x matrix.
-            size: effective_size(&text_object, page_turns(&page)),
-            color: colour,
-        }))
+        self.text_run_on(&page, object)
     }
 
     /// Same walk as [`Self::text_run_at`] repeated per object costs a page
@@ -1822,12 +1766,28 @@ impl Document for PdfiumDocument {
             PdfError::InvalidArgument(format!("object {object} is out of range"))
         })?;
 
+        // **One load of the page for what decides how the object moves**:
+        // whether it is a picture, the run of words it is, and the order of the
+        // page's words a run's move is planned with. Each was a load of its
+        // own, and on a CAD page of 720,000 lines a load is 0.8 s: a word moved
+        // there took 7 s, most of it loading the page again
+        // (`tests/edit_cost.rs`). Read before anything is written, and let go
+        // of before the edit reopens the document.
+        let (picture, run, text_objects) = {
+            let page = self.document.pages().get(page_number).map_err(|e| PdfError::Pdfium(e.to_string()))?;
+            let raw = std::mem::ManuallyDrop::new(RawPage { handle: page.page_handle() });
+            let picture = Self::is_listed_picture(&raw, object)?;
+            let run = if picture { None } else { self.text_run_on(&page, object)? };
+            let text_objects = if run.is_some() { Self::text_objects_in_order_on(&raw).ok() } else { None };
+            (picture, run, text_objects)
+        };
+
         // **A picture moves without PDFium's help.** Its drawing is one
         // operator, and wrapping that operator cannot reach anything else — so
         // there is no re-emission to guard against. See
         // `move_picture_in_stream`; anything it cannot follow falls through to
         // the guarded path below.
-        if self.images_on(page_index)?.iter().any(|i| i.object == object) {
+        if picture {
             match self.move_picture_in_stream(page_index, object, by) {
                 Ok(()) => return Ok(()),
                 Err(PdfError::Unsupported(_)) => {}
@@ -1849,8 +1809,8 @@ impl Document for PdfiumDocument {
         // hundred runs paid for the whole list twice for no reason. Measured
         // on a real page: this gate alone was ~800ms of what looked like a
         // "move" taking a few seconds.
-        if self.text_run_at(page_index, object)?.is_some() {
-            match self.move_run_in_stream(page_index, object, by) {
+        if let Some(run) = run {
+            match self.move_run_in_stream_with(page_index, by, run, text_objects) {
                 Ok(()) => return Ok(()),
                 Err(PdfError::Unsupported(_)) => {}
                 Err(other) => return Err(other),
@@ -7042,18 +7002,69 @@ const COLORTYPE_INTERIOR: FPDFANNOT_COLORTYPE = 1;
 /// binding any more than the annotation subtypes above are.
 const FILLMODE_WINDING: c_int = 2;
 
-/// A page opened straight through the C API, closed when it goes out of scope.
-///
-/// Deliberately not `pdfium-render`'s `PdfPage`: reaching the raw `FPDF_PAGE` it
-/// wraps would need a second patch to the vendored crate, and the annotation
-/// calls below are all raw FFI anyway. Opening our own costs one `FPDF_LoadPage`
-/// and keeps the vendor diff at the single line it is.
-///
-/// The `Drop` is the point of the type. Several of the calls below can fail, and
-/// an early return that leaked the page would hold a reference to the document
-/// for as long as it stayed open — which, since the registry lock is dropped
-/// afterwards, would eventually be blamed on something else entirely.
 impl PdfiumDocument {
+    /// [`Document::text_run_at`] on a page already loaded.
+    fn text_run_on(&self, page: &PdfPage<'_>, object: usize) -> Result<Option<crate::document::TextRun>> {
+        // The matrix through the page's **own** handle, never a second load:
+        // on a CAD page that is a second parse of everything it draws, and two
+        // live handles on one page is what `set_text_run_styled` warns of.
+        let (space, origin) = {
+            let raw = std::mem::ManuallyDrop::new(RawPage { handle: page.page_handle() });
+            let space = raw.space()?;
+            let bindings = pdfium()?.bindings();
+            let index = i32::try_from(object).unwrap_or(-1);
+            let handle = unsafe { bindings.FPDFPage_GetObject(raw.handle, index) };
+            if handle.is_null() {
+                return Ok(None);
+            }
+            let mut m = FS_MATRIX { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
+            let read = unsafe { bindings.FPDFPageObj_GetMatrix(handle, &mut m) } != 0;
+            (space, read.then(|| space.to_top_left(m.e, m.f)))
+        };
+
+        let Ok(object_ref) = page.objects().get(object) else { return Ok(None) };
+        let Some(text_object) = object_ref.as_text_object() else { return Ok(None) };
+        // The same machinery `text_runs()` reads a run's words with — see
+        // its own comment on why this is kept even when it reports none.
+        let text_page = page.text().map_err(|e| PdfError::Pdfium(e.to_string()))?;
+        // Through the text layer just loaded, not `text_object.text()`, which
+        // loads one of its own on every call — see `text_runs_all`.
+        let words = text_page.for_object(text_object);
+        drop(text_page);
+
+        let Ok(bounds) = object_ref.bounds() else { return Ok(None) };
+        if !has_area(bounds.left().value, bounds.top().value, bounds.right().value, bounds.bottom().value) {
+            return Ok(None);
+        }
+        let (left, top) = space.to_top_left(bounds.left().value, bounds.top().value);
+        let (right, bottom) = space.to_top_left(bounds.right().value, bounds.bottom().value);
+
+        let colour = object_ref
+            .fill_color()
+            .map(|c| Color { r: c.red(), g: c.green(), b: c.blue(), a: c.alpha() })
+            .unwrap_or(Color { r: 0, g: 0, b: 0, a: 255 });
+        let origin = match origin {
+            Some((x, y)) => Point { x, y },
+            None => Point { x: left, y: bottom },
+        };
+
+        Ok(Some(crate::document::TextRun {
+            object,
+            text: words,
+            rect: Rect { left, top, right, bottom },
+            origin,
+            // The *effective* size, as `text_runs_all` and `text_runs_some` give
+            // it — not the bare `Tf` size. Every caller that divides a requested
+            // size by `run.size / found.size` (see `set_run_in_stream`'s
+            // `vertical_scale`) needs the effective one in `run.size`: for a
+            // producer that writes `1 Tf` and puts the size in the matrix, the
+            // bare one made that ratio 1 and a requested 9 pt a `9 Tf` under a
+            // 9x matrix.
+            size: effective_size(&text_object, page_turns(page)),
+            color: colour,
+        }))
+    }
+
     /// [`Document::page_scale`] on a page already loaded.
     fn page_scale_on(raw: &RawPage) -> Result<crate::document::PageScale> {
         let bindings = pdfium()?.bindings();
@@ -7130,6 +7141,19 @@ impl PdfiumDocument {
     }
 }
 
+/// A page opened straight through the C API, closed when it goes out of scope.
+///
+/// Opened on its own where nothing has the page loaded yet: one `FPDF_LoadPage`,
+/// and the calls below are raw FFI anyway. Where a `pdfium-render` `PdfPage` is
+/// loaded already, its own handle is lent instead, as a `ManuallyDrop<RawPage>`
+/// that never closes it (`PdfPage::page_handle`, `rust/vendor/README.md`): a
+/// second load is a second parse of the whole page, and two live handles on
+/// one page is what `set_text_run_styled` warns of.
+///
+/// The `Drop` is the point of the type. Several of the calls below can fail, and
+/// an early return that leaked the page would hold a reference to the document
+/// for as long as it stayed open — which, since the registry lock is dropped
+/// afterwards, would eventually be blamed on something else entirely.
 struct RawPage {
     handle: FPDF_PAGE,
 }
@@ -8554,6 +8578,22 @@ fn font_to_unicode(
     /// - a transform that cannot be inverted, or a matrix with a value that
     ///   cannot be written as a PDF number.
     fn move_run_in_stream(&mut self, page_index: usize, object: usize, by: Point) -> Result<()> {
+        let run = self
+            .text_run_at(page_index, object)?
+            .ok_or_else(|| PdfError::InvalidArgument("that is not a run of text".into()))?;
+        self.move_run_in_stream_with(page_index, by, run, None)
+    }
+
+    /// [`Self::move_run_in_stream`] for a run already read — with the page's
+    /// text objects in order, when they are, so that planning the move does
+    /// not load the page again for them.
+    fn move_run_in_stream_with(
+        &mut self,
+        page_index: usize,
+        by: Point,
+        run: crate::document::TextRun,
+        text_objects: Option<Vec<usize>>,
+    ) -> Result<()> {
         use crate::pdf::content;
 
         let was_secured = self.already_secured;
@@ -8568,10 +8608,10 @@ fn font_to_unicode(
         let placed = content::placed(&operations);
         let states = content::states(&operations);
 
-        let run = self
-            .text_run_at(page_index, object)?
-            .ok_or_else(|| PdfError::InvalidArgument("that is not a run of text".into()))?;
         let facts = PageFacts::new(self, page_index);
+        if let Some(list) = text_objects {
+            let _ = facts.text_objects.set(list);
+        }
         let edits =
             self.run_move_edits(&facts, page_index, &run, by, &file, &page, &stream, &operations, &states, &placed)?;
         let edited = content::splice(&stream, &edits);
@@ -8937,7 +8977,11 @@ fn font_to_unicode(
             index: page_index,
             count: self.page_count,
         })?;
-        let raw = RawPage::open(self.document.handle(), page_number)?;
+        Self::text_objects_in_order_on(&RawPage::open(self.document.handle(), page_number)?)
+    }
+
+    /// [`Self::text_objects_in_order`] on a page already loaded.
+    fn text_objects_in_order_on(raw: &RawPage) -> Result<Vec<usize>> {
         let bindings = pdfium()?.bindings();
         let mut text = Vec::new();
         for index in 0..unsafe { bindings.FPDFPage_CountObjects(raw.handle) } {
@@ -8950,6 +8994,21 @@ fn font_to_unicode(
             }
         }
         Ok(text)
+    }
+
+    /// Whether `object` is one of the pictures [`Document::images_on`] lists —
+    /// an image object with bounds — asked of that one object, not the page.
+    fn is_listed_picture(raw: &RawPage, object: usize) -> Result<bool> {
+        let bindings = pdfium()?.bindings();
+        let Ok(index) = i32::try_from(object) else { return Ok(false) };
+        let handle = unsafe { bindings.FPDFPage_GetObject(raw.handle, index) };
+        if handle.is_null()
+            || unsafe { bindings.FPDFPageObj_GetType(handle) } != pdfium_render::prelude::FPDF_PAGEOBJ_IMAGE as i32
+        {
+            return Ok(false);
+        }
+        let (mut left, mut bottom, mut right, mut top) = (0.0f32, 0.0, 0.0, 0.0);
+        Ok(unsafe { bindings.FPDFPageObj_GetBounds(handle, &mut left, &mut bottom, &mut right, &mut top) } != 0)
     }
 
     /// Where a page object sits among that page's **text objects**, and how many
