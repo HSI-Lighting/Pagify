@@ -951,6 +951,17 @@ impl Document for PdfiumDocument {
         Ok(found)
     }
 
+    /// Read from the file as it lies on disk, which is this document only
+    /// while nothing has changed it, nothing unsealed it (Secure Plus) and
+    /// nothing mended it in memory; otherwise a maybe.
+    fn may_hold_text_marks(&self) -> bool {
+        let DocumentSource::Path(path) = &self.source else { return true };
+        if self.dirty || self.secure_plus || self.repaired_on_open {
+            return true;
+        }
+        std::fs::read(path).map_or(true, |bytes| crate::pdf::content::may_name(&bytes, TEXT_MARK_NAME.as_bytes()))
+    }
+
     fn page_count(&self) -> usize {
         self.page_count
     }

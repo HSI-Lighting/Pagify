@@ -813,6 +813,14 @@ pub trait Document: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Whether any page could hold a text mark ([`Self::text_marks`]).
+    /// `false` is a promise that none does; `true` is only a maybe. Asking
+    /// every page loads every page, which on a CAD set is most of the time
+    /// the document takes to open.
+    fn may_hold_text_marks(&self) -> bool {
+        true
+    }
+
     /// What this document permits, when it is encrypted.
     ///
     /// `None` for a document with no password, and that is not the same as

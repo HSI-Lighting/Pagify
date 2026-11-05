@@ -164,8 +164,13 @@ impl crate::PagifyApp {
 
                 // Anything this document already carries comes back as live
                 // geometry, not as ink — phase 8's whole point.
+                //
+                // **Only if the file can hold any.** Asking loads each page
+                // whole: on a CAD set of 720,000-line pages that was 1.9 s of
+                // its opening, on this thread, for a document nobody marked.
                 let mut restored = 0;
-                for page in 0..page_count {
+                let pages = if session.may_hold_markup() { 0..page_count } else { 0..0 };
+                for page in pages {
                     if let Ok(Some(layer)) = session.restore_markup(page) {
                         restored += layer.len();
                         let height = layer.space().height_pt();

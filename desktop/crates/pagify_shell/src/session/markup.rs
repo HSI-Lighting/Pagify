@@ -33,4 +33,10 @@ impl Session {
             }
         })
     }
+
+    /// Whether any page could have markup to restore — `false` only when the
+    /// file has been read and holds none. See `Document::may_hold_text_marks`.
+    pub fn may_hold_markup(&self) -> bool {
+        registry::with_session(self.handle, |s| Ok(s.document.may_hold_text_marks())).unwrap_or(true)
+    }
 }

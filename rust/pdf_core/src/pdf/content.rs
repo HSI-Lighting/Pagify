@@ -1095,6 +1095,60 @@ pub fn splice(bytes: &[u8], edits: &[(std::ops::Range<usize>, Vec<u8>)]) -> Vec<
     out
 }
 
+/// Whether any stream in a file's `bytes` that could be a page's own content
+/// says `needle`. `false` is a promise; `true` is only a maybe, and is the
+/// answer whenever the file cannot be read well enough to tell.
+///
+/// Read front to back, not through the cross-reference table, which may be a
+/// stream this crate does not read: every stream object is decoded with
+/// [`decode`], unless its dictionary says it is something a page's content
+/// cannot be — anything with a `/Type` or `/Subtype` (images, forms, fonts,
+/// object streams) or a font's `/Length1`. A stream that does not decode, an
+/// object that does not read, an `endstream` that cannot be found and an
+/// encrypted file (`/Encrypt`) are all maybes.
+pub fn may_name(bytes: &[u8], needle: &[u8]) -> bool {
+    let find = |hay: &[u8], what: &[u8]| hay.windows(what.len()).position(|w| w == what);
+    // A stream with no filter, and an encrypted file, are read as they lie.
+    if find(bytes, needle).is_some() || find(bytes, b"/Encrypt").is_some() {
+        return true;
+    }
+    let mut at = 0;
+    while let Some(found) = find(&bytes[at..], b"obj") {
+        let start = at + found;
+        at = start + 3;
+        // `12 0 obj`, not `endobj` or a word that happens to hold the letters.
+        if !matches!(start.checked_sub(1).map(|i| bytes[i]), Some(b' ' | b'\t' | b'\r' | b'\n' | b'\0' | b'\x0c')) {
+            continue;
+        }
+        let mut lexer = Lexer::new(bytes, at);
+        let (dict, data) = match lexer.object() {
+            Ok(Object::Stream(dict, data)) => (dict, data),
+            Ok(_) => continue,
+            // An indirect `/Length`, which the lexer does not follow: it stops
+            // just past `stream`. The dictionary again without it, and the
+            // data up to `endstream`.
+            Err(PdfError::Unsupported(_)) => {
+                let data = lexer.at;
+                let Some(keyword) = bytes[..data].windows(6).rposition(|w| w == b"stream") else { return true };
+                let Ok(Object::Dict(dict)) = Lexer::new(&bytes[..keyword], at).object() else { return true };
+                let Some(length) = find(&bytes[data..], b"endstream") else { return true };
+                (dict, data..data + length)
+            }
+            Err(_) => return true,
+        };
+        at = data.end;
+        let not_content = [&b"Type"[..], b"Subtype", b"Length1"].iter().any(|key| dict.get(key).is_some());
+        if not_content || dict.get(b"Filter").is_none() {
+            continue;
+        }
+        match decode(&dict, &bytes[data]) {
+            Some(content) if find(&content, needle).is_none() => {}
+            _ => return true,
+        }
+    }
+    false
+}
+
 /// Decode a stream, whatever it says it is encoded with — as long as every
 /// filter on it is one this reads.
 ///
@@ -1573,6 +1627,57 @@ pub fn encode(data: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `may_name` finds a name in compressed page content, promises its
+    /// absence only when every content stream was read, and passes over what
+    /// cannot be page content.
+    #[test]
+    fn may_name_reads_compressed_content_and_is_a_maybe_when_it_cannot() {
+        use std::io::Write;
+        let deflate = |data: &[u8]| {
+            let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+            z.write_all(data).expect("deflate");
+            z.finish().expect("deflate")
+        };
+        // `/Length` written as a number, as PDFium does, or as a reference.
+        let object = |number: u32, dict: &str, data: &[u8]| {
+            let length = if dict.contains("/Length") { String::new() } else { format!("/Length {}", data.len()) };
+            let mut out = format!("{number} 0 obj\n<<{dict}{length}>>stream\r\n").into_bytes();
+            out.extend_from_slice(data);
+            out.extend_from_slice(b"\r\nendstream\nendobj\n");
+            out
+        };
+        let file = |objects: &[Vec<u8>]| {
+            let mut out = b"%PDF-1.7\n1 0 obj\n<</Type/Catalog>>\nendobj\n".to_vec();
+            objects.iter().for_each(|o| out.extend_from_slice(o));
+            out.extend_from_slice(b"trailer\n<</Root 1 0 R>>\n%%EOF\n");
+            out
+        };
+        // Long enough to be compressed rather than stored, so the name is not
+        // in the file as it lies.
+        let marked = deflate(&b"BT /PagifyText <</id 3>> BDC (Hi) Tj EMC ET\n".repeat(40));
+        let plain = deflate(&b"0 0 m 100 100 l S\n".repeat(40));
+        let with_mark = file(&[object(2, "/Filter/FlateDecode", &marked)]);
+        assert!(!with_mark.windows(10).any(|w| w == b"PagifyText"), "the sample was stored, not compressed");
+
+        assert!(may_name(&with_mark, b"PagifyText"), "missed in compressed content");
+        assert!(
+            may_name(&file(&[object(2, "/Filter/FlateDecode/Length 5 0 R", &marked)]), b"PagifyText"),
+            "missed behind an indirect /Length"
+        );
+        assert!(!may_name(&file(&[object(2, "/Filter/FlateDecode", &plain)]), b"PagifyText"), "a file without it was a maybe");
+        assert!(
+            !may_name(&file(&[object(2, "/Filter/FlateDecode", &plain), object(3, "/Subtype/Image/Filter/FlateDecode", &marked)]), b"PagifyText"),
+            "an image was read as page content"
+        );
+        assert!(may_name(&file(&[object(2, "/Filter/DCTDecode", &plain)]), b"PagifyText"), "a stream it cannot read was a promise");
+        let mut unended = file(&[object(2, "/Filter/FlateDecode", &plain)]);
+        unended.extend_from_slice(b"4 0 obj\n<</Filter/FlateDecode>>\nstream\n");
+        assert!(may_name(&unended, b"PagifyText"), "a stream with no end was a promise");
+        let mut encrypted = file(&[object(2, "/Filter/FlateDecode", &plain)]);
+        encrypted.extend_from_slice(b"trailer\n<</Encrypt 9 0 R>>\n");
+        assert!(may_name(&encrypted, b"PagifyText"), "an encrypted file was a promise");
+    }
 
     /// The ASCII filters and run-length, each against a value worked out by
     /// hand, and a chain of three with parameters beside the one that takes

@@ -1037,6 +1037,19 @@ fn saved_text_can_be_found_again_and_erased() {
     assert_eq!(marks.len(), 2, "the tags did not survive the save: {marks:?}");
     assert!(marks.iter().any(|m| m.contains("Keeper")));
 
+    // Opened from disk, the file holding them is a maybe and the one it was
+    // made from is not: the app asks each page for marks only on a maybe.
+    let mut bytes = Vec::new();
+    reopened.as_document_mut().expect("mutable").save_incremental(&mut bytes).expect("save");
+    let path = std::env::temp_dir().join(format!("pagify-text-marks-{}.pdf", std::process::id()));
+    std::fs::write(&path, &bytes).expect("write the saved file");
+    let from_disk = PdfiumDocument::open_path(&path.to_string_lossy(), None).expect("open it from disk");
+    assert!(from_disk.may_hold_text_marks(), "a file holding text marks was promised to hold none");
+    drop(from_disk);
+    let _ = std::fs::remove_file(&path);
+    let unmarked = PdfiumDocument::open_path(&harness::fixture_path("single-page.pdf").to_string_lossy(), None).expect("open");
+    assert!(!unmarked.may_hold_text_marks(), "a file Pagify never marked was a maybe");
+
     // And one can be taken out on its own.
     let mut after = CommandHistory::default();
     after
