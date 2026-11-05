@@ -174,14 +174,8 @@ fn a_page_hayro_may_draw_differently_ends_with_pdfiums_picture() {
 /// With "Exact" on, every picture is PDFium's.
 #[test]
 fn with_exact_pages_on_nothing_is_drawn_by_hayro() {
-    // Before the first frame, which the harness draws as it is built.
-    let mut app = PagifyApp::new(Some(&crate::ui_tests::fixture("pages-ladder.pdf")));
-    app.render_state.async_render = true;
-    app.prefs_state.exact_pages = true;
-    let mut h = egui_kittest::Harness::builder()
-        .with_size(egui::vec2(1400.0, 1000.0))
-        .with_step_dt(1.0 / 60.0)
-        .build_ui_state(|ui, app: &mut PagifyApp| eframe::App::ui(app, ui, &mut eframe::Frame::_new_kittest()), app);
+    // On before the first frame, which the harness draws as it is built.
+    let mut h = crate::ui_tests::pdfium_harness(&crate::ui_tests::fixture("pages-ladder.pdf"));
     assert!(until(&mut h, page_0_pictured), "page 1 never got its picture");
     assert!(until_every_page_has_a_thumbnail(&mut h), "the rail never filled");
     let stats = h.state().render_state.render_stats;

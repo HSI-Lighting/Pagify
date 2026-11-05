@@ -979,6 +979,23 @@ pub(crate) fn harness_60fps_cold(path: &str, asynchronous: bool) -> Harness<'sta
     let mut app = PagifyApp::new(Some(path));
     assert!(app.tab().doc.is_some(), "{path} did not open");
     app.render_state.async_render = asynchronous;
+    harness_of(app)
+}
+
+/// [`async_harness`] with "Exact" on from before the first frame: every picture
+/// PDFium's. For the tests of the render worker itself, which watch its own
+/// counters; hayro's threads are `render_queue_tests`'.
+pub(crate) fn pdfium_harness(path: &str) -> Harness<'static, PagifyApp> {
+    let mut app = PagifyApp::new(Some(path));
+    assert!(app.tab().doc.is_some(), "{path} did not open");
+    app.render_state.async_render = true;
+    app.prefs_state.exact_pages = true;
+    let mut h = harness_of(app);
+    h.run_steps(30);
+    h
+}
+
+fn harness_of(app: PagifyApp) -> Harness<'static, PagifyApp> {
     Harness::builder()
         .with_size(egui::vec2(1400.0, 1000.0))
         .with_step_dt(1.0 / 60.0)
@@ -1080,7 +1097,7 @@ fn heavy_pdf(rects: usize) -> Vec<u8> {
 /// zoom, 120–270 ms for a drawing of sixty thousand shapes at any zoom.
 #[test]
 fn a_zoom_does_not_render_on_the_ui_thread_while_it_moves_and_lands_once_it_stops() {
-    let mut h = async_harness(&fixture("two-column.pdf"));
+    let mut h = pdfium_harness(&fixture("two-column.pdf"));
     // The first look at a page is paper while the worker makes its picture — it is
     // never made on the UI thread — so the zoom starts once the page has one.
     until_the_page_has_a_picture(&mut h);
@@ -1121,7 +1138,7 @@ fn a_zoom_does_not_render_on_the_ui_thread_while_it_moves_and_lands_once_it_stop
 /// arrives.
 #[test]
 fn the_page_is_drawn_from_what_is_held_until_the_right_picture_arrives() {
-    let mut h = async_harness(&fixture("two-column.pdf"));
+    let mut h = pdfium_harness(&fixture("two-column.pdf"));
     until_the_page_has_a_picture(&mut h);
     let ctx = h.ctx.clone();
     let held = h.state_mut().texture_for(&ctx, 0, 1.0).expect("a page");
@@ -1158,7 +1175,7 @@ fn the_page_is_drawn_from_what_is_held_until_the_right_picture_arrives() {
 /// stale result could slip through regardless of when the worker finishes.
 #[test]
 fn a_render_started_before_an_edit_is_never_put_on_screen() {
-    let mut h = async_harness(&fixture("two-column.pdf"));
+    let mut h = pdfium_harness(&fixture("two-column.pdf"));
     until_the_page_has_a_picture(&mut h);
     let ctx = h.ctx.clone();
     let _ = h.state_mut().texture_for(&ctx, 0, 1.0).expect("a page");
@@ -1247,7 +1264,7 @@ fn a_heavy_page_does_not_stop_the_frames_while_it_renders() {
         rects *= 2;
     }
 
-    let mut h = async_harness(&path.to_string_lossy());
+    let mut h = pdfium_harness(&path.to_string_lossy());
     let before = h.state().render_state.render_stats;
 
     let centre = h.state().tab().view_state.viewport_rect.expect("the page was never drawn").center();

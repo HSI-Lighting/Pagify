@@ -105,6 +105,30 @@ fn a_heavy_page_thumbnail_drawn_by_hayro() {
     assert!(hayro * 2 < pdfium, "hayro took {hayro:?} against PDFium's {pdfium:?}");
 }
 
+/// The page itself, not its thumbnail: page 2 of the set at 1 px a point drawn
+/// by hayro looks like PDFium's picture, in a fraction of the time.
+#[test]
+fn a_heavy_page_drawn_by_hayro() {
+    use pagify_shell::preview::{compare, Preview};
+    use std::time::Instant;
+    if !std::path::Path::new(SET).is_file() {
+        eprintln!("skipped: the set is not at {SET}");
+        return;
+    }
+    let session = Session::open(SET).expect("open");
+    let preview = Preview::new(session.current_bytes().expect("bytes")).expect("hayro reads it");
+    let started = Instant::now();
+    let ours = preview.render_scaled(1, 1.0).expect("hayro draws it");
+    let hayro = started.elapsed();
+    let started = Instant::now();
+    let theirs = session.render_page(1, 1.0).expect("PDFium draws it");
+    let pdfium = started.elapsed();
+    let c = compare(&ours, &theirs).expect("the same size");
+    eprintln!("page 2 at 1.0 ({}x{}): hayro {hayro:?}, PDFium {pdfium:?}; {c:?}", ours.width, ours.height);
+    assert!(!c.differs(), "{c:?}");
+    assert!(hayro * 2 < pdfium, "hayro took {hayro:?} against PDFium's {pdfium:?}");
+}
+
 /// Pagify writes a highlight without an appearance stream (pdf_core never calls
 /// `FPDFAnnot_SetAP`): PDFium draws it from its colour and quads, hayro does
 /// not draw it at all, so the page it is on is one for PDFium.
