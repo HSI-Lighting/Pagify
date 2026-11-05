@@ -84,7 +84,8 @@ pub(crate) use ribbon::{
     DOC_TAB_MAX_TEXT, DOC_TAB_MENU_WIDTH, DOC_TAB_PADDING, RIBBON_MARGIN_X, RIBBON_MARGIN_Y, TOOL_HEIGHT, TOOL_WIDTH,
 };
 pub(crate) use tool::{
-    ArmedTool, DrawKind, MatchPropertiesSample, PendingArticleBox, PendingLink, Tool, ToolEffect, ToolId, ToolKey,
+    ArmedTool, DrawKind, LastMeasure, MatchPropertiesSample, PendingArticleBox, PendingLink, Tool,
+    ToolEffect, ToolId, ToolKey,
 };
 // `spelling` and `paragraph_lines` moved to `pagify_shell` (Phase 4a: no
 // egui, so they belong where they can be tested without a window) —
@@ -959,6 +960,16 @@ struct DocTab {
     organize: OrganizeState,
     /// Zoom settling: how a new scale waits for renders — see [`ZoomState`].
     zoom_settle: ZoomState,
+    /// The measurement just finished, kept drawn over the page until the next
+    /// measuring click or Escape — see [`LastMeasure`].
+    ///
+    /// **Session-only and separate from the tool.** The measuring tool re-arms
+    /// the moment a distance resolves, which used to take the line and the
+    /// number off the screen in the same frame; the answer went only into the
+    /// folded-away history. This is what keeps it visible (PdfCraft's own
+    /// reading stays beside the geometry for the same reason), and it carries
+    /// nothing a save or reopen needs.
+    last_measure: Option<LastMeasure>,
 
 
 
@@ -1000,6 +1011,7 @@ impl DocTab {
             markup: Markup::default(),
             calibration: Calibration::default(),
             tool: None,
+            last_measure: None,
             view_state: ViewState { page: 0, zoom: ZoomMode::Fit, rotation: Rotation::None, view: None, hover_view: None, viewport_rect: None, anchor_offset: None, last_view: None, scroll_offset: egui::Vec2::ZERO, scroll_pt: 0.0, pan_by: None, scroll_to_pt: None, canvas_pt: egui::vec2(800.0, 600.0), reveal: None, saved_revision: 0, copy_wanted: false, },
             edit: EditState { editing_run: None, new_text_box: None, settling: None },
             next_text_id: 0x0100_0000,
@@ -4040,20 +4052,36 @@ impl PagifyApp {
                         // happened to be open. Only an error that is *still
                         // the last thing said* counts, so it goes the moment
                         // anything else is said, arming a tool again included.
-                        let error = self
-                            .cmd
-                            .history()
-                            .last()
-                            .filter(|last| matches!(last.kind, Kind::Error))
-                            .map(|last| last.text.clone());
-                        match error {
-                            Some(error) => {
+                        //
+                        // **A measurement's figure stays the same way.** The
+                        // measuring tool re-arms in the frame it answers, so
+                        // "measure: from" used to replace the number the moment
+                        // it was measured, and the number existed only in the
+                        // folded-away history — from use, "measuring does
+                        // nothing". It is shown while anything measuring is in
+                        // hand, and replaced by the next result or prompt the
+                        // way the error is.
+                        let measuring = self.tab().tool.as_ref().is_some_and(|t| t.kind.is_measuring());
+                        let kept = self.cmd.history().last().and_then(|last| {
+                            match last.kind {
+                                Kind::Error => Some((theme::danger(), last.text.clone())),
+                                // The prompt is drawn from `wants` already, so
+                                // only an entry that is *not* the prompt is a
+                                // result worth keeping beside it.
+                                Kind::Info if measuring && last.text != wants => {
+                                    Some((theme::ink_dim(), last.text.clone()))
+                                }
+                                _ => None,
+                            }
+                        });
+                        match kept {
+                            Some((colour, text)) => {
                                 let font = egui::FontId::proportional(12.0);
                                 let mut job = egui::text::LayoutJob::default();
                                 job.append(
-                                    &error,
+                                    &text,
                                     0.0,
-                                    egui::TextFormat::simple(font.clone(), theme::danger()),
+                                    egui::TextFormat::simple(font.clone(), colour),
                                 );
                                 job.append(
                                     &format!("   {wants}"),
@@ -10533,6 +10561,9 @@ impl PagifyApp {
             // page down.
             reading.stop.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        // The measurement readout belongs to the measuring tool: Escape puts
+        // both down together.
+        self.tab_mut().last_measure = None;
         if let Some(armed) = self.tab_mut().tool.take() {
             let drops_checkpoint = armed.kind.cancel_drops_checkpoint();
             match armed.kind.on_cancel() {

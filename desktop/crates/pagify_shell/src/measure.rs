@@ -117,14 +117,24 @@ pub struct Measurement {
 }
 
 impl Measurement {
+    /// Just the figure and its unit — `12.400 m`.
+    ///
+    /// For the label on the page, where the whole "not calibrated" sentence
+    /// would swamp the drawing it is measuring. The status line still carries
+    /// [`Measurement::render`]'s warning, and the page label is never the only
+    /// place a measurement is shown.
+    pub fn render_value(&self) -> String {
+        let unit = if self.squared { format!("{}²", self.unit) } else { self.unit.clone() };
+        format!("{:.3} {unit}", self.value)
+    }
+
     /// Formatted for display, never as a bare number.
     ///
     /// An uncalibrated measurement says so in the same breath as the figure.
     /// The failure mode this guards against is someone reading "12.4" off a
     /// screen and believing it is metres.
     pub fn render(&self) -> String {
-        let unit = if self.squared { format!("{}²", self.unit) } else { self.unit.clone() };
-        let figure = format!("{:.3} {unit}", self.value);
+        let figure = self.render_value();
         if self.calibrated {
             figure
         } else {
@@ -231,6 +241,15 @@ mod tests {
         let m = measure_distance(&c, p(0.0, 0.0), p(3.0, 4.0));
         assert_eq!(m.value, 5.0);
         assert!(m.render().contains("not calibrated"), "a bare number invites being read as metres");
+    }
+
+    #[test]
+    fn the_page_label_is_the_figure_without_the_warning() {
+        let c = Calibration::default();
+        let m = measure_distance(&c, p(0.0, 0.0), p(3.0, 4.0));
+        assert_eq!(m.render_value(), "5.000 pt");
+        assert!(!m.render_value().contains("not calibrated"));
+        assert!(m.render().contains("not calibrated"), "the status line keeps the warning");
     }
 
     #[test]

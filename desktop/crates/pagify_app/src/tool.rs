@@ -48,6 +48,52 @@ pub(crate) struct ArmedTool {
     pub(crate) points: Vec<AppPoint>,
 }
 
+/// The measurement just finished, kept up on the page until the next measuring
+/// click or Escape.
+///
+/// **Why it outlives the tool.** A distance finishes on its second click and
+/// the tool immediately re-arms for the next one, so the preview disappears in
+/// the same frame the answer arrives — the figure was only ever said into the
+/// command history, which is folded away by default. From use this read as
+/// "measure does nothing": no line, no number. PdfCraft leaves its last reading
+/// beside the geometry for exactly this reason; Pagify keeps the drawn line and
+/// its figure up the same way, and clears it when the next measurement starts.
+///
+/// Session-only: nothing is written to the page, and `last_measure` is dropped
+/// with the tab. A measurement is a question asked of the page, not a mark on
+/// it (PdfCraft saves its own as annotations; that is a separate feature).
+#[derive(Debug, Clone)]
+pub(crate) struct LastMeasure {
+    pub(crate) page: usize,
+    pub(crate) points: Vec<AppPoint>,
+    /// The figure alone — `render_value`, not `render`: the warning sentence
+    /// belongs in the status line beside it, not across the drawing.
+    pub(crate) label: String,
+    /// A distance is an open line; an area closes the ring back on itself.
+    pub(crate) closed: bool,
+}
+
+/// A measurement's figure on the page: ink on a paper-coloured pill, so it
+/// reads over whatever is being measured.
+///
+/// `at` is the pointer while a measurement is being placed, and the last corner
+/// once it is finished. Offset right and below the way PdfCraft draws its own
+/// reading, clear of the crosshair.
+pub(crate) fn paint_measure_label(ui: &egui::Ui, at: egui::Pos2, text: &str) {
+    let font = egui::FontId::proportional(12.0);
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), font.clone(), theme::ink());
+    let origin = at + egui::vec2(14.0, 14.0);
+    let pill = egui::Rect::from_min_size(origin, galley.size()).expand(4.0);
+    ui.painter().rect_filled(pill, egui::CornerRadius::same(3), theme::paper());
+    ui.painter().rect_stroke(
+        pill,
+        egui::CornerRadius::same(3),
+        egui::Stroke::new(1.0, theme::violet_bright()),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().galley(origin, galley, theme::ink());
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum Tool {
     /// Where a drawn signature is to sit — on the line that is clicked.
@@ -149,6 +195,17 @@ impl Tool {
             Tool::Modify(pick) => pick.objects,
             _ => 0,
         }
+    }
+
+    /// Whether this kind answers with a measured figure rather than a change to
+    /// the page.
+    ///
+    /// The bar keeps a measuring tool's last answer on screen beside its fresh
+    /// prompt (`main.rs`), and `resolve_tool` re-arms it quietly so that answer
+    /// is the last thing in the history instead of the prompt — see
+    /// [`LastMeasure`].
+    pub(crate) fn is_measuring(&self) -> bool {
+        matches!(self, Tool::Measure(_))
     }
 
     /// Whether Enter can end it early — true exactly when there is no
@@ -534,10 +591,29 @@ impl Tool {
                 None => Err("nothing was clicked.".into()),
             },
             Tool::Measure(MeasureKind::Distance) => {
-                Ok(measure::measure_distance(&app.tab_mut().calibration, points[0], points[1]).render())
+                let measurement =
+                    measure::measure_distance(&app.tab_mut().calibration, points[0], points[1]);
+                app.tab_mut().last_measure = Some(LastMeasure {
+                    page,
+                    points: points.clone(),
+                    label: measurement.render_value(),
+                    closed: false,
+                });
+                Ok(measurement.render())
             }
             Tool::Measure(MeasureKind::Area) => {
-                Ok(measure::measure_area(&app.tab_mut().calibration, &points).render())
+                if points.len() < 3 {
+                    Err("measure area: needs at least three corners.".into())
+                } else {
+                    let measurement = measure::measure_area(&app.tab_mut().calibration, &points);
+                    app.tab_mut().last_measure = Some(LastMeasure {
+                        page,
+                        points: points.clone(),
+                        label: measurement.render_value(),
+                        closed: true,
+                    });
+                    Ok(measurement.render())
+                }
             }
             Tool::Modify(pick) => Self::modify_clicked(app, page, pick, &objects, &points, height),
             Tool::Lock => match (points.first(), points.get(1)) {
@@ -790,7 +866,9 @@ impl Tool {
                     );
                 }
             }
-            // A line, violet.
+            // A line, violet. A distance measurement also puts its live figure
+            // beside the pointer, so the answer is readable while aiming, not
+            // only after the second click — PdfCraft reads the same way.
             Tool::Calibrate { .. }
             | Tool::SignLine
             | Tool::Draw(DrawKind::Line)
@@ -800,6 +878,15 @@ impl Tool {
                         [view.to_screen(first), view.to_screen(at)],
                         egui::Stroke::new(1.0, theme::violet_bright()),
                     );
+                    if matches!(self, Tool::Measure(MeasureKind::Distance)) {
+                        let label = measure::measure_distance(
+                            &app.tab().calibration,
+                            first,
+                            at,
+                        )
+                        .render_value();
+                        paint_measure_label(ui, view.to_screen(at), &label);
+                    }
                 }
             }
             Tool::Draw(DrawKind::Circle) => {
@@ -870,6 +957,14 @@ impl Tool {
                 let mut path: Vec<egui::Pos2> = points.iter().map(|p| view.to_screen(*p)).collect();
                 path.push(view.to_screen(at));
                 ui.painter().add(egui::Shape::line(path, egui::Stroke::new(1.0, theme::violet_bright())));
+                // The area of the ring so far, including the pointer: the same
+                // reading that will be said and kept when Enter closes it.
+                if matches!(self, Tool::Measure(MeasureKind::Area)) && points.len() + 1 >= 3 {
+                    let mut ring = points.to_vec();
+                    ring.push(at);
+                    let label = measure::measure_area(&app.tab().calibration, &ring).render_value();
+                    paint_measure_label(ui, view.to_screen(at), &label);
+                }
             }
             // Resolved by a text-selection drag, which egui already draws
             // its own selection highlight for — nothing to add on top of

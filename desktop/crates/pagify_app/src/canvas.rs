@@ -1237,6 +1237,10 @@ impl crate::PagifyApp {
                         self.draw_signature_selection(ui, page, view);
                         self.draw_placed_image_selection(ui, page, view);
                         self.draw_paste_ghost(ui, page, rect, view);
+                        // The measurement just finished, still on the page
+                        // until the next one starts or Escape — over the page,
+                        // under the in-progress preview that replaces it.
+                        self.draw_last_measure(ui, page, view);
                         // On top of the page and its badges, under the editor:
                         // a tool part-way through is the most recent thing the
                         // reader did and the thing they are aiming with.
@@ -1559,6 +1563,36 @@ impl crate::PagifyApp {
         let kind = armed.kind.clone();
         let points = armed.points.clone();
         kind.preview(self, ui, view, &points, at);
+    }
+
+    /// The measurement just finished: its line and its figure, still on the
+    /// page after the tool re-armed.
+    ///
+    /// PdfCraft leaves its last reading beside the geometry until the next
+    /// measurement is started. Without this, a distance vanished on the very
+    /// click that measured it — the tool re-arms in the same frame — so the
+    /// tool looked like it did nothing at all. `picking.rs` clears it when the
+    /// next measuring click lands, `PagifyApp::escape` when the tool is put
+    /// down, and `arm_tool_without_saying` when another tool is picked up.
+    ///
+    /// Session-only: this is drawn over the page, never written to it.
+    pub(crate) fn draw_last_measure(&self, ui: &mut egui::Ui, page: usize, view: PageView) {
+        let Some(last) = self.tab().last_measure.as_ref().filter(|m| m.page == page) else {
+            return;
+        };
+        let mut path: Vec<egui::Pos2> = last.points.iter().map(|p| view.to_screen(*p)).collect();
+        if path.len() < 2 {
+            return;
+        }
+        if last.closed {
+            if let Some(first) = path.first().copied() {
+                path.push(first);
+            }
+        }
+        ui.painter().add(egui::Shape::line(path, egui::Stroke::new(1.0, theme::violet_bright())));
+        if let Some(at) = last.points.last().map(|p| view.to_screen(*p)) {
+            crate::tool::paint_measure_label(ui, at, &last.label);
+        }
     }
 
     /// A padlock over every sealed object on this page, and the click that

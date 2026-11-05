@@ -159,6 +159,91 @@ fn a_cloud_needs_three_points_and_says_so() {
     assert!(armed.points.is_empty(), "the refused clicks were kept");
 }
 
+// -- measuring -------------------------------------------------------
+
+/// **A measured distance stays visible.** It used to vanish on the click that
+/// measured it: the distance resolves on the second pick, the tool re-arms in
+/// the same frame, and the bar's fresh prompt covered the only place the
+/// figure was ever said — from use, "measuring does nothing". PdfCraft keeps
+/// its last reading beside the geometry; this keeps the line and the figure up
+/// until the next measurement or Escape.
+#[test]
+fn a_measured_distance_stays_on_the_page_and_in_the_bar() {
+    let mut app = app("single-page.pdf");
+    app.submit("measure distance");
+    app.take_pick(at(100.0, 100.0));
+    app.take_pick(at(300.0, 100.0));
+
+    let last = app.tab().last_measure.as_ref().expect("the measurement was not kept");
+    assert_eq!(last.page, 0);
+    assert_eq!(last.points.len(), 2);
+    assert_eq!(last.label, "200.000 pt");
+    assert!(!last.closed, "a distance should not close back on itself");
+
+    assert!(
+        matches!(
+            app.tab().tool.as_ref().map(|t| &t.kind),
+            Some(Tool::Measure(MeasureKind::Distance))
+        ),
+        "the measuring tool did not stay in hand"
+    );
+    let answer = app
+        .cmd
+        .history()
+        .iter()
+        .rev()
+        .find(|entry| entry.text.contains("200.000 pt"))
+        .expect("the figure was never said");
+    assert!(matches!(answer.kind, Kind::Info), "the figure was not said as a result");
+    assert!(answer.text.contains("200.000 pt"), "wrong figure: {}", answer.text);
+    assert!(answer.text.contains("not calibrated"), "the warning was dropped: {}", answer.text);
+
+    // Aiming the next measurement puts the old figure away at once.
+    app.take_pick(at(400.0, 200.0));
+    assert!(app.tab().last_measure.is_none(), "the old figure stayed while a new one was aimed");
+}
+
+/// An area keeps its ring closed and says square units, and Escape puts the
+/// readout down with the tool.
+#[test]
+fn a_measured_area_stays_closed_until_escape() {
+    let mut app = app("single-page.pdf");
+    app.submit("measure area");
+    app.take_pick(at(100.0, 100.0));
+    app.take_pick(at(300.0, 100.0));
+    app.take_pick(at(300.0, 200.0));
+    app.submit("done");
+
+    let last = app.tab().last_measure.as_ref().expect("the area was not kept");
+    assert!(last.closed, "an area should close back on its first corner");
+    assert_eq!(last.points.len(), 3);
+    assert!(last.label.ends_with("pt²"), "an area should be in square units: {}", last.label);
+    assert!(said(&app).contains("not calibrated"), "the warning was dropped:\n{}", said(&app));
+
+    app.escape();
+    assert!(app.tab().last_measure.is_none(), "Escape left the readout behind");
+    assert!(app.tab().tool.is_none(), "Escape left the tool behind");
+}
+
+/// Two corners are a line, not an area: the area tool refuses rather than
+/// reporting "0.000 pt²", the way PdfCraft's own minimum of three does.
+#[test]
+fn a_two_corner_area_is_refused_rather_than_measured_as_nothing() {
+    let mut app = app("single-page.pdf");
+    app.submit("measure area");
+    app.take_pick(at(100.0, 100.0));
+    app.take_pick(at(300.0, 100.0));
+    app.submit("done");
+
+    assert!(app.tab().last_measure.is_none(), "two corners were reported as an area");
+    assert!(said(&app).contains("three corners"), "no reason given:\n{}", said(&app));
+    assert_eq!(
+        app.cmd.history().last().map(|e| e.kind.clone()),
+        Some(Kind::Error),
+        "the refusal should be the last thing said"
+    );
+}
+
 /// Fillet needs two *objects*, not two points — the picking path is a
 /// different one, and it is the path that was silently performing a move.
 /// Every coordinate here arrives the way the pointer delivers it.

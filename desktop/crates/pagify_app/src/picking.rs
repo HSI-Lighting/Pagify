@@ -46,6 +46,13 @@ impl crate::PagifyApp {
             self.tab_mut().selection.group_grab = None;
         }
         self.put_down_page_editors("armed a different tool");
+        // A readout is the answer to the question the measuring tool was
+        // asking; picking up something else puts it away (PdfCraft cancels its
+        // reading the same way). Re-arming a measuring tool keeps it, which is
+        // why this only clears for another kind.
+        if !matches!(&tool, Tool::Measure(_)) {
+            self.tab_mut().last_measure = None;
+        }
         self.tab_mut().tool = Some(ArmedTool { kind: tool, page, objects: Vec::new(), points: Vec::new() });
     }
 
@@ -106,8 +113,16 @@ impl crate::PagifyApp {
                         return;
                     }
                 }
-            } else if let Some(armed) = self.tab_mut().tool.as_mut() {
-                armed.points.push(at);
+            } else {
+                // The last measurement's figure goes the moment a new one is
+                // aimed: the page shows the measurement being made, not the one
+                // before it. (Escape clears it too — see `PagifyApp::escape`.)
+                if matches!(self.tab().tool.as_ref().map(|t| &t.kind), Some(Tool::Measure(_))) {
+                    self.tab_mut().last_measure = None;
+                }
+                if let Some(armed) = self.tab_mut().tool.as_mut() {
+                    armed.points.push(at);
+                }
             }
             let ready = self.tab_mut().tool.as_ref().is_some_and(|t| {
                 t.objects.len() >= t.kind.wants_objects() && t.points.len() >= t.kind.wants_points()
@@ -155,9 +170,11 @@ impl crate::PagifyApp {
         }
         // Back in hand, ready for the next one, quietly after a failure so
         // the error stays the last thing said — see `arm_tool_without_saying`'s
-        // doc.
+        // doc. A measurement is re-armed quietly too: its figure has to stay
+        // the last thing said, or the bar's fresh prompt covers it and the tool
+        // looks as if it did nothing (see `LastMeasure`).
         if repeats && self.tab_mut().edit.editing_run.is_none() {
-            if failed {
+            if failed || kind_for_rearm.is_measuring() {
                 self.arm_tool_without_saying(kind_for_rearm, page);
             } else {
                 self.arm_tool(kind_for_rearm, page);

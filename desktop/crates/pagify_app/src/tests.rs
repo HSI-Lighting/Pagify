@@ -550,9 +550,9 @@ mod tools_chain {
         app.submit("measure distance");
         app.submit("pick 0,0");
         app.submit("pick 100,0");
-        // The tool stays in hand, so the last line is its fresh prompt and
-        // the answer is the one before it.
-        let said = app.cmd.history()[app.cmd.history().len() - 2].text.clone();
+        // The tool re-arms quietly, so its answer stays the last line — the
+        // figure rather than the next prompt (see `LastMeasure`).
+        let said = app.cmd.history().last().expect("nothing was said").text.clone();
         assert!(said.contains("100"), "uncalibrated distance wrong: {said}");
         assert!(said.contains("not calibrated"), "should warn: {said}");
 
@@ -563,7 +563,7 @@ mod tools_chain {
         app.submit("measure distance");
         app.submit("pick 0,0");
         app.submit("pick 200,0");
-        let said = app.cmd.history()[app.cmd.history().len() - 2].text.clone();
+        let said = app.cmd.history().last().expect("nothing was said").text.clone();
         assert!(said.contains("10.000 m"), "calibrated distance wrong: {said}");
     }
 

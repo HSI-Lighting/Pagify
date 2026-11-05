@@ -487,6 +487,35 @@ fn an_error_leaves_the_history_shut_and_the_arrow_opens_and_folds_it() {
     assert!(!h.state().ui_state.command_open, "the arrow did not fold the history away");
 }
 
+/// **A measured figure is on the bar, not only in the history.**
+///
+/// Reported from use: a distance "doesn't show any output". It resolved, said
+/// the number into the history and re-armed the tool in the same frame — and
+/// the armed tool's fresh prompt ("measure: from") replaced that line in the
+/// bar. With the history folded away by default, the answer was nowhere on
+/// screen. PdfCraft shows its reading beside the geometry; here the bar keeps
+/// the last measurement beside the prompt, and the page keeps the line and
+/// figure until the next one starts.
+#[test]
+fn a_measured_distance_is_shown_on_the_bar_while_the_tool_stays_in_hand() {
+    use egui_kittest::kittest::Queryable;
+
+    let mut h = harness("single-page.pdf");
+    h.state_mut().submit("measure distance");
+    h.state_mut().submit("pick 100,100");
+    h.state_mut().submit("pick 300,100");
+    h.run_steps(2);
+
+    assert!(
+        h.state().tab().tool.is_some(),
+        "the measuring tool should still be in hand for the next measurement"
+    );
+    assert!(
+        h.query_by_label_contains("200.000 pt").is_some(),
+        "the measured figure is not on screen; the bar covered it with the next prompt"
+    );
+}
+
 /// **The rest of the ribbon drops down as the ribbon's own tiles.**
 ///
 /// Reported from use, with a screenshot of the first version — a plain list

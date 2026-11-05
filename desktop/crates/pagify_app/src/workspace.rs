@@ -158,6 +158,9 @@ impl crate::PagifyApp {
 
                 self.tab_mut().markup.clear();
                 self.tab_mut().calibration = Calibration::default();
+                // A readout belongs to the page it measured; the next document
+                // has its own pages and no measurement on them yet.
+                self.tab_mut().last_measure = None;
 
                 // Anything this document already carries comes back as live
                 // geometry, not as ink — phase 8's whole point.
