@@ -11,6 +11,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -30,31 +32,35 @@ import java.io.File
  * this is a memory of having seen them, and losing it costs a list, not a file.
  * That is why every failure below is swallowed rather than raised.
  */
-class RecentDocumentsStore(context: Context) {
+class RecentDocumentsStore(private val file: File) {
 
-    private val file = File(context.filesDir, FILE_NAME)
+    constructor(context: Context) : this(File(context.filesDir, FILE_NAME))
 
     private val _documents = MutableStateFlow<List<RecentDocument>>(emptyList())
     val documents: StateFlow<List<RecentDocument>> = _documents.asStateFlow()
 
+    // Every change rewrites the whole file from the list in memory, so a change
+    // made before the file has been read writes out only itself. A cold start
+    // from another app's "Open with" did exactly that: the drawing was
+    // remembered while `load()` was still running, and the library became that
+    // one row (seen twice on the phone, 2026-10-12). So every change reads the
+    // file first if nothing has yet, under one lock that also keeps two writes
+    // from reaching the disk in the wrong order.
+    private val lock = Mutex()
+    private var loaded = false
+
     /**
      * Read the file into memory.
      *
-     * Called once, off the main thread. Until it completes the library shows an
-     * empty list, which is the truthful thing to show while the answer is unknown
-     * and takes a few milliseconds to stop being true.
+     * Called once at startup. Until it completes the library shows an empty
+     * list, which is the truthful thing to show while the answer is unknown and
+     * takes a few milliseconds to stop being true.
      */
-    suspend fun load() {
-        val stored = withContext(Dispatchers.IO) {
-            runCatching { if (file.exists()) recentsFromJson(file.readText()) else emptyList() }
-                .onFailure { Log.w(TAG, "could not read the library", it) }
-                .getOrDefault(emptyList())
-        }
-        _documents.value = stored
-    }
+    suspend fun load() = lock.withLock { loadOnce() }
 
     /** Record a document as just opened, and write the list back. */
-    suspend fun remember(document: RecentDocument) {
+    suspend fun remember(document: RecentDocument) = lock.withLock {
+        loadOnce()
         write(promoteRecent(_documents.value, document))
     }
 
@@ -65,17 +71,29 @@ class RecentDocumentsStore(context: Context) {
      * the row is a promise the app can no longer keep, and leaving it there means
      * offering the same failure every time.
      */
-    suspend fun forget(uri: String) {
+    suspend fun forget(uri: String) = lock.withLock {
+        loadOnce()
         write(forgetRecent(_documents.value, uri))
     }
 
     /** Forget every document. The files themselves are not touched. */
-    suspend fun clear() = write(emptyList())
+    suspend fun clear() = lock.withLock { write(emptyList()) }
+
+    private suspend fun loadOnce() {
+        if (loaded) return
+        _documents.value = withContext(Dispatchers.IO) {
+            runCatching { if (file.exists()) recentsFromJson(file.readText()) else emptyList() }
+                .onFailure { Log.w(TAG, "could not read the library", it) }
+                .getOrDefault(emptyList())
+        }
+        loaded = true
+    }
 
     private suspend fun write(documents: List<RecentDocument>) {
         // In memory first. The screen should not wait on a disk write to show a
         // document it has already opened.
         _documents.value = documents
+        loaded = true
 
         withContext(Dispatchers.IO) {
             runCatching { file.writeText(documents.toRecentsJson()) }
