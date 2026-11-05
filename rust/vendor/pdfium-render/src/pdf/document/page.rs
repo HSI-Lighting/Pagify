@@ -582,7 +582,7 @@ impl<'a> PdfPage<'a> {
                 .unwrap_or_else(|_| PdfBitmapFormat::default()),
         )?;
 
-        self.render_into_bitmap_with_settings(&mut bitmap, settings)?;
+        self.render_into_bitmap_with_settings(&mut bitmap, settings, None)?;
 
         Ok(bitmap)
     }
@@ -625,17 +625,92 @@ impl<'a> PdfPage<'a> {
         bitmap: &mut PdfBitmap,
         config: &PdfRenderConfig,
     ) -> Result<(), PdfiumError> {
-        self.render_into_bitmap_with_settings(bitmap, config.apply_to_page(self))
+        self.render_into_bitmap_with_settings(bitmap, config.apply_to_page(self), None)
+            .map(|_| ())
+    }
+
+    /// Pagify: [PdfPage::render_into_bitmap_with_config()], asking `stop` at each of
+    /// PDFium's pauses as the page is drawn (its progressive renderer pauses every hundred
+    /// or so objects) and giving up when it says so: `Ok(false)`, the bitmap then holding
+    /// part of the page. The same flags, rotation and form overlay as that function. A
+    /// config without form data is drawn by `FPDF_RenderPageBitmapWithMatrix`, which has
+    /// no progressive form, to the end, as there.
+    pub fn render_into_bitmap_with_config_until(
+        &self,
+        bitmap: &mut PdfBitmap,
+        config: &PdfRenderConfig,
+        stop: &mut dyn FnMut() -> bool,
+    ) -> Result<bool, PdfiumError> {
+        self.render_into_bitmap_with_settings(bitmap, config.apply_to_page(self), Some(stop))
+    }
+
+    /// Pagify: `FPDF_RenderPageBitmap`, progressively — which is what that function is
+    /// inside PDFium, run with no pause — asking `stop` at each pause. `false` when it
+    /// stopped.
+    fn render_progressively(
+        &self,
+        bitmap: crate::bindgen::FPDF_BITMAP,
+        settings: &PdfPageRenderSettings,
+        stop: &mut dyn FnMut() -> bool,
+    ) -> bool {
+        #[repr(C)]
+        struct Pause<'a> {
+            base: crate::bindgen::IFSDK_PAUSE,
+            stop: &'a mut dyn FnMut() -> bool,
+            stopped: bool,
+        }
+
+        unsafe extern "C" fn need_to_pause(this: *mut crate::bindgen::IFSDK_PAUSE) -> crate::bindgen::FPDF_BOOL {
+            // `this` is the `base` of a `Pause`, its first field.
+            let pause = unsafe { &mut *(this as *mut Pause<'_>) };
+            // Never unwinding into PDFium: a panic stops the render.
+            let stop = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (pause.stop)())).unwrap_or(true);
+            pause.stopped |= stop;
+            crate::bindgen::FPDF_BOOL::from(stop)
+        }
+
+        let mut pause = Pause {
+            base: crate::bindgen::IFSDK_PAUSE {
+                version: 1,
+                NeedToPauseNow: Some(need_to_pause),
+                user: std::ptr::null_mut(),
+            },
+            stop,
+            stopped: false,
+        };
+        let bindings = self.bindings();
+        let mut status = unsafe {
+            bindings.FPDF_RenderPageBitmap_Start(
+                bitmap,
+                self.page_handle,
+                settings.start_x,
+                settings.start_y,
+                settings.width,
+                settings.height,
+                settings.rotate,
+                settings.render_flags,
+                &mut pause.base,
+            )
+        };
+        while status == crate::bindgen::FPDF_RENDER_TOBECONTINUED as std::os::raw::c_int && !pause.stopped {
+            status = unsafe { bindings.FPDF_RenderPage_Continue(self.page_handle, &mut pause.base) };
+        }
+        unsafe { bindings.FPDF_RenderPage_Close(self.page_handle) };
+        !pause.stopped
     }
 
     /// Renders this [PdfPage] into the given [PdfBitmap] using the given [PdfRenderSettings].
     /// The size of the buffer backing the given bitmap must be sufficiently large to hold
     /// the rendered image or an error will be returned.
+    ///
+    /// Pagify: with `stop`, the page is drawn progressively and `Ok(false)` says it stopped
+    /// part way ([PdfPage::render_into_bitmap_with_config_until()]).
     pub(crate) fn render_into_bitmap_with_settings(
         &self,
         bitmap: &mut PdfBitmap,
         settings: PdfPageRenderSettings,
-    ) -> Result<(), PdfiumError> {
+        stop: Option<&mut dyn FnMut() -> bool>,
+    ) -> Result<bool, PdfiumError> {
         let bitmap_handle = bitmap.handle();
 
         if settings.do_clear_bitmap_before_rendering {
@@ -657,17 +732,24 @@ impl<'a> PdfPage<'a> {
             // Render the PDF page into the bitmap buffer, ignoring any custom transformation matrix.
             // (Custom transforms cannot be applied to the rendering of form fields.)
 
-            unsafe {
-                self.bindings().FPDF_RenderPageBitmap(
-                    bitmap_handle,
-                    self.page_handle,
-                    settings.start_x,
-                    settings.start_y,
-                    settings.width,
-                    settings.height,
-                    settings.rotate,
-                    settings.render_flags,
-                );
+            match stop {
+                None => unsafe {
+                    self.bindings().FPDF_RenderPageBitmap(
+                        bitmap_handle,
+                        self.page_handle,
+                        settings.start_x,
+                        settings.start_y,
+                        settings.width,
+                        settings.height,
+                        settings.rotate,
+                        settings.render_flags,
+                    );
+                },
+                Some(stop) => {
+                    if !self.render_progressively(bitmap_handle, &settings, stop) {
+                        return Ok(false);
+                    }
+                }
             }
 
             if let Some(form_handle) = self.form_handle {
@@ -718,7 +800,7 @@ impl<'a> PdfPage<'a> {
 
         bitmap.set_byte_order_from_render_settings(&settings);
 
-        Ok(())
+        Ok(true)
     }
 
     /// Applies the given transformation, expressed as six values representing the six configurable

@@ -65,6 +65,22 @@ fn a_thumbnail_of_the_page_just_drawn_is_made_from_its_picture() {
 }
 
 #[test]
+fn a_render_gives_up_for_a_newer_ask_of_its_picture_or_a_more_urgent_one() {
+    let s = session();
+    let thumb = THUMB_STEP_BASE + 160;
+    let page = job(&s, 2, EXACT_STEP_BASE, 0);
+    assert!(!overtaken(&page, &[]), "nothing waiting");
+    assert!(!overtaken(&page, &[job(&s, 3, EXACT_STEP_BASE, 0), job(&s, 2, thumb, 0)]), "another page, or this page's thumbnail, is no reason");
+    assert!(overtaken(&page, &[job(&s, 2, EXACT_STEP_BASE + 1, 0)]), "a newer size of the same page makes this one no use");
+    let textless = RenderJob { hide: Some(std::sync::Arc::from([1usize])), ..job(&s, 3, EXACT_STEP_BASE, 0) };
+    assert!(overtaken(&page, &[textless]), "the editor's textless picture goes first");
+
+    let thumbnail = job(&s, 5, thumb, 0);
+    assert!(overtaken(&thumbnail, &[job(&s, 1, EXACT_STEP_BASE, 0)]), "a page asked for while a thumbnail draws");
+    assert!(!overtaken(&thumbnail, &[job(&s, 4, thumb, 0)]), "another thumbnail waits its turn");
+}
+
+#[test]
 fn a_shrunk_picture_averages_what_each_pixel_covers() {
     let (black, white) = (egui::Color32::BLACK, egui::Color32::WHITE);
     // Left half black, right half white, 4 × 2 down to 2 × 1.

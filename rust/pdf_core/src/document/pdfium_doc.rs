@@ -3433,6 +3433,78 @@ pub struct PdfiumPage<'a> {
     page: PdfPage<'a>,
 }
 
+impl PdfiumPage<'_> {
+    /// What [`Page::render_into`] and [`Page::render_into_until`] both draw
+    /// through. Without `stop` the page is drawn by pdfium-render's own call,
+    /// exactly as it always was; with it, progressively (see `rust/vendor`).
+    fn render_with(
+        &self,
+        request: &RenderRequest,
+        target: &mut RenderTarget<'_>,
+        mut stop: Option<&mut dyn FnMut() -> bool>,
+    ) -> Result<bool> {
+        let config = build_render_config(request, target.width, target.height);
+
+        if target.is_tightly_packed() {
+            // Zero-copy: PDFium writes into the caller's buffer (an Android
+            // bitmap's locked pixels on the on-screen path).
+            let finished = {
+                let mut pdf_bitmap = PdfBitmap::from_bytes(
+                    target.width as i32,
+                    target.height as i32,
+                    PdfBitmapFormat::BGRA,
+                    target.pixels,
+                )
+                .map_err(|e| PdfError::InvalidBitmap(e.to_string()))?;
+
+                self.draw(&mut pdf_bitmap, &config, stop.take())?
+            };
+            if !finished {
+                return Ok(false);
+            }
+        } else {
+            // The destination pads its rows and PDFium cannot be told about that,
+            // so render tightly and blit row by row.
+            let mut scratch =
+                Bitmap::new(target.width, target.height, bitmap::PDFIUM_OUTPUT_ORDER)?;
+            let finished = {
+                let mut pdf_bitmap = PdfBitmap::from_bytes(
+                    target.width as i32,
+                    target.height as i32,
+                    PdfBitmapFormat::BGRA,
+                    &mut scratch.data,
+                )
+                .map_err(|e| PdfError::InvalidBitmap(e.to_string()))?;
+
+                self.draw(&mut pdf_bitmap, &config, stop.take())?
+            };
+            if !finished {
+                return Ok(false);
+            }
+            // `copy_from` performs the BGRA -> target-order conversion itself.
+            target.copy_from(&scratch)?;
+            return Ok(true);
+        }
+
+        target.normalise_from_pdfium();
+        Ok(true)
+    }
+
+    /// The page into `bitmap`; `false` when `stop` stopped it part way.
+    fn draw(
+        &self,
+        bitmap: &mut PdfBitmap<'_>,
+        config: &PdfRenderConfig,
+        stop: Option<&mut dyn FnMut() -> bool>,
+    ) -> Result<bool> {
+        match stop {
+            None => self.page.render_into_bitmap_with_config(bitmap, config).map(|_| true),
+            Some(stop) => self.page.render_into_bitmap_with_config_until(bitmap, config, stop),
+        }
+        .map_err(|e| PdfError::Pdfium(e.to_string()))
+    }
+}
+
 impl<'a> Page for PdfiumPage<'a> {
     fn size(&self) -> PageSize {
         PageSize {
@@ -3442,48 +3514,16 @@ impl<'a> Page for PdfiumPage<'a> {
     }
 
     fn render_into(&self, request: &RenderRequest, target: &mut RenderTarget<'_>) -> Result<()> {
-        let config = build_render_config(request, target.width, target.height);
+        self.render_with(request, target, None).map(|_| ())
+    }
 
-        if target.is_tightly_packed() {
-            // Zero-copy: PDFium writes into the caller's buffer (an Android
-            // bitmap's locked pixels on the on-screen path).
-            {
-                let mut pdf_bitmap = PdfBitmap::from_bytes(
-                    target.width as i32,
-                    target.height as i32,
-                    PdfBitmapFormat::BGRA,
-                    target.pixels,
-                )
-                .map_err(|e| PdfError::InvalidBitmap(e.to_string()))?;
-
-                self.page
-                    .render_into_bitmap_with_config(&mut pdf_bitmap, &config)
-                    .map_err(|e| PdfError::Pdfium(e.to_string()))?;
-            }
-        } else {
-            // The destination pads its rows and PDFium cannot be told about that,
-            // so render tightly and blit row by row.
-            let mut scratch =
-                Bitmap::new(target.width, target.height, bitmap::PDFIUM_OUTPUT_ORDER)?;
-            {
-                let mut pdf_bitmap = PdfBitmap::from_bytes(
-                    target.width as i32,
-                    target.height as i32,
-                    PdfBitmapFormat::BGRA,
-                    &mut scratch.data,
-                )
-                .map_err(|e| PdfError::InvalidBitmap(e.to_string()))?;
-
-                self.page
-                    .render_into_bitmap_with_config(&mut pdf_bitmap, &config)
-                    .map_err(|e| PdfError::Pdfium(e.to_string()))?;
-            }
-            // `copy_from` performs the BGRA -> target-order conversion itself.
-            return target.copy_from(&scratch);
-        }
-
-        target.normalise_from_pdfium();
-        Ok(())
+    fn render_into_until(
+        &self,
+        request: &RenderRequest,
+        target: &mut RenderTarget<'_>,
+        stop: &mut dyn FnMut() -> bool,
+    ) -> Result<bool> {
+        self.render_with(request, target, Some(stop))
     }
 
     fn render_region(&self, request: &RegionRequest) -> Result<Bitmap> {

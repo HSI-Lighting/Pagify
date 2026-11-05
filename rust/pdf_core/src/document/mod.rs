@@ -330,6 +330,20 @@ pub trait Page {
     /// with no intermediate allocation or copy.
     fn render_into(&self, request: &RenderRequest, target: &mut RenderTarget<'_>) -> Result<()>;
 
+    /// [`Self::render_into`], asking `stop` as the page is drawn and giving up
+    /// when it says so: `Ok(false)`, the target then holding part of the page.
+    /// For a render something more urgent may overtake — on a CAD page one
+    /// holds the engine for seconds. By default drawn to the end.
+    fn render_into_until(
+        &self,
+        request: &RenderRequest,
+        target: &mut RenderTarget<'_>,
+        stop: &mut dyn FnMut() -> bool,
+    ) -> Result<bool> {
+        let _ = stop;
+        self.render_into(request, target).map(|_| true)
+    }
+
     /// Rasterise one region of the page, at a scale of the caller's choosing.
     ///
     /// Returns an owned bitmap rather than filling a supplied one because the

@@ -1167,11 +1167,55 @@ fn a_render_started_before_an_edit_is_never_put_on_screen() {
     let _ = h.state_mut().texture_for(&ctx, 0, 3.0);
     // The page changes while the worker has it.
     h.state_mut().tab_mut().doc.as_mut().expect("doc").rendered_is_stale();
-    assert!(until_a_render_drops(&mut h, before.dropped), "the stale render never came back");
+    // **Either outcome is right** (0.1.114): the stale render comes back and is
+    // dropped, or — when the redraw's fresh ask for the same page reaches the
+    // worker while it still draws — the worker gives it up (`overtaken`). Both
+    // are over before the fresh picture can land: one thread draws them in turn.
+    // The drop itself is pinned without any timing by the test after this one.
+    assert!(until_a_render_lands(&mut h, before.applied), "no picture came after the edit");
     let after = h.state().render_state.render_stats;
-    assert_eq!(after.dropped, before.dropped + 1, "the stale render was not dropped: {after:?}");
+    assert!(after.dropped <= before.dropped + 1, "more than the one stale render came back: {after:?}");
     assert!(
         h.state().tab().doc.as_ref().expect("doc").caches.textures.keys().all(|(_, step, _)| *step < 12),
+        "a picture of the page as it was is on screen"
+    );
+}
+
+/// **A picture that comes back for the page as it was before an edit is
+/// dropped** — by its epoch alone, whatever the timing: the answer is handed
+/// in through the worker's own channel, so no render is raced.
+#[test]
+fn a_picture_of_the_page_as_it_was_is_dropped_when_it_comes_back() {
+    let mut h = async_harness(&fixture("two-column.pdf"));
+    until_the_page_has_a_picture(&mut h);
+    let (reply, done) = std::sync::mpsc::channel();
+    let (jobs, _asked) = std::sync::mpsc::channel();
+    h.state_mut().render_state.renders = Some(RenderWorker { jobs, done, in_flight: HashMap::new(), failed: Default::default() });
+    let (doc, epoch) = {
+        let d = h.state().tab().doc.as_ref().expect("doc");
+        (d.id, d.render_epoch)
+    };
+    h.state_mut().tab_mut().doc.as_mut().expect("doc").rendered_is_stale();
+    let before = h.state().render_state.render_stats;
+    let step = EXACT_STEP_BASE + 1234;
+    reply
+        .send(RenderDone {
+            doc,
+            epoch,
+            page: 0,
+            step,
+            rotation: Rotation::None,
+            crop: None,
+            hide: None,
+            took: std::time::Duration::ZERO,
+            image: Ok(egui::ColorImage::filled([8, 8], egui::Color32::RED)),
+        })
+        .expect("send");
+    h.run_steps(1);
+    let after = h.state().render_state.render_stats;
+    assert_eq!(after.dropped, before.dropped + 1, "the picture of the page as it was was not dropped: {after:?}");
+    assert!(
+        h.state().tab().doc.as_ref().expect("doc").caches.exact.keys().all(|(_, s, _)| *s != step),
         "a picture of the page as it was is on screen"
     );
 }

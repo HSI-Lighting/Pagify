@@ -1,6 +1,6 @@
 # Vendored `pdfium-render`
 
-A copy of `pdfium-render` 0.9.3 with **two changes**, pulled in through
+A copy of `pdfium-render` 0.9.3 with **three changes**, pulled in through
 `[patch.crates-io]` in `rust/pdf_core/Cargo.toml`.
 
 ## The changes
@@ -13,6 +13,14 @@ load of a page parses its whole content stream, and `PdfiumDocument::page_reads`
 answers four questions from one load: two through this crate's `PdfPage`, two
 through the raw bindings, which need the page's handle. Measured on a CAD page
 of 720,000 lines: 0.76 s for the one load, 5.3 s for the four reads apart.
+
+`PdfPage::render_into_bitmap_with_config_until` is new (2026-11-05), and the
+crate-internal `render_into_bitmap_with_settings` takes an optional `stop`:
+the form-data render (`FPDF_RenderPageBitmap`) is then drawn progressively
+(`FPDF_RenderPageBitmap_Start` / `_Continue` / `_Close`, which is what
+`FPDF_RenderPageBitmap` is inside PDFium, run with no pause), asking `stop` at
+each pause, so that a render nobody needs any more — a thumbnail, a zoom
+already moved on — can be given up part way. Every other path is unchanged.
 
 ## Why it was necessary
 
@@ -44,7 +52,8 @@ reordering and incremental save together.
 Upstream 0.9.3 is the newest release as of this writing. To move to a later one:
 
 1. copy the new version over this directory;
-2. re-apply the two `pub(crate)` → `pub` changes (`fn handle`, `fn page_handle`);
+2. re-apply the two `pub(crate)` → `pub` changes (`fn handle`, `fn page_handle`)
+   and the stoppable render in `src/pdf/document/page.rs` (search for "Pagify");
 3. run `cargo test` in `rust/pdf_core` — `round_trip.rs` covers everything the
    patch unblocks, including the byte-prefix property that distinguishes an
    incremental save from a rewrite.

@@ -15846,14 +15846,38 @@ impl RenderWorker {
                     let mut scale = job.scale;
                     let raster = loop {
                         let attempt = match (&job.hide, job.crop) {
-                            (Some(hide), _) => job.session.render_page_hiding(job.page, scale, job.rotation, hide),
-                            (None, None) => job.session.render_page_rotated(job.page, scale, job.rotation),
-                            (None, Some(crop)) => job.session.render_page_region(job.page, crop, scale),
+                            (Some(hide), _) => job.session.render_page_hiding(job.page, scale, job.rotation, hide).map(Some),
+                            // Given up part way when something it is no use against
+                            // is asked for meanwhile — PDFium pauses to ask every
+                            // hundred or so objects.
+                            (None, None) => job.session.render_page_rotated_until(
+                                job.page,
+                                scale,
+                                job.rotation,
+                                Some(&mut || {
+                                    pending.extend(queue.try_iter());
+                                    overtaken(&job, &pending)
+                                }),
+                            ),
+                            (None, Some(crop)) => job.session.render_page_region(job.page, crop, scale).map(Some),
                         };
                         match attempt {
                             Err(_) if scale > 0.08 => scale *= 0.5,
                             other => break other,
                         }
+                    };
+                    let raster = match raster {
+                        Ok(Some(raster)) => Ok(raster),
+                        // Overtaken. A newer ask for the same picture is waiting and
+                        // this one is of no use; or something more urgent is, and this
+                        // waits its turn again.
+                        Ok(None) => {
+                            if !pending.iter().any(|p| same_picture(p, &job)) {
+                                pending.push(job);
+                            }
+                            continue;
+                        }
+                        Err(e) => Err(e),
                     };
                     let image = raster.map(|r| page_to_image(&r)).map_err(|e| e.to_string());
                     let took = started.elapsed();
@@ -15896,25 +15920,41 @@ impl RenderWorker {
 /// heavy page is as long a wait for the lock as the page itself. Newest first
 /// within each.
 fn next_render(pending: &mut Vec<RenderJob>) -> Option<RenderJob> {
-    let same = |a: &RenderJob, b: &RenderJob| {
-        a.doc == b.doc
-            && a.page == b.page
-            && a.crop.is_some() == b.crop.is_some()
-            && (a.step >= THUMB_STEP_BASE) == (b.step >= THUMB_STEP_BASE)
-            && a.hide.is_some() == b.hide.is_some()
-    };
     let mut newest: Vec<RenderJob> = Vec::new();
     for job in pending.drain(..).rev() {
-        if !newest.iter().any(|n| same(n, &job)) {
+        if !newest.iter().any(|n| same_picture(n, &job)) {
             newest.push(job);
         }
     }
-    let rank = |j: &RenderJob| (j.step >= THUMB_STEP_BASE, j.hide.is_none());
     let first = (0..newest.len()).min_by_key(|&i| (rank(&newest[i]), i))?;
     let job = newest.remove(first);
     newest.reverse();
     *pending = newest;
     Some(job)
+}
+
+/// Whether two asks are for the same picture — page, document and kind — so
+/// that only the newer of them is worth drawing.
+fn same_picture(a: &RenderJob, b: &RenderJob) -> bool {
+    a.doc == b.doc
+        && a.page == b.page
+        && a.crop.is_some() == b.crop.is_some()
+        && (a.step >= THUMB_STEP_BASE) == (b.step >= THUMB_STEP_BASE)
+        && a.hide.is_some() == b.hide.is_some()
+}
+
+/// How urgent an ask is, lowest first: the editor's textless picture, a
+/// page, a thumbnail.
+fn rank(job: &RenderJob) -> (bool, bool) {
+    (job.step >= THUMB_STEP_BASE, job.hide.is_none())
+}
+
+/// Whether the render of `job` under way should give up for what is now
+/// waiting: a newer ask for the same picture, which makes this one no use to
+/// anyone, or a more urgent one (a page while a thumbnail draws). A CAD page
+/// holds the engine for seconds, and the page scrolled to waited them out.
+fn overtaken(job: &RenderJob, pending: &[RenderJob]) -> bool {
+    pending.iter().any(|p| same_picture(p, job) || rank(p) < rank(job))
 }
 
 /// A thumbnail asked for of the page just drawn, in the same state, made from

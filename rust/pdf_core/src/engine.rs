@@ -60,6 +60,19 @@ pub fn render_page_into(
     request: &RenderRequest,
     target: &mut RenderTarget<'_>,
 ) -> Result<RenderOutcome> {
+    Ok(render_page_into_until(session, index, request, target, None)?.unwrap_or(RenderOutcome::Rendered))
+}
+
+/// [`render_page_into`], and with `stop` asking it as the page is drawn:
+/// `Ok(None)` when it said stop, the target then holding part of the page
+/// (see `Page::render_into_until`). Without `stop` it is never `None`.
+pub fn render_page_into_until(
+    session: &mut DocumentSession,
+    index: usize,
+    request: &RenderRequest,
+    target: &mut RenderTarget<'_>,
+    stop: Option<&mut dyn FnMut() -> bool>,
+) -> Result<Option<RenderOutcome>> {
     session.document.validate_page_index(index)?;
     let key = cache_key(index, request);
 
@@ -75,7 +88,7 @@ pub fn render_page_into(
             .get(&key)
             .expect("entry was present a moment ago and nothing can evict it in between");
         target.copy_from(cached)?;
-        return Ok(RenderOutcome::CacheHit);
+        return Ok(Some(RenderOutcome::CacheHit));
     }
 
     if session.cache.contains(&key) {
@@ -83,8 +96,11 @@ pub fn render_page_into(
     }
 
     let page = session.document.page(index)?;
-    page.render_into(request, target)?;
-    Ok(RenderOutcome::Rendered)
+    let finished = match stop {
+        None => page.render_into(request, target).map(|_| true)?,
+        Some(stop) => page.render_into_until(request, target, stop)?,
+    };
+    Ok(finished.then_some(RenderOutcome::Rendered))
 }
 
 /// Rasterise a page into the cache without any on-screen destination.

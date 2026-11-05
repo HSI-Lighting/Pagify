@@ -34,6 +34,46 @@ fn a_cad_set_nobody_marked_is_not_asked_page_by_page() {
     assert!(!maybe, "a set with no markup was a maybe, so every page would be loaded to find out");
 }
 
+/// A render of a page of 720,000 lines that nobody wants any more gives the
+/// engine back soon after it is told to — but only once the page has loaded,
+/// which no render can be stopped inside. Measured 2026-11-05: a whole render
+/// 2.9 s, the first pause 1.2 s in (the load), let go 0.16 s after the stop
+/// (the page freed and the lock given back included).
+#[test]
+fn a_heavy_page_render_told_to_stop_lets_go_at_once() {
+    use std::time::{Duration, Instant};
+    if !std::path::Path::new(SET).is_file() {
+        eprintln!("skipped: the set is not at {SET}");
+        return;
+    }
+    let session = Session::open(SET).expect("open");
+    let started = Instant::now();
+    session.render_page_rotated(1, 1.0, pdf_core::Rotation::None).expect("render");
+    let full = started.elapsed();
+
+    // Drawn for 100 ms after the first pause, then told to stop.
+    let started = Instant::now();
+    let (mut first, mut told) = (None::<Instant>, None::<Instant>);
+    let stopped = session
+        .render_page_rotated_until(1, 1.0, pdf_core::Rotation::None, Some(&mut || {
+            let now = Instant::now();
+            let since = now - *first.get_or_insert(now);
+            if since > Duration::from_millis(100) && told.is_none() {
+                told = Some(now);
+            }
+            told.is_some()
+        }))
+        .expect("render");
+    let (first, told) = (first.expect("never asked"), told.expect("never told to stop"));
+    let let_go = told.elapsed();
+    eprintln!(
+        "whole render {full:?}; first pause after {:?}; let go {let_go:?} after it was told to stop",
+        first - started
+    );
+    assert!(stopped.is_none(), "the render was drawn to the end");
+    assert!(let_go < Duration::from_millis(500), "it went on for {let_go:?} after it was told to stop");
+}
+
 /// What the pointer needs to know about a page of 720,000 lines, read in one
 /// load of it, says what the four reads said, in a fraction of their time.
 #[test]

@@ -52,6 +52,21 @@ impl Session {
         scale: f32,
         rotation: Rotation,
     ) -> Result<PageRaster> {
+        self.render_page_rotated_until(index, scale, rotation, None)?
+            .ok_or_else(|| pdf_core::PdfError::Pdfium("a render with nothing to stop it stopped".into()))
+    }
+
+    /// [`Self::render_page_rotated`], asking `stop` as the page is drawn and
+    /// giving up when it says so: `Ok(None)`. For the render worker, whose
+    /// render of a CAD page holds the engine for seconds and can be overtaken
+    /// by one somebody now wants more (see `pdf_core::document::Page::render_into_until`).
+    pub fn render_page_rotated_until(
+        &self,
+        index: usize,
+        scale: f32,
+        rotation: Rotation,
+        stop: Option<&mut dyn FnMut() -> bool>,
+    ) -> Result<Option<PageRaster>> {
         let request = RenderRequest { scale, rotation, ..Default::default() };
 
         registry::with_session(self.handle, |s| {
@@ -66,15 +81,15 @@ impl Session {
                     PixelOrder::Rgba,
                     &mut pixels,
                 )?;
-                engine::render_page_into(s, index, &request, &mut target)?
+                engine::render_page_into_until(s, index, &request, &mut target, stop)?
             };
 
-            Ok(PageRaster {
+            Ok(outcome.map(|outcome| PageRaster {
                 width,
                 height,
                 pixels,
                 from_cache: outcome == RenderOutcome::CacheHit,
-            })
+            }))
         })
     }
 
