@@ -284,6 +284,46 @@ mod tools_chain {
         );
     }
 
+    /// The page-thumbnail rail is a View button now, so it is a command
+    /// that says which way it was left, as `ortho` does.
+    #[test]
+    fn the_pagesrail_command_toggles_and_says_so() {
+        let mut app = app();
+        assert!(app.ui_state.show_thumbs, "the rail starts shown");
+        app.submit("pagesrail");
+        assert!(!app.ui_state.show_thumbs);
+        assert!(infos(&app).iter().any(|s| s.contains("pages: hidden")), "{:?}", infos(&app));
+
+        app.submit("pagesrail");
+        assert!(app.ui_state.show_thumbs);
+        assert!(infos(&app).iter().any(|s| s.contains("pages: shown")), "{:?}", infos(&app));
+    }
+
+    #[test]
+    fn the_exact_command_toggles_and_says_so() {
+        let mut app = app();
+        app.submit("exact");
+        assert!(app.prefs_state.exact_pages);
+        assert!(infos(&app).iter().any(|s| s.contains("exact: on")), "{:?}", infos(&app));
+
+        app.submit("exact");
+        assert!(!app.prefs_state.exact_pages);
+        assert!(infos(&app).iter().any(|s| s.contains("exact: off")), "{:?}", infos(&app));
+    }
+
+    /// **Asked for: Pages and Exact "to the View tab".** They were
+    /// checkboxes in the title bar.
+    #[test]
+    fn pages_and_exact_are_buttons_on_the_view_tab() {
+        let view = crate::ribbon::Tab::View.buttons();
+        for want in [("\u{F114}", "Pages", "pagesrail"), ("\u{E415}", "Exact", "exact")] {
+            assert!(
+                view.iter().any(|(glyph, label, command)| (*glyph, *label, command.text()) == want),
+                "no {want:?} on View"
+            );
+        }
+    }
+
     /// A rectangle drawn with fill off — the default — is hollow: its
     /// outline, and nothing else.
     #[test]

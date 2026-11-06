@@ -332,6 +332,11 @@ pub enum Verb {
     /// level or plumb with the one before. A toggle, for the reason
     /// [`Verb::ToggleFill`] gives — the Home tab's button runs it.
     ToggleOrtho,
+    /// Show or hide the page-thumbnail rail — the View tab's Pages button.
+    /// Not `thumbnails`, which is the Organize grid.
+    TogglePagesRail,
+    /// Draw pages with PDFium only — the View tab's Exact button. Saved.
+    ToggleExact,
     /// Arm the Draw tab's Arrow tool — a line with an arrowhead pre-picked
     /// on its end. Not a kernel word: `cad_kernel`'s own parser has no
     /// concept of an arrow, only of a line, so this is Pagify's own rather
@@ -978,7 +983,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "pick", "textlayer", "whytext",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
-        "unsecure", "redact",
+        "unsecure", "redact", "ortho", "pagesrail", "exact",
     ];
     tokens.extend(PLANNED.iter().map(|(v, _, _)| *v));
     tokens
@@ -1069,11 +1074,13 @@ fn parse_locking_and_redaction(head: &str, rest: &[&str], tail: &str) -> Option<
     })
 }
 
-/// One domain of [`parse`]: the 14 commands below.
+/// One domain of [`parse`]: the 16 commands below.
 fn parse_fill_and_sign(head: &str, rest: &[&str], tail: &str) -> Option<Result<Verb, String>> {
     Some(match head {
         "fill" => Ok(Verb::ToggleFill),
         "ortho" => Ok(Verb::ToggleOrtho),
+        "pagesrail" => Ok(Verb::TogglePagesRail),
+        "exact" => Ok(Verb::ToggleExact),
         "arrow" => Ok(Verb::DrawArrow),
         "cloud" => Ok(Verb::DrawCloud),
         "signrectangle" => Ok(Verb::SignRectangle),

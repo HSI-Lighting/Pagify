@@ -3160,6 +3160,8 @@ impl PagifyApp {
                         || in_hand == Some(c)
                         || (c == "fill" && self.prefs_state.draw_fill)
                         || (c == "ortho" && self.prefs_state.ortho)
+                        || (c == "pagesrail" && self.ui_state.show_thumbs)
+                        || (c == "exact" && self.prefs_state.exact_pages)
                         || (c == "appearance" && theme::mode() == theme::Mode::Light)
                         || (c == "hand" && show_hand_by_default)
                         || match self.tab().pointer {
@@ -3239,6 +3241,16 @@ impl PagifyApp {
                                 "Ortho: off — click to keep lines and measurements \
                                  level or plumb, as AutoCAD's ORTHO does."
                             })
+                        } else if command.text() == "pagesrail" {
+                            response.on_hover_text(if self.ui_state.show_thumbs {
+                                "Pages: shown — click to hide the page thumbnails."
+                            } else {
+                                "Pages: hidden — click to show the page thumbnails."
+                            })
+                        } else if command.text() == "exact" {
+                            response.on_hover_text(
+                                "Draw pages with PDFium only — exactly what prints — instead of the faster hayro where it draws them the same.",
+                            )
                         } else if command.text() == "appearance" {
                             response.on_hover_text(if theme::mode() == theme::Mode::Light {
                                 "Light theme — click for dark."
@@ -3826,21 +3838,6 @@ impl PagifyApp {
                             .selectable(false),
                         )
                         .on_hover_text("The build of Pagify you are running.");
-                        if self.tab_mut().doc.is_some() {
-                            ui.checkbox(&mut self.ui_state.show_thumbs, "Pages");
-                            let exact = ui.checkbox(&mut self.prefs_state.exact_pages, "Exact").on_hover_text(
-                                "Draw pages with PDFium only — exactly what prints — instead of the faster hayro where it draws them the same.",
-                            );
-                            if exact.changed() {
-                                if !cfg!(test) {
-                                    pagify_shell::preview::save_exact_pages(self.prefs_state.exact_pages);
-                                }
-                                // Every picture drawn again, by the renderer now chosen.
-                                for doc in self.tabs.iter_mut().filter_map(|t| t.doc.as_mut()) {
-                                    doc.rendered_is_stale();
-                                }
-                            }
-                        }
 
                         // **One row of tabs, the newest on the left.** Reported
                         // from use: with a dozen documents open the tabs

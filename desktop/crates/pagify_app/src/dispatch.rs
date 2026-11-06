@@ -299,6 +299,25 @@ impl crate::PagifyApp {
                     "ortho: off — points go where the pointer is."
                 });
             }
+            Effect::TogglePagesRail => {
+                self.ui_state.show_thumbs = !self.ui_state.show_thumbs;
+                self.say_info(if self.ui_state.show_thumbs { "pages: shown" } else { "pages: hidden" });
+            }
+            Effect::ToggleExact => {
+                self.prefs_state.exact_pages = !self.prefs_state.exact_pages;
+                if !cfg!(test) {
+                    pagify_shell::preview::save_exact_pages(self.prefs_state.exact_pages);
+                }
+                // Every picture drawn again, by the renderer now chosen.
+                for doc in self.tabs.iter_mut().filter_map(|t| t.doc.as_mut()) {
+                    doc.rendered_is_stale();
+                }
+                self.say_info(if self.prefs_state.exact_pages {
+                    "exact: on — pages are drawn by PDFium only."
+                } else {
+                    "exact: off — pages are drawn by hayro where it draws them the same."
+                });
+            }
             Effect::ArmRedact => {
                 if self.tab_mut().doc.is_none() {
                     self.say_error("nothing open.");

@@ -272,7 +272,7 @@ fn the_eraser_still_erases_a_selected_drawing() {
 }
 
 /// **The build number is in the title bar, at the far right** — with or
-/// without a document open, past the Ortho / Pages checkboxes.
+/// without a document open.
 #[test]
 fn the_title_bar_shows_the_build_number_at_the_far_right() {
     use egui_kittest::kittest::Queryable;
@@ -294,9 +294,23 @@ fn the_title_bar_shows_the_build_number_at_the_far_right() {
 
     let h = harness("two-column.pdf");
     let version = find(&h, &label);
-    let pages = find(&h, "Pages");
-    assert!(pages.right() <= version.left(), "the checkboxes are not left of it: {pages:?} {version:?}");
+    let second = find(&h, "two-column.pdf");
+    assert!(second.right() <= version.left(), "the tab is not left of it: {second:?} {version:?}");
     assert!(version.right() > 1400.0 - 40.0, "the build number is not at the far right: {version:?}");
+}
+
+/// Pages and Exact moved to the View tab: nothing by those names is left
+/// in the title bar.
+#[test]
+fn the_title_bar_has_no_checkboxes() {
+    use egui_kittest::kittest::Queryable;
+
+    let h = harness("two-column.pdf");
+    for label in ["Pages", "Exact"] {
+        let left: Vec<egui::Rect> =
+            h.query_all_by_label(label).map(|n| n.rect()).filter(|r| r.center().y < 70.0).collect();
+        assert!(left.is_empty(), "{label:?} is still in the title bar: {left:?}");
+    }
 }
 
 /// **The title bar reads left to right, and everything in it sits on one
@@ -335,28 +349,22 @@ fn the_title_bar_reads_left_to_right_and_sits_on_one_line() {
     // The newest tab is the leftmost: text-lines.pdf was opened second.
     let first = title_bar("text-lines.pdf");
     let second = title_bar("two-column.pdf");
-    let pages = title_bar("Pages");
+    let version = title_bar(&format!("v{}", pagify_shell::VERSION));
 
     // Left to right, in the order they were written.
     assert!(logo.right() <= name.left(), "the name is not after the logo: {logo:?} {name:?}");
     assert!(name.right() <= first.left(), "the first tab is not after the name: {name:?} {first:?}");
     assert!(first.right() <= second.left(), "the tabs are out of order: {first:?} {second:?}");
-    assert!(second.right() <= pages.left(), "the checkboxes are not after the tabs: {second:?} {pages:?}");
+    assert!(second.right() <= version.left(), "the build number is not after the tabs: {second:?} {version:?}");
 
     // **Left-aligned**: the strip starts where the name stops, rather than
-    // being pushed against the checkboxes at the far side.
+    // being pushed against the build number at the far side.
     assert!(
         first.left() - name.right() < 40.0,
         "the tabs start {}px after the name — they are not left-aligned",
         first.left() - name.right()
     );
-    // And the checkboxes did not come along with them: they are at the
-    // right edge, short only of the build number that sits beyond them.
-    let version = title_bar(&format!("v{}", pagify_shell::VERSION));
-    assert!(
-        version.right() > 1400.0 - 40.0 && version.left() - pages.right() < 20.0,
-        "the checkboxes are no longer at the right edge: {pages:?} (build number {version:?})"
-    );
+    assert!(version.right() > 1400.0 - 40.0, "the build number is not at the right edge: {version:?}");
 
     // One line. A pixel and a half of slack for rounding to whole pixels.
     let centres = [
@@ -364,7 +372,7 @@ fn the_title_bar_reads_left_to_right_and_sits_on_one_line() {
         ("name", name.center().y),
         ("first tab", first.center().y),
         ("second tab", second.center().y),
-        ("checkbox", pages.center().y),
+        ("build number", version.center().y),
     ];
     let (lo, hi) = centres
         .iter()

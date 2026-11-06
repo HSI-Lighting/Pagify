@@ -273,6 +273,9 @@ impl Tab {
                 ("\u{E3B9}", "Compare", Command::Verb("compare")),
                 ("\u{EAC7}", "Word Count", Command::Verb("wordcount")),
                 ("\u{E429}", "View Setting", Command::Verb("viewsetting")),
+                // Out of the title bar (asked for). Lit while on.
+                ("\u{F114}", "Pages", Command::Verb("pagesrail")),
+                ("\u{E415}", "Exact", Command::Verb("exact")),
     ];
 
     /// The Form tab's ribbon buttons, in order.

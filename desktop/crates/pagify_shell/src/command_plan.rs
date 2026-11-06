@@ -138,6 +138,10 @@ pub enum Effect {
     ToggleFill,
     /// Toggle Ortho: new points held level or plumb with the one before.
     ToggleOrtho,
+    /// Show or hide the page-thumbnail rail.
+    TogglePagesRail,
+    /// Toggle drawing pages with PDFium only, and save the choice.
+    ToggleExact,
     /// Arm the redaction tool.
     ArmRedact,
     /// Lock the text selection, or say to make one first.
@@ -342,6 +346,8 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::DrawCloud => vec![Effect::ArmDrawCloud],
         Verb::ToggleFill => vec![Effect::ToggleFill],
         Verb::ToggleOrtho => vec![Effect::ToggleOrtho],
+        Verb::TogglePagesRail => vec![Effect::TogglePagesRail],
+        Verb::ToggleExact => vec![Effect::ToggleExact],
         Verb::Redact => vec![Effect::ArmRedact],
         Verb::Lock => vec![Effect::LockWords],
         Verb::Secure(options) => vec![Effect::RunSecure(*options)],
@@ -577,6 +583,8 @@ mod tests {
             (Verb::DrawCloud, vec![Effect::ArmDrawCloud]),
             (Verb::ToggleFill, vec![Effect::ToggleFill]),
             (Verb::ToggleOrtho, vec![Effect::ToggleOrtho]),
+            (Verb::TogglePagesRail, vec![Effect::TogglePagesRail]),
+            (Verb::ToggleExact, vec![Effect::ToggleExact]),
             (Verb::Redact, vec![Effect::ArmRedact]),
             (Verb::Lock, vec![Effect::LockWords]),
             (Verb::SmartRedact { redact: true }, vec![Effect::RunSmartRedact { redact: true }]),
