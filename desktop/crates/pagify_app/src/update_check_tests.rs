@@ -198,7 +198,8 @@ fn when_this_pc_cannot_see_the_update_folder_it_says_where_it_looked() {
     // Nothing to install from: no install button.
     assert!(h.query_by_label_contains("Install it anyway").is_none());
     assert!(h.query_by_label_contains("Update now").is_none());
-    h.get_by_label_contains("Close").click();
+    // Exact: the title bar has a "Close window" of its own.
+    h.get_by_label("Close").click();
     h.run_steps(1);
     assert!(h.state().update_state.update_report.is_none());
 }

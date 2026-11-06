@@ -272,7 +272,8 @@ fn the_eraser_still_erases_a_selected_drawing() {
 }
 
 /// **The build number is in the title bar, at the far right** — with or
-/// without a document open.
+/// without a document open. On Windows "far right" is short of the window's
+/// own buttons, which Pagify draws there itself.
 #[test]
 fn the_title_bar_shows_the_build_number_at_the_far_right() {
     use egui_kittest::kittest::Queryable;
@@ -287,16 +288,19 @@ fn the_title_bar_shows_the_build_number_at_the_far_right() {
         assert_eq!(found.len(), 1, "expected {what:?} once in the title bar: {found:?}");
         found[0]
     };
+    let at_the_far_right = |h: &Harness<'static, PagifyApp>, version: egui::Rect| {
+        let edge = if cfg!(target_os = "windows") { find(h, "Minimise").left() } else { 1400.0 };
+        assert!(version.right() <= edge && edge - version.right() < 40.0, "the build number is not at the far right: {version:?}");
+    };
 
     let empty = harness_from(PagifyApp::new(None));
-    let version = find(&empty, &label);
-    assert!(version.right() > 1400.0 - 40.0, "the build number is not at the far right: {version:?}");
+    at_the_far_right(&empty, find(&empty, &label));
 
     let h = harness("two-column.pdf");
     let version = find(&h, &label);
     let second = find(&h, "two-column.pdf");
     assert!(second.right() <= version.left(), "the tab is not left of it: {second:?} {version:?}");
-    assert!(version.right() > 1400.0 - 40.0, "the build number is not at the far right: {version:?}");
+    at_the_far_right(&h, version);
 }
 
 /// The title bar's nodes labelled `label` — the ribbon below has some of the
@@ -379,6 +383,139 @@ fn more_commands_adds_a_ribbon_button() {
     assert!(hand.right() <= highlight.left(), "Highlight is not after Hand: {hand:?} {highlight:?}");
 }
 
+// -- the window chrome Pagify draws itself on Windows -------------------------
+
+/// What the window asked of the system in the last frame.
+fn window_commands(h: &Harness<'static, PagifyApp>) -> Vec<egui::ViewportCommand> {
+    h.output().viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.commands.clone()).unwrap_or_default()
+}
+
+/// A press at `from`, moves to `to` and a release, and every command the
+/// window sent on the way — a drag hands itself to the system on one frame.
+fn drag_collecting(h: &mut Harness<'static, PagifyApp>, from: egui::Pos2, to: egui::Pos2) -> Vec<egui::ViewportCommand> {
+    use egui::{Event, PointerButton};
+    let press = |pos, down| Event::PointerButton { pos, button: PointerButton::Primary, pressed: down, modifiers: Default::default() };
+    let mut sent = Vec::new();
+    let mut step = |h: &mut Harness<'static, PagifyApp>, event: Event| {
+        h.input_mut().events.push(event);
+        h.run_steps(1);
+        sent.extend(window_commands(h));
+    };
+    step(h, Event::PointerMoved(from));
+    step(h, press(from, true));
+    for i in 1..=4 {
+        step(h, Event::PointerMoved(from + (to - from) * (i as f32 / 4.0)));
+    }
+    step(h, press(to, false));
+    sent
+}
+
+/// The system's close button is gone; Pagify's sends what it sent, so the
+/// same close request reaches the same code.
+#[cfg(target_os = "windows")]
+#[test]
+fn the_close_button_asks_to_close_the_window() {
+    let mut h = harness("two-column.pdf");
+    the_one_in_title_bar(&h, "Close window").click();
+    h.run_steps(1);
+    assert!(window_commands(&h).contains(&egui::ViewportCommand::Close), "{:?}", window_commands(&h));
+}
+
+/// What that close request does with unsaved work: asks, as it always has.
+#[test]
+fn closing_with_unsaved_work_asks_first() {
+    let mut h = harness("two-column.pdf");
+    h.state_mut().submit("l 300,300 400,300");
+    h.run_steps(2);
+    h.input_mut().viewports.get_mut(&egui::ViewportId::ROOT).unwrap().events.push(egui::ViewportEvent::Close);
+    h.run_steps(1);
+    assert!(h.state().tab().closing.is_some(), "the window closed over unsaved work without asking");
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn maximise_then_restore() {
+    let mut h = harness("two-column.pdf");
+    the_one_in_title_bar(&h, "Maximise").click();
+    h.run_steps(1);
+    assert!(window_commands(&h).contains(&egui::ViewportCommand::Maximized(true)), "{:?}", window_commands(&h));
+
+    h.input_mut().viewports.get_mut(&egui::ViewportId::ROOT).unwrap().maximized = Some(true);
+    h.run_steps(2);
+    assert!(in_title_bar(&h, "Maximise").is_empty(), "still Maximise while maximised");
+    the_one_in_title_bar(&h, "Restore").click();
+    h.run_steps(1);
+    assert!(window_commands(&h).contains(&egui::ViewportCommand::Maximized(false)), "{:?}", window_commands(&h));
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn minimise() {
+    let mut h = harness("two-column.pdf");
+    the_one_in_title_bar(&h, "Minimise").click();
+    h.run_steps(1);
+    assert!(window_commands(&h).contains(&egui::ViewportCommand::Minimized(true)), "{:?}", window_commands(&h));
+}
+
+/// Empty bar moves the window — handed to Windows, so snapping still works.
+#[cfg(target_os = "windows")]
+#[test]
+fn a_drag_on_empty_bar_moves_the_window() {
+    let mut h = harness("two-column.pdf");
+    let tab = the_one_in_title_bar(&h, "two-column.pdf").rect();
+    let label = format!("v{}", pagify_shell::VERSION);
+    let version = the_one_in_title_bar(&h, &label).rect();
+    let from = egui::pos2((tab.right() + version.left()) / 2.0, tab.center().y);
+    let sent = drag_collecting(&mut h, from, from + egui::vec2(60.0, 30.0));
+    assert!(sent.contains(&egui::ViewportCommand::StartDrag), "{sent:?}");
+}
+
+/// A tab still carries the tab, not the window.
+#[cfg(target_os = "windows")]
+#[test]
+fn a_drag_on_a_tab_does_not() {
+    let mut h = harness("two-column.pdf");
+    let tab = the_one_in_title_bar(&h, "two-column.pdf").rect();
+    let sent = drag_collecting(&mut h, tab.center(), tab.center() + egui::vec2(60.0, 0.0));
+    assert!(!sent.contains(&egui::ViewportCommand::StartDrag), "{sent:?}");
+}
+
+/// No system frame, so Pagify resizes: a press on the edge hands it to
+/// Windows — but not while maximised, when there is no edge to pull.
+#[cfg(target_os = "windows")]
+#[test]
+fn a_press_on_the_right_edge_resizes() {
+    let press_right_edge = |h: &mut Harness<'static, PagifyApp>| {
+        let at = egui::pos2(1400.0 - 2.0, 500.0);
+        h.input_mut().events.push(egui::Event::PointerMoved(at));
+        h.run_steps(1);
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Default::default(),
+        });
+        h.run_steps(1);
+        let sent = window_commands(h);
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Default::default(),
+        });
+        h.run_steps(1);
+        sent
+    };
+    let mut h = harness("two-column.pdf");
+    let sent = press_right_edge(&mut h);
+    assert!(sent.contains(&egui::ViewportCommand::BeginResize(egui::ResizeDirection::East)), "{sent:?}");
+
+    h.input_mut().viewports.get_mut(&egui::ViewportId::ROOT).unwrap().maximized = Some(true);
+    h.run_steps(1);
+    let sent = press_right_edge(&mut h);
+    assert!(!sent.iter().any(|c| matches!(c, egui::ViewportCommand::BeginResize(_))), "{sent:?}");
+}
+
 /// Pages and Exact moved to the View tab: nothing by those names is left
 /// in the title bar.
 #[test]
@@ -447,7 +584,22 @@ fn the_title_bar_reads_left_to_right_and_sits_on_one_line() {
         "the tabs start {}px after the quick tools — they are not left-aligned",
         first.left() - menu.right()
     );
-    assert!(version.right() > 1400.0 - 40.0, "the build number is not at the right edge: {version:?}");
+    // Then, on Windows, the window's own buttons, Close at the very edge.
+    let edge = if cfg!(target_os = "windows") {
+        let minimise = title_bar("Minimise");
+        let maximise = title_bar("Maximise");
+        let close = title_bar("Close window");
+        assert!(version.right() <= minimise.left(), "the build number is not before the buttons: {version:?} {minimise:?}");
+        assert!(minimise.right() <= maximise.left() && maximise.right() <= close.left(), "the buttons are out of order");
+        // At the edge of what the app is given: the harness draws it 8 px in
+        // from its own 1400 (kittest's outer margin); eframe gives it the
+        // whole window.
+        assert_eq!(close.right(), 1400.0 - 8.0, "Close is not at the edge: {close:?}");
+        close
+    } else {
+        assert!(version.right() > 1400.0 - 40.0, "the build number is not at the right edge: {version:?}");
+        version
+    };
 
     // One line. A pixel and a half of slack for rounding to whole pixels.
     let centres = [
@@ -456,6 +608,7 @@ fn the_title_bar_reads_left_to_right_and_sits_on_one_line() {
         ("first tab", first.center().y),
         ("second tab", second.center().y),
         ("build number", version.center().y),
+        ("right edge", edge.center().y),
     ];
     let (lo, hi) = centres
         .iter()

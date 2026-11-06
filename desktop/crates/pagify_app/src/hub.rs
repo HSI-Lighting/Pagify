@@ -1018,6 +1018,7 @@ impl eframe::App for Hub {
             } else {
                 let mut builder = egui::ViewportBuilder::default()
                     .with_title("Pagify")
+                    .with_decorations(!cfg!(target_os = "windows"))
                     .with_inner_size(place.size)
                     .with_min_inner_size([640.0, 480.0]);
                 if let Some(at) = place.at {

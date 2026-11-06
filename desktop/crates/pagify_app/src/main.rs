@@ -14,6 +14,7 @@
 
 mod align_page;
 mod canvas;
+mod chrome;
 mod caches;
 mod dispatch;
 mod in_place;
@@ -182,7 +183,10 @@ fn main() -> eframe::Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1240.0, 860.0])
         .with_min_inner_size([640.0, 480.0])
-        .with_title("Pagify");
+        .with_title("Pagify")
+        // On Windows Pagify's own top row is the title bar (`chrome`); the
+        // title still names the window on the taskbar and in Alt+Tab.
+        .with_decorations(!cfg!(target_os = "windows"));
     if let Some(icon) = logo::icon() {
         viewport = viewport.with_icon(icon);
     }
@@ -3829,14 +3833,38 @@ impl PagifyApp {
         let mut quick: Option<String> = None;
         let mut tick: Option<&'static str> = None;
         let mut more_commands = false;
+        // **On Windows this row is the window's only title bar** (asked for,
+        // Foxit's single bar): the system's is off, so its buttons go to the
+        // right edge at the bar's full height, and empty bar moves the window.
+        let own_chrome = cfg!(target_os = "windows");
+        let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+        let mut window_command: Option<egui::ViewportCommand> = None;
+        let margin = if own_chrome {
+            egui::Margin { left: 16, right: 0, top: 0, bottom: 0 }
+        } else {
+            egui::Margin::symmetric(16, 10)
+        };
         let title_bar = egui::Panel::top("titlebar")
-            .frame(egui::Frame::new().fill(theme::chrome()).inner_margin(egui::Margin::symmetric(16, 10)))
+            .frame(egui::Frame::new().fill(theme::chrome()).inner_margin(margin))
             .show(ui, |ui| {
+                if own_chrome {
+                    // First, so everything drawn after it — tabs, tools,
+                    // buttons — takes the pointer where it is on top. A drag
+                    // is handed to Windows, which keeps edge snapping.
+                    let bar = ui.interact(ui.max_rect(), egui::Id::new("titlebar-drag"), egui::Sense::click_and_drag());
+                    if bar.drag_started() {
+                        window_command = Some(egui::ViewportCommand::StartDrag);
+                    } else if bar.double_clicked() {
+                        window_command = Some(egui::ViewportCommand::Maximized(!maximized));
+                    }
+                }
                 ui.horizontal(|ui| {
                     // The row is as tall as a document tab from the start, so
                     // the logo and the quick tools — placed before any
-                    // tab — are centred on the line the tabs will be on.
-                    ui.set_min_height(doc_tab_height(ui));
+                    // tab — are centred on the line the tabs will be on. With
+                    // no margin above and below (Windows), the row itself
+                    // carries the bar's height, for the window buttons.
+                    ui.set_min_height(doc_tab_height(ui) + if own_chrome { 20.0 } else { 0.0 });
                     // Shrunk from 32/24pt toward the mockup's own compact
                     // mark — a titlebar logo does not need to compete with
                     // the document tabs now sharing its row for width.
@@ -3901,10 +3929,16 @@ impl PagifyApp {
                     ui.add_space(8.0);
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if own_chrome {
+                            if let Some(command) = chrome::window_buttons(ui, maximized) {
+                                window_command = Some(command);
+                            }
+                        }
                         // **The build number, at the far right of the bar** —
                         // asked for so that a tester's report can say which
                         // build it is about without anyone opening a log.
-                        // First in a right-to-left row, so it is the rightmost.
+                        // First in a right-to-left row after the window's own
+                        // buttons, so it is the rightmost thing of Pagify's.
                         ui.add(
                             egui::Label::new(
                                 egui::RichText::new(format!("v{}", pagify_shell::VERSION))
@@ -4010,7 +4044,34 @@ impl PagifyApp {
         if more_commands {
             self.ui_state.more_commands_open = true;
         }
+        // Close is the system close button's own request, so the unsaved
+        // question and everything after it run exactly as they did.
+        if let Some(command) = window_command {
+            ctx.send_viewport_cmd(command);
+        }
         quick
+    }
+
+    /// **The window's edge, on Windows**: with no system frame Pagify
+    /// resizes it — a 5 px band round the window shows the resize cursor and,
+    /// pressed, hands the resize to Windows. Drawn last, so its cursor wins
+    /// over whatever is under it. Not while maximised or full screen.
+    fn resize_band(&self, ctx: &egui::Context) {
+        if !cfg!(target_os = "windows") {
+            return;
+        }
+        let (whole, at) = ctx.input(|i| {
+            let shut_in = i.viewport().maximized.unwrap_or(false) || i.viewport().fullscreen.unwrap_or(false);
+            (!shut_in, i.pointer.hover_pos())
+        });
+        let Some(direction) = at.filter(|_| whole).and_then(|at| chrome::resize_direction(ctx.viewport_rect(), at, chrome::BAND))
+        else {
+            return;
+        };
+        ctx.set_cursor_icon(chrome::resize_cursor(direction));
+        if ctx.input(|i| i.pointer.primary_pressed()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(direction));
+        }
     }
 
     /// The quick tools' **More Commands…**: every ribbon button under its
@@ -16345,6 +16406,7 @@ impl eframe::App for PagifyApp {
         let ribbon_command = self.draw_ribbon(ui).or(quick);
         let picked = self.draw_command_bar(ui, command_id, &mut submitted);
         self.draw_main_area(&ctx, ui, command_id, ribbon_command.or(picked), &mut submitted);
+        self.resize_band(&ctx);
     }
 
 }
