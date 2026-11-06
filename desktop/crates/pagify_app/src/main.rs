@@ -47,6 +47,7 @@ mod print_window;
 #[cfg(target_os = "windows")]
 mod print_windows;
 mod quick_tools;
+mod suggest;
 mod ribbon;
 mod view;
 mod workspace;
@@ -1238,6 +1239,13 @@ struct UiState {
     quick_tools: Vec<String>,
     /// Whether the quick tools' "More Commands" window is up.
     more_commands_open: bool,
+    /// The tool suggestion the arrows have highlighted over the command box.
+    suggestion_at: Option<usize>,
+    /// Escape closed the suggestions; they stay closed until the text changes.
+    suggestions_closed: bool,
+    /// How many suggestions the box drew last frame — the list on screen,
+    /// which is what the keys act on.
+    suggestions_listed: usize,
 }
 
 /// The session log.
@@ -3522,7 +3530,7 @@ impl PagifyApp {
         // buttons (Swap, Note, Calibrate…) could not be completed. Enter, the
         // Run button and the ribbon are the only ways to submit.
 
-        let keys = ctx.input(|i| Keys {
+        let mut keys = ctx.input(|i| Keys {
             escape: i.key_pressed(egui::Key::Escape),
             enter: i.key_pressed(egui::Key::Enter),
             up: i.key_pressed(egui::Key::ArrowUp),
@@ -3563,6 +3571,37 @@ impl PagifyApp {
             prev_tab: i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::Tab),
             print: i.modifiers.command && i.key_pressed(egui::Key::P),
         });
+
+        // **The tool list over the command box** (`suggest`) has Up, Down and
+        // Escape while it shows: the arrows move through it instead of
+        // recalling history, and Escape closes it, keeping the text, rather
+        // than doing what Escape does. Taken from the input so neither the
+        // history recall below nor the box itself sees them.
+        //
+        // The list drawn last frame, not one worked out now: egui takes the
+        // box's focus away on Escape before any of this frame runs.
+        let listed = self.ui_state.suggestions_listed;
+        if listed > 0 {
+            let at = self.ui_state.suggestion_at.filter(|i| *i < listed);
+            if keys.down {
+                self.ui_state.suggestion_at = Some(at.map_or(0, |i| (i + 1) % listed));
+            }
+            if keys.up {
+                self.ui_state.suggestion_at = Some(at.map_or(listed - 1, |i| (i + listed - 1) % listed));
+            }
+            if keys.escape {
+                self.ui_state.suggestions_closed = true;
+                self.ui_state.suggestion_at = None;
+                // Still typing in the box.
+                ctx.memory_mut(|m| m.request_focus(command_id));
+            }
+            ctx.input_mut(|i| {
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp);
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown);
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
+            });
+            (keys.up, keys.down, keys.escape) = (false, false, false);
+        }
 
         if keys.escape && self.escape() == Escaped::ReturnedToPointer {
             ctx.memory_mut(|m| m.surrender_focus(command_id));
@@ -4019,7 +4058,7 @@ impl PagifyApp {
     /// The command bar, bottom panel: the single line, or the opened box with
     /// its history above it. A submit lands in `submitted` for the caller to
     /// dispatch once the whole frame has been laid out.
-    fn draw_command_bar(&mut self, ui: &mut egui::Ui, command_id: egui::Id, submitted: &mut Option<Dispatch>) {
+    fn draw_command_bar(&mut self, ui: &mut egui::Ui, command_id: egui::Id, submitted: &mut Option<Dispatch>) -> Option<String> {
         // -- command bar ------------------------------------------------------
         //
         // Two shapes: the single line the mockup draws, and an opened box with
@@ -4036,6 +4075,7 @@ impl PagifyApp {
             bar.resizable(false)
         };
 
+        let mut picked = None;
         bar.show(ui, |ui| {
             if self.ui_state.command_open {
                 self.draw_command_history(ui);
@@ -4067,7 +4107,7 @@ impl PagifyApp {
                 });
             }
 
-            self.draw_command_row(ui, command_id, submitted, &name, &wants);
+            picked = self.draw_command_row(ui, command_id, submitted, &name, &wants);
 
             if self.ui_state.command_open {
                 ui.horizontal(|ui| {
@@ -4096,11 +4136,13 @@ impl PagifyApp {
                 });
             }
         });
+        picked
     }
 
     /// The command bar's one row: the closed-state page/error line and the
     /// input field with its history toggle. Moved out of `draw_command_bar`
-    /// whole, wrapper and all.
+    /// whole, wrapper and all. Returns a tool picked from the suggestions,
+    /// for the caller to run as its ribbon button would be.
     fn draw_command_row(
         &mut self,
         ui: &mut egui::Ui,
@@ -4108,7 +4150,8 @@ impl PagifyApp {
         submitted: &mut Option<Dispatch>,
         name: &str,
         wants: &str,
-    ) {
+    ) -> Option<String> {
+            let mut picked: Option<String> = None;
             ui.horizontal(|ui| {
                 if !self.ui_state.command_open {
                     // The mockup's own status bar carries a couple of
@@ -4248,18 +4291,74 @@ impl PagifyApp {
                 );
                 if response.changed() {
                     self.cmd.note_edited();
+                    self.ui_state.suggestion_at = None;
+                    self.ui_state.suggestions_closed = false;
                 }
+                // After the field has taken this frame's typing, so the list
+                // is for the text as it now stands.
+                let suggestions = self.suggestions_showing(response.has_focus() || response.lost_focus());
+                self.ui_state.suggestions_listed = suggestions.len();
                 if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    if !self.consume_password_line() {
+                    // A highlighted suggestion is run as its ribbon button
+                    // is; with none, what was typed runs, as it always has.
+                    if let Some(s) = self.ui_state.suggestion_at.and_then(|i| suggestions.get(i)) {
+                        picked = Some(s.command.to_owned());
+                        self.cmd.input_mut().clear();
+                        self.ui_state.suggestion_at = None;
+                    } else if !self.consume_password_line() {
                         *submitted = self.cmd.submit(Submit::Enter);
                     }
                     response.request_focus();
+                }
+                if !suggestions.is_empty() {
+                    if let Some(i) = self.draw_suggestions(ui.ctx(), response.rect.left_top(), &suggestions) {
+                        picked = Some(suggestions[i].command.to_owned());
+                        self.cmd.input_mut().clear();
+                        self.ui_state.suggestion_at = None;
+                    }
                 }
 
                 if history_toggle(ui, egui::vec2(toggle_width, 22.0), self.ui_state.command_open).clicked() {
                     self.ui_state.command_open = !self.ui_state.command_open;
                 }
             });
+            picked
+    }
+
+    /// The tool suggestions, in a list whose bottom-left sits on the command
+    /// field's top-left: icon, name, command and tab, the arrows' row filled.
+    /// Returns the row clicked.
+    fn draw_suggestions(&self, ctx: &egui::Context, field_top_left: egui::Pos2, list: &[suggest::Suggestion]) -> Option<usize> {
+        let mut clicked = None;
+        egui::Area::new(egui::Id::new("command-suggestions"))
+            .order(egui::Order::Foreground)
+            .pivot(egui::Align2::LEFT_BOTTOM)
+            .fixed_pos(field_top_left)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).inner_margin(egui::Margin::same(4)).show(ui, |ui| {
+                    ui.set_width(360.0);
+                    for (i, s) in list.iter().enumerate() {
+                        let (rect, row) = ui.allocate_exact_size(egui::vec2(360.0, 24.0), egui::Sense::click());
+                        let label = format!("suggestion: {}", s.label);
+                        row.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &label));
+                        if self.ui_state.suggestion_at == Some(i) {
+                            ui.painter().rect_filled(rect, 3.0, theme::violet_deep());
+                        } else if row.hovered() {
+                            ui.painter().rect_filled(rect, 3.0, ui.visuals().widgets.hovered.weak_bg_fill);
+                        }
+                        let y = rect.center().y;
+                        let painter = ui.painter();
+                        painter.text(egui::pos2(rect.left() + 14.0, y), egui::Align2::CENTER_CENTER, s.glyph, icon_font(16.0), theme::ink());
+                        let name = painter.text(egui::pos2(rect.left() + 30.0, y), egui::Align2::LEFT_CENTER, s.label, egui::FontId::proportional(13.0), theme::ink());
+                        painter.text(egui::pos2(name.right() + 10.0, y), egui::Align2::LEFT_CENTER, s.command, egui::FontId::monospace(12.0), theme::ink_dim());
+                        painter.text(egui::pos2(rect.right() - 8.0, y), egui::Align2::RIGHT_CENTER, s.tab, egui::FontId::proportional(12.0), theme::ink_faint());
+                        if row.clicked() {
+                            clicked = Some(i);
+                        }
+                    }
+                });
+            });
+        clicked
     }
 
 
@@ -4822,7 +4921,7 @@ impl PagifyApp {
             }, },
             prefs_state: PrefsState { ortho: false, defaults: tools::Defaults::default(), draw_fill: false, snaps: SnapSet::defaults(), grid_pt: 0.0, exact_pages: if cfg!(test) { false } else { pagify_shell::preview::load_exact_pages() }, },
             render_state: RenderState { renders: None, facts: None, previews: None, async_render: !cfg!(test), render_stats: RenderStats::default(), },
-            ui_state: UiState { show_thumbs: true, organize_open: false, show_layers: false, command_open: false, errors_said: 0, print_wanted: false, quick_tools: if cfg!(test) { quick_tools::defaults() } else { quick_tools::path().map_or_else(quick_tools::defaults, |path| quick_tools::load_from(&path)) }, more_commands_open: false, },
+            ui_state: UiState { show_thumbs: true, organize_open: false, show_layers: false, command_open: false, errors_said: 0, print_wanted: false, quick_tools: if cfg!(test) { quick_tools::defaults() } else { quick_tools::path().map_or_else(quick_tools::defaults, |path| quick_tools::load_from(&path)) }, more_commands_open: false, suggestion_at: None, suggestions_closed: false, suggestions_listed: 0, },
             clipboard_state: ClipboardState { object_clipboard: None, paste_count: 0, page_clipboard: None, paste_ghost: None, clipboard_dir: if cfg!(test) {
                 static APPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 std::env::temp_dir().join(format!(
@@ -16244,8 +16343,8 @@ impl eframe::App for PagifyApp {
         let quick = self.draw_title_bar(&ctx, ui);
         self.draw_more_commands(&ctx);
         let ribbon_command = self.draw_ribbon(ui).or(quick);
-        self.draw_command_bar(ui, command_id, &mut submitted);
-        self.draw_main_area(&ctx, ui, command_id, ribbon_command, &mut submitted);
+        let picked = self.draw_command_bar(ui, command_id, &mut submitted);
+        self.draw_main_area(&ctx, ui, command_id, ribbon_command.or(picked), &mut submitted);
     }
 
 }

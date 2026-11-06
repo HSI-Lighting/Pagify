@@ -248,7 +248,7 @@ fn regular_inflection_roots(word: &str) -> Vec<String> {
 /// How many single-character edits (insert, delete, substitute) turn `a`
 /// into `b` — the standard Levenshtein table, kept to the two most recent
 /// rows since nothing later needs the ones before them.
-fn edit_distance(a: &[char], b: &[char]) -> usize {
+pub fn edit_distance(a: &[char], b: &[char]) -> usize {
     let mut previous: Vec<usize> = (0..=b.len()).collect();
     let mut current = vec![0usize; b.len() + 1];
     for (i, &ca) in a.iter().enumerate() {

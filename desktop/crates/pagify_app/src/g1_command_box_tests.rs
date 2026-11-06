@@ -386,3 +386,106 @@ fn a_page_list_is_written_as_ranges() {
     assert_eq!(compact_page_spec(&[0]), "1");
     assert_eq!(compact_page_spec(&[]), "");
 }
+
+// -- tool suggestions, as AutoCAD's AutoComplete ------------------------------
+
+fn suggestion_nodes(h: &Harness<'static, PagifyApp>) -> usize {
+    h.query_all_by_label_contains("suggestion: ").count()
+}
+
+fn command_field(h: &Harness<'static, PagifyApp>) -> egui::Rect {
+    h.query_all(egui_kittest::kittest::by().role(egui::accesskit::Role::TextInput))
+        .map(|n| n.rect())
+        .max_by(|a, b| a.top().total_cmp(&b.top()))
+        .expect("no command field")
+}
+
+/// **Asked for: "suggestions shows up with what ever tool that almost
+/// matches"**, just above the box.
+#[test]
+fn typing_hig_shows_highlight_above_the_box() {
+    let mut h = harness("pages-ladder.pdf");
+    focus_box(&mut h);
+    type_text(&mut h, "hig");
+    let row = h.get_by_label("suggestion: Highlight").rect();
+    assert!(row.bottom() <= command_field(&h).top() + 0.5, "the list is not above the box: {row:?}");
+}
+
+#[test]
+fn down_then_enter_arms_the_highlight_tool() {
+    let mut h = harness("pages-ladder.pdf");
+    focus_box(&mut h);
+    type_text(&mut h, "hig");
+    press(&mut h, egui::Key::ArrowDown);
+    press(&mut h, egui::Key::Enter);
+    let armed = h.state().tab().tool.as_ref().and_then(|t| t.kind.id());
+    assert_eq!(armed, Some(ToolId::Highlight), "errors: {:?}", errors(&h));
+    assert_eq!(h.state().cmd.input(), "", "the box was not cleared");
+}
+
+#[test]
+fn clicking_a_suggestion_runs_it() {
+    let mut h = harness("pages-ladder.pdf");
+    focus_box(&mut h);
+    type_text(&mut h, "han");
+    // The list settles a frame after its rows change.
+    h.run_steps(2);
+    h.get_by_label("suggestion: Hand").click();
+    h.run_steps(2);
+    assert_eq!(h.state().tab().pointer, pagify_shell::verbs::PointerMode::Pan);
+}
+
+/// "rotate" is listed beside "Rotate Pages", and Enter with nothing picked
+/// still runs what was typed: the view turns.
+#[test]
+fn enter_with_nothing_chosen_runs_what_was_typed() {
+    let mut h = harness("pages-ladder.pdf");
+    focus_box(&mut h);
+    let before = h.state().tab().view_state.rotation;
+    type_text(&mut h, "rotate");
+    assert!(suggestion_nodes(&h) > 0, "no list for rotate");
+    press(&mut h, egui::Key::Enter);
+    assert_ne!(h.state().tab().view_state.rotation, before, "the view did not turn; errors: {:?}", errors(&h));
+}
+
+#[test]
+fn up_does_not_recall_history_while_the_list_shows() {
+    let mut h = harness("pages-ladder.pdf");
+    focus_box(&mut h);
+    type_text(&mut h, "fit");
+    press(&mut h, egui::Key::Enter);
+    type_text(&mut h, "hig");
+    let shown = crate::suggest::suggest("hig").len();
+    press(&mut h, egui::Key::ArrowUp);
+    assert_eq!(h.state().cmd.input(), "hig", "Up recalled the history");
+    assert_eq!(h.state().ui_state.suggestion_at, Some(shown - 1));
+}
+
+#[test]
+fn escape_closes_the_list_and_keeps_the_text() {
+    let mut h = harness("pages-ladder.pdf");
+    focus_box(&mut h);
+    type_text(&mut h, "hig");
+    assert!(suggestion_nodes(&h) > 0);
+    press(&mut h, egui::Key::Escape);
+    assert_eq!(suggestion_nodes(&h), 0, "Escape left the list up");
+    assert_eq!(h.state().cmd.input(), "hig");
+    type_text(&mut h, "h");
+    assert!(suggestion_nodes(&h) > 0, "typing again did not bring it back");
+}
+
+#[test]
+fn no_list_at_a_password_prompt_or_with_a_tool_in_hand() {
+    let mut h = harness("pages-ladder.pdf");
+    h.state_mut().tab_mut().secure_state.awaiting_password = Some(Awaiting::Unlock);
+    focus_box(&mut h);
+    type_text(&mut h, "hig");
+    assert_eq!(suggestion_nodes(&h), 0, "a list over a password");
+
+    let mut h = harness("pages-ladder.pdf");
+    h.state_mut().submit("rectangle");
+    focus_box(&mut h);
+    type_text(&mut h, "hig");
+    assert_eq!(suggestion_nodes(&h), 0, "a list while a tool waits for points");
+}
+
