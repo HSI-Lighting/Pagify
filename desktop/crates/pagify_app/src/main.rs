@@ -46,6 +46,7 @@ mod render_queue_tests;
 mod print_window;
 #[cfg(target_os = "windows")]
 mod print_windows;
+mod quick_tools;
 mod ribbon;
 mod view;
 mod workspace;
@@ -1232,6 +1233,11 @@ struct UiState {
     /// The `print` command asked for the print window; `handle_input` opens
     /// it as Ctrl+P does, since only it has the `eframe::Frame`.
     print_wanted: bool,
+    /// The ticked quick tools, as commands. The program's, not this
+    /// window's: lent through the hub's `Shared` (see `quick_tools`).
+    quick_tools: Vec<String>,
+    /// Whether the quick tools' "More Commands" window is up.
+    more_commands_open: bool,
 }
 
 /// The session log.
@@ -4740,7 +4746,7 @@ impl PagifyApp {
             }, },
             prefs_state: PrefsState { ortho: false, defaults: tools::Defaults::default(), draw_fill: false, snaps: SnapSet::defaults(), grid_pt: 0.0, exact_pages: if cfg!(test) { false } else { pagify_shell::preview::load_exact_pages() }, },
             render_state: RenderState { renders: None, facts: None, previews: None, async_render: !cfg!(test), render_stats: RenderStats::default(), },
-            ui_state: UiState { show_thumbs: true, organize_open: false, show_layers: false, command_open: false, errors_said: 0, print_wanted: false, },
+            ui_state: UiState { show_thumbs: true, organize_open: false, show_layers: false, command_open: false, errors_said: 0, print_wanted: false, quick_tools: if cfg!(test) { quick_tools::defaults() } else { quick_tools::path().map_or_else(quick_tools::defaults, |path| quick_tools::load_from(&path)) }, more_commands_open: false, },
             clipboard_state: ClipboardState { object_clipboard: None, paste_count: 0, page_clipboard: None, paste_ghost: None, clipboard_dir: if cfg!(test) {
                 static APPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 std::env::temp_dir().join(format!(

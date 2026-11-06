@@ -679,6 +679,18 @@ fn what_is_the_programs_is_one_copy_whichever_window_is_working() {
     assert!(hub.windows[1].app.library_state.recent.entries.is_empty() && hub.windows[1].app.clipboard_state.object_clipboard.is_none());
 }
 
+/// The quick tools are the program's: ticked in one window, there in every one.
+#[test]
+fn every_window_shows_the_same_quick_tools() {
+    let ctx = egui::Context::default();
+    let mut hub = hub_of(&["single-page.pdf", "two-column.pdf"]);
+    hub.tear_off(&ctx, 0, 1, pos2(900.0, 300.0), vec2(1240.0, 860.0));
+    hub.with_window(0, |a| a.set_quick_tool("selecttool"));
+    let first = hub.with_window(0, |a| a.ui_state.quick_tools.clone());
+    assert!(first.iter().any(|c| c == "selecttool"), "{first:?}");
+    assert_eq!(hub.with_window(1, |b| b.ui_state.quick_tools.clone()), first, "two windows, two quick-tool lists");
+}
+
 // -- documents handed over from outside, with several windows ------------------
 
 #[test]

@@ -730,6 +730,14 @@ fn every_ribbon_glyph_can_actually_be_drawn() {
                 }
             }
         }
+        let quick = crate::quick_tools::STANDARD.iter().map(|t| (t.glyph, t.label));
+        for (glyph, label) in quick.chain([(crate::quick_tools::MENU_GLYPH, "quick tools menu")]) {
+            for ch in glyph.chars() {
+                if !fonts.has_glyph(&font, ch) {
+                    missing.push(format!("quick tools/{label}: U+{:04X} {ch:?}", ch as u32));
+                }
+            }
+        }
     });
 
     missing.sort();

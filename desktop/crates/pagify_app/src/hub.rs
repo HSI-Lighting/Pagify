@@ -330,6 +330,7 @@ pub(crate) struct Shared {
     object_clipboard: Option<ObjectClipboard>,
     paste_count: u32,
     page_clipboard: Option<PageClipboard>,
+    quick_tools: Vec<String>,
 }
 
 impl PagifyApp {
@@ -344,6 +345,7 @@ impl PagifyApp {
         std::mem::swap(&mut self.clipboard_state.object_clipboard, &mut shared.object_clipboard);
         std::mem::swap(&mut self.clipboard_state.paste_count, &mut shared.paste_count);
         std::mem::swap(&mut self.clipboard_state.page_clipboard, &mut shared.page_clipboard);
+        std::mem::swap(&mut self.ui_state.quick_tools, &mut shared.quick_tools);
     }
 
     /// This window's command box. The first window keeps the id it always had.
