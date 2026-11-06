@@ -136,6 +136,8 @@ pub enum Effect {
     ArmDrawCloud,
     /// Toggle whether new rectangles and circles are drawn filled.
     ToggleFill,
+    /// Toggle Ortho: new points held level or plumb with the one before.
+    ToggleOrtho,
     /// Arm the redaction tool.
     ArmRedact,
     /// Lock the text selection, or say to make one first.
@@ -339,6 +341,7 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::DrawArrow => vec![Effect::ArmDrawArrow],
         Verb::DrawCloud => vec![Effect::ArmDrawCloud],
         Verb::ToggleFill => vec![Effect::ToggleFill],
+        Verb::ToggleOrtho => vec![Effect::ToggleOrtho],
         Verb::Redact => vec![Effect::ArmRedact],
         Verb::Lock => vec![Effect::LockWords],
         Verb::Secure(options) => vec![Effect::RunSecure(*options)],
@@ -573,6 +576,7 @@ mod tests {
             (Verb::DrawArrow, vec![Effect::ArmDrawArrow]),
             (Verb::DrawCloud, vec![Effect::ArmDrawCloud]),
             (Verb::ToggleFill, vec![Effect::ToggleFill]),
+            (Verb::ToggleOrtho, vec![Effect::ToggleOrtho]),
             (Verb::Redact, vec![Effect::ArmRedact]),
             (Verb::Lock, vec![Effect::LockWords]),
             (Verb::SmartRedact { redact: true }, vec![Effect::RunSmartRedact { redact: true }]),

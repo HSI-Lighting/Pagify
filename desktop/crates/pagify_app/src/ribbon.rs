@@ -136,6 +136,9 @@ impl Tab {
                 ("\u{E3F4}", "Actual Size", Command::Verb("zoom actual")),
                 ("\u{E5FA}", "Extract Text", Command::Verb("extracttext")),
                 ("\u{E41A}", "Rotate View", Command::Verb("rotate")),
+                // A standing choice, lit while on, like Draw's Fill. The set
+                // square Measure also wears: the subset has no ortho glyph.
+                ("\u{EA49}", "Ortho", Command::Verb("ortho")),
                 ("\u{E262}", "Edit Text", Command::Tool(ToolId::EditText, "edittext")),
                 ("\u{E162}", "Edit Object", Command::Verb("editobject")),
                 ("\u{E53B}", "Layers", Command::Verb("layers")),

@@ -260,6 +260,30 @@ mod tools_chain {
         assert!(infos(&app).iter().any(|s| s.contains("fill: off")), "{:?}", infos(&app));
     }
 
+    /// Ortho is a command, so the Home tab's button and the box are one
+    /// switch, and it says which way it was left, as `fill` does.
+    #[test]
+    fn the_ortho_command_toggles_and_says_so() {
+        let mut app = app();
+        app.submit("ortho");
+        assert!(app.prefs_state.ortho);
+        assert!(infos(&app).iter().any(|s| s.contains("ortho: on")), "{:?}", infos(&app));
+
+        app.submit("ortho");
+        assert!(!app.prefs_state.ortho);
+        assert!(infos(&app).iter().any(|s| s.contains("ortho: off")), "{:?}", infos(&app));
+    }
+
+    /// **Asked for: "move to home".** It was a checkbox in the title bar.
+    #[test]
+    fn ortho_is_a_button_on_the_home_tab() {
+        let home = crate::ribbon::Tab::Home.buttons();
+        assert!(
+            home.iter().any(|(_, label, command)| *label == "Ortho" && command.text() == "ortho"),
+            "no Ortho button on Home"
+        );
+    }
+
     /// A rectangle drawn with fill off — the default — is hollow: its
     /// outline, and nothing else.
     #[test]

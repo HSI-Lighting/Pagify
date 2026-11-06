@@ -328,6 +328,10 @@ pub enum Verb {
     /// state already is, and a caller who wants a specific state can just
     /// check the reply.
     ToggleFill,
+    /// AutoCAD's ORTHO: while drawing or measuring, each new point is held
+    /// level or plumb with the one before. A toggle, for the reason
+    /// [`Verb::ToggleFill`] gives — the Home tab's button runs it.
+    ToggleOrtho,
     /// Arm the Draw tab's Arrow tool — a line with an arrowhead pre-picked
     /// on its end. Not a kernel word: `cad_kernel`'s own parser has no
     /// concept of an arrow, only of a line, so this is Pagify's own rather
@@ -1065,10 +1069,11 @@ fn parse_locking_and_redaction(head: &str, rest: &[&str], tail: &str) -> Option<
     })
 }
 
-/// One domain of [`parse`]: the 13 commands below.
+/// One domain of [`parse`]: the 14 commands below.
 fn parse_fill_and_sign(head: &str, rest: &[&str], tail: &str) -> Option<Result<Verb, String>> {
     Some(match head {
         "fill" => Ok(Verb::ToggleFill),
+        "ortho" => Ok(Verb::ToggleOrtho),
         "arrow" => Ok(Verb::DrawArrow),
         "cloud" => Ok(Verb::DrawCloud),
         "signrectangle" => Ok(Verb::SignRectangle),

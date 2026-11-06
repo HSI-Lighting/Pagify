@@ -658,6 +658,12 @@ struct SelectionState {
     /// rather than either of those two paths.
     markup_grab: Option<Grab>,
     last_snap: Option<tools::Snapped>,
+    /// Where the pointer aims on its page once snap, Ortho and the grid have
+    /// had their say: the point a click places, and where the line under the
+    /// mouse ends. One answer for both — worked out twice, the second time
+    /// from the raw pointer, the preview ignored Ortho and the line under the
+    /// mouse followed the hand while the click was held level.
+    aim: Option<(usize, AppPoint)>,
     /// Where the last right-click landed, kept for the menu built after it.
     right_clicked_at: Option<(usize, AppPoint)>,
     /// What the right-click menu's Join/Match-font/Split actions found,
@@ -1000,7 +1006,7 @@ impl DocTab {
             secure_state: SecureState { asking_to_secure: None, secure_in_place_confirmed: false, asking_to_redact: None, awaiting_password: None, held_passcode: None, password_typed: zeroize::Zeroizing::new(String::new()), password_field_focused: false, password_problem: None, password_plus: false, },
             tool_state: ToolState { object_tool: None, hand_shown_before_any_tool_is_picked: false },
             undo_state: UndoState { prefer_layer_undo: false, last_layer_edits: 0, last_doc_generation: 0 },
-            selection: SelectionState { selected: None, group: Vec::new(), grab: None, marquee: None, rotate_snap: false, group_grab: None, text_selection: None, text_drag: None, drag_from: None, markup_grab: None, last_snap: None, right_clicked_at: None, right_click_text_actions: None, opacity_draft: None, selected_image: None, picked_layer: None, signature_selected: None, signature_grab: None, placed_image_selected: None, placed_image_grab: None, nudge_at: None, },
+            selection: SelectionState { selected: None, group: Vec::new(), grab: None, marquee: None, rotate_snap: false, group_grab: None, text_selection: None, text_drag: None, drag_from: None, markup_grab: None, last_snap: None, aim: None, right_clicked_at: None, right_click_text_actions: None, opacity_draft: None, selected_image: None, picked_layer: None, signature_selected: None, signature_grab: None, placed_image_selected: None, placed_image_grab: None, nudge_at: None, },
             ribbon: Tab::Home,
             closing: None,
             reading: None,
@@ -3153,6 +3159,7 @@ impl PagifyApp {
                     command.lit_by(armed)
                         || in_hand == Some(c)
                         || (c == "fill" && self.prefs_state.draw_fill)
+                        || (c == "ortho" && self.prefs_state.ortho)
                         || (c == "appearance" && theme::mode() == theme::Mode::Light)
                         || (c == "hand" && show_hand_by_default)
                         || match self.tab().pointer {
@@ -3223,6 +3230,14 @@ impl PagifyApp {
                             } else {
                                 "Fill: off — the next rectangle or circle is drawn hollow. \
                                  Click to draw it filled instead."
+                            })
+                        } else if command.text() == "ortho" {
+                            response.on_hover_text(if self.prefs_state.ortho {
+                                "Ortho: on — lines and measurements go only across or up and down. \
+                                 Click to draw freely."
+                            } else {
+                                "Ortho: off — click to keep lines and measurements \
+                                 level or plumb, as AutoCAD's ORTHO does."
                             })
                         } else if command.text() == "appearance" {
                             response.on_hover_text(if theme::mode() == theme::Mode::Light {
@@ -3812,7 +3827,6 @@ impl PagifyApp {
                         )
                         .on_hover_text("The build of Pagify you are running.");
                         if self.tab_mut().doc.is_some() {
-                            ui.checkbox(&mut self.prefs_state.ortho, "Ortho");
                             ui.checkbox(&mut self.ui_state.show_thumbs, "Pages");
                             let exact = ui.checkbox(&mut self.prefs_state.exact_pages, "Exact").on_hover_text(
                                 "Draw pages with PDFium only — exactly what prints — instead of the faster hayro where it draws them the same.",

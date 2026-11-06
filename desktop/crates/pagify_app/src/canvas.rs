@@ -1512,10 +1512,13 @@ impl crate::PagifyApp {
             return;
         }
         let Some(cursor) = hover else { return };
+        // Where `interact` aimed, snapped, held by Ortho and on the grid:
+        // the point a click would place. Only the raw pointer when this
+        // frame's `interact` left before working that out.
         let at = tab
-            .selection.last_snap
-            .as_ref()
-            .map(|snapped| snapped.at)
+            .selection.aim
+            .filter(|(on, _)| *on == page)
+            .map(|(_, at)| at)
             .unwrap_or_else(|| view.to_page(cursor));
         let kind = armed.kind.clone();
         let points = armed.points.clone();
@@ -1740,6 +1743,9 @@ impl crate::PagifyApp {
         command_id: egui::Id,
     ) {
         let response = ui.interact(rect, egui::Id::new(("page", page)), egui::Sense::click_and_drag());
+        // Set again below, once snap, Ortho and the grid have had their say.
+        // Every way out before that leaves the preview the raw pointer.
+        self.tab_mut().selection.aim = None;
 
         // The middle button pans whatever tool is held. That is the CAD
         // convention and it costs nothing to honour: it is a button no other
@@ -1873,8 +1879,12 @@ impl crate::PagifyApp {
                 self.tab_mut().selection.last_snap = Some(snapped);
             }
         }
+        // Not a rectangle's second click: that is the opposite corner, and
+        // held level with the first it drew a rectangle with no height.
+        // AutoCAD's rectangle ignores ortho there too.
+        let rectangle = self.tab().tool.as_ref().is_some_and(|p| matches!(p.kind, Tool::Draw(crate::tool::DrawKind::Rectangle)));
         if snapping && self.tab_mut().selection.last_snap.is_none() {
-            if self.prefs_state.ortho {
+            if self.prefs_state.ortho && !rectangle {
                 if let Some(anchor) = self.tab_mut().tool.as_ref().and_then(|p| p.points.last().copied()) {
                     at = tools::orthogonal(anchor, at);
                 }
@@ -1883,6 +1893,7 @@ impl crate::PagifyApp {
                 at = tools::to_grid(at, self.prefs_state.grid_pt);
             }
         }
+        self.tab_mut().selection.aim = Some((page, at));
 
         if let Some(snapped) = &self.tab_mut().selection.last_snap {
             overlay::draw_snap(ui.painter(), view.to_screen(snapped.at), snapped.kind, theme::snap());

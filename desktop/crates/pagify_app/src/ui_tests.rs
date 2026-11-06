@@ -294,8 +294,8 @@ fn the_title_bar_shows_the_build_number_at_the_far_right() {
 
     let h = harness("two-column.pdf");
     let version = find(&h, &label);
-    let ortho = find(&h, "Ortho");
-    assert!(ortho.right() <= version.left(), "the checkboxes are not left of it: {ortho:?} {version:?}");
+    let pages = find(&h, "Pages");
+    assert!(pages.right() <= version.left(), "the checkboxes are not left of it: {pages:?} {version:?}");
     assert!(version.right() > 1400.0 - 40.0, "the build number is not at the far right: {version:?}");
 }
 
@@ -335,13 +335,13 @@ fn the_title_bar_reads_left_to_right_and_sits_on_one_line() {
     // The newest tab is the leftmost: text-lines.pdf was opened second.
     let first = title_bar("text-lines.pdf");
     let second = title_bar("two-column.pdf");
-    let ortho = title_bar("Ortho");
+    let pages = title_bar("Pages");
 
     // Left to right, in the order they were written.
     assert!(logo.right() <= name.left(), "the name is not after the logo: {logo:?} {name:?}");
     assert!(name.right() <= first.left(), "the first tab is not after the name: {name:?} {first:?}");
     assert!(first.right() <= second.left(), "the tabs are out of order: {first:?} {second:?}");
-    assert!(second.right() <= ortho.left(), "the checkboxes are not after the tabs: {second:?} {ortho:?}");
+    assert!(second.right() <= pages.left(), "the checkboxes are not after the tabs: {second:?} {pages:?}");
 
     // **Left-aligned**: the strip starts where the name stops, rather than
     // being pushed against the checkboxes at the far side.
@@ -354,8 +354,8 @@ fn the_title_bar_reads_left_to_right_and_sits_on_one_line() {
     // right edge, short only of the build number that sits beyond them.
     let version = title_bar(&format!("v{}", pagify_shell::VERSION));
     assert!(
-        version.right() > 1400.0 - 40.0 && version.left() - ortho.right() < 20.0,
-        "the checkboxes are no longer at the right edge: {ortho:?} (build number {version:?})"
+        version.right() > 1400.0 - 40.0 && version.left() - pages.right() < 20.0,
+        "the checkboxes are no longer at the right edge: {pages:?} (build number {version:?})"
     );
 
     // One line. A pixel and a half of slack for rounding to whole pixels.
@@ -364,7 +364,7 @@ fn the_title_bar_reads_left_to_right_and_sits_on_one_line() {
         ("name", name.center().y),
         ("first tab", first.center().y),
         ("second tab", second.center().y),
-        ("checkbox", ortho.center().y),
+        ("checkbox", pages.center().y),
     ];
     let (lo, hi) = centres
         .iter()
@@ -4171,6 +4171,66 @@ fn a_drawing_tool_still_snaps_to_what_is_there() {
         h.state().tab().selection.last_snap.is_some(),
         "the line tool did not snap to the end of the line beside it"
     );
+}
+
+/// The first point of a `tool` at (40, 60), with Ortho on. Drawn with clicks
+/// for the reason `a_drawing_tool_still_snaps_to_what_is_there` gives.
+fn ortho_from_a_point(tool: &str) -> (Harness<'static, PagifyApp>, PageView) {
+    let mut h = harness("single-page.pdf");
+    h.state_mut().prefs_state.ortho = true;
+    let view = h.state().tab().view_state.last_view.expect("page never drawn");
+    h.state_mut().submit(tool);
+    h.run_steps(1);
+    click(&mut h, view.to_screen(AppPoint { x: 40.0, y: 60.0 }));
+    (h, view)
+}
+
+/// **Reported from use: "i ticked ortho and drew line. it didnt work like in
+/// autocad."** The point a click placed was held level, but the line under
+/// the mouse was worked out again from the raw pointer, so it followed the
+/// hand diagonally, and the line was cancelled before its second click.
+#[test]
+fn with_ortho_the_line_under_the_mouse_stays_level() {
+    let (mut h, view) = ortho_from_a_point("line");
+    // Mostly across, a little down: Ortho makes that level.
+    h.input_mut().events.push(egui::Event::PointerMoved(view.to_screen(AppPoint { x: 150.0, y: 80.0 })));
+    h.run_steps(2);
+
+    // The first point as placed, through the screen: 60 to within a rounding.
+    let from = h.state().tab().tool.as_ref().expect("the line was put down").points[0];
+    let (page, aim) = h.state().tab().selection.aim.expect("nothing under the mouse");
+    assert_eq!(page, 0);
+    assert!((aim.y - from.y).abs() < 1e-6, "the line under the mouse ends at {aim:?}, not level with {from:?}");
+}
+
+/// And the line it places is the one it showed.
+#[test]
+fn with_ortho_a_line_is_placed_level() {
+    let (mut h, view) = ortho_from_a_point("line");
+    click(&mut h, view.to_screen(AppPoint { x: 150.0, y: 80.0 }));
+    h.run_steps(2);
+
+    let line = match &h.state().tab().markup.existing(0).expect("no line drawn").objects()[0].geom {
+        cad_kernel::Geom::Line(l) => *l,
+        other => panic!("{other:?}"),
+    };
+    assert!((line.a.y - line.b.y).abs() < 1e-6, "not level: {line:?}");
+}
+
+/// A rectangle's second click is its opposite corner, not the next point of
+/// a path: held level with the first, it drew a rectangle with no height.
+/// AutoCAD's rectangle ignores ortho for that corner too.
+#[test]
+fn ortho_leaves_a_rectangle_its_height() {
+    let (mut h, view) = ortho_from_a_point("rectangle");
+    click(&mut h, view.to_screen(AppPoint { x: 150.0, y: 120.0 }));
+    h.run_steps(2);
+
+    let corners = match &h.state().tab().markup.existing(0).expect("no rectangle drawn").objects()[0].geom {
+        cad_kernel::Geom::Polyline(p) => p.vertices.iter().map(|v| v.pos).collect::<Vec<_>>(),
+        other => panic!("{other:?}"),
+    };
+    assert!((corners[0].y - corners[2].y).abs() > 50.0, "the rectangle was flattened: {corners:?}");
 }
 
 /// **The white-text bug, from the outside.**

@@ -291,6 +291,14 @@ impl crate::PagifyApp {
                     "fill: off — the next rectangle or circle is drawn hollow."
                 });
             }
+            Effect::ToggleOrtho => {
+                self.prefs_state.ortho = !self.prefs_state.ortho;
+                self.say_info(if self.prefs_state.ortho {
+                    "ortho: on — each new point is held level or plumb with the one before."
+                } else {
+                    "ortho: off — points go where the pointer is."
+                });
+            }
             Effect::ArmRedact => {
                 if self.tab_mut().doc.is_none() {
                     self.say_error("nothing open.");
