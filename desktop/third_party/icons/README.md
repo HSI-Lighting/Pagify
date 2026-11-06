@@ -1,7 +1,7 @@
 # pagify-icons.ttf
 
 **Material Symbols Outlined**, Apache 2.0 (see `LICENSE`), instanced to one
-weight and subsetted to the **187 glyphs the ribbon actually draws** — 10.6 MB
+weight and subsetted to **the glyphs the app actually draws** — 10.6 MB
 down to 29 kB. (One more, ⌘, is a standard Unicode symbol outside Material
 Symbols entirely; it reaches the ribbon through egui's own fallback font.)
 
@@ -40,26 +40,14 @@ awk '$1=="lock_open"' MaterialSymbols.codepoints   # -> e898
 # 3. fonttools in a venv.
 python3 -m venv /tmp/fontenv && /tmp/fontenv/bin/pip install fonttools
 
-# 4. Pin the axes to one static instance. A variable font carries every
-#    intermediate design and the app draws exactly one of them.
-/tmp/fontenv/bin/fonttools varLib.instancer -o /tmp/MaterialSymbols-instance.ttf \
-  /tmp/MaterialSymbols.ttf wght=400 opsz=24 FILL=0 GRAD=0
-
-# 5. The codepoints to keep are exactly the ones `main.rs` references — pulled
-#    from source rather than hand-copied, so the subset can never drift from
-#    the ribbon it is for.
-python3 -c '
-import re
-text = open("../../crates/pagify_app/src/main.rs", encoding="utf-8").read()
-cps = sorted(set(int(m, 16) for m in re.findall(r"\\\\u\{([0-9A-Fa-f]+)\}", text)))
-print(",".join(f"U+{c:04X}" for c in cps))
-' > /tmp/ribbon_codepoints.txt
-
-/tmp/fontenv/bin/fonttools subset /tmp/MaterialSymbols-instance.ttf \
-  --unicodes="$(cat /tmp/ribbon_codepoints.txt)" \
-  --output-file=pagify-icons.ttf \
-  --no-hinting --desubroutinize --name-IDs='' \
-  --notdef-glyph --notdef-outline
+# 4. recut.py, run from desktop/: pins the axes to one static instance
+#    (wght=400 opsz=24 FILL=0 GRAD=0 — a variable font carries every
+#    intermediate design and the app draws exactly one of them), keeps the
+#    codepoints `crates/pagify_app/src/*.rs` references that the table lists —
+#    pulled from source rather than hand-copied, so the subset can never drift
+#    from the buttons it is for — and subsets. It prints the new sha256 for
+#    third_party/CHECKSUMS.sha256.
+/tmp/fontenv/bin/python third_party/icons/recut.py /tmp/MaterialSymbols.ttf
 ```
 
 `MaterialSymbols.codepoints` is kept because it is the only thing that maps an
@@ -70,7 +58,7 @@ subset) ended up sitting one row above a button that guessed `e897` for
 Symbol, not caught by anything until `every_ribbon_glyph_can_actually_be_drawn`
 failed. Always look the name up.
 
-Subsetting by codepoints scraped from `main.rs`, rather than from a
+Subsetting by codepoints scraped from the source, rather than from a
 hand-maintained list of names, means the two structures cannot drift apart:
 the font can never be missing something the ribbon draws, and can never be
 carrying a glyph nothing draws any more.
