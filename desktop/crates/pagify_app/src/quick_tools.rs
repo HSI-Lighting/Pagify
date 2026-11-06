@@ -90,6 +90,22 @@ pub(crate) fn shown(chosen: &[String]) -> Vec<(&'static str, &'static str, &'sta
     out
 }
 
+/// One quick tool: a 28 px icon button named `label` for the screen reader
+/// and on hover, greyed when `!enabled`. An empty button for the frame and
+/// the hover state, with the glyph drawn over it, as `ribbon::history_toggle`.
+pub(crate) fn quick_tool_button(ui: &mut egui::Ui, glyph: &str, label: &str, enabled: bool) -> egui::Response {
+    let response = ui.add_enabled(
+        enabled,
+        egui::Button::new("").frame_when_inactive(false).min_size(egui::vec2(28.0, 28.0)),
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    if ui.is_rect_visible(response.rect) {
+        let colour = if enabled { ui.style().interact(&response).fg_stroke.color } else { crate::theme::ink_faint() };
+        ui.painter().text(response.rect.center(), egui::Align2::CENTER_CENTER, glyph, crate::icon_font(18.0), colour);
+    }
+    response.on_hover_text(label).on_disabled_hover_text(label)
+}
+
 impl crate::PagifyApp {
     /// Tick or untick a quick tool, and keep the choice.
     pub(crate) fn set_quick_tool(&mut self, command: &str) {

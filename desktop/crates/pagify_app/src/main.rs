@@ -3773,7 +3773,7 @@ impl PagifyApp {
     /// The title bar and its document tabs, including the deferred switch,
     /// close and strip-publishing that have to happen after the panel's own
     /// closure has ended.
-    fn draw_title_bar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+    fn draw_title_bar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) -> Option<String> {
         // -- title bar --------------------------------------------------------
         // Document tabs share the titlebar's own row, right beside the logo
         // — the compact mockup's own layout (`pagify_pdf_compact_dark_theme/
@@ -3786,13 +3786,17 @@ impl PagifyApp {
         let mut tab_rects: Vec<egui::Rect> = Vec::new();
         // How many tabs the strip had room for this frame.
         let mut visible_tabs = usize::MAX;
+        // A quick tool clicked, a tick in its menu, More Commands asked for.
+        let mut quick: Option<String> = None;
+        let mut tick: Option<&'static str> = None;
+        let mut more_commands = false;
         let title_bar = egui::Panel::top("titlebar")
             .frame(egui::Frame::new().fill(theme::chrome()).inner_margin(egui::Margin::symmetric(16, 10)))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     // The row is as tall as a document tab from the start, so
-                    // the logo, the name and the checkboxes — placed before
-                    // any tab — are centred on the line the tabs will be on.
+                    // the logo and the quick tools — placed before any
+                    // tab — are centred on the line the tabs will be on.
                     ui.set_min_height(doc_tab_height(ui));
                     // Shrunk from 32/24pt toward the mockup's own compact
                     // mark — a titlebar logo does not need to compete with
@@ -3826,11 +3830,35 @@ impl PagifyApp {
                         }
                     }
                     ui.add_space(5.0);
-                    ui.label(
-                        egui::RichText::new("Pagify")
-                            .color(theme::ink())
-                            .font(egui::FontId::proportional(15.0)),
-                    );
+                    // **Quick tools, as Foxit has them after its mark** —
+                    // asked for, with its "Customize Quick Access Toolbar"
+                    // menu. The word "Pagify" that sat here gave its room to
+                    // them and the tabs; the window's own title still says it.
+                    let has_doc = self.tab().doc.is_some();
+                    for (glyph, label, command) in quick_tools::shown(&self.ui_state.quick_tools) {
+                        let enabled = has_doc || matches!(command, "open" | "blankdoc");
+                        if quick_tools::quick_tool_button(ui, glyph, label, enabled).clicked() {
+                            quick = Some(command.to_owned());
+                        }
+                    }
+                    let menu =
+                        quick_tools::quick_tool_button(ui, quick_tools::MENU_GLYPH, "Customize Quick Access Toolbar", true);
+                    egui::Popup::menu(&menu)
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                        .show(|ui| {
+                            ui.label(egui::RichText::new("Customize Quick Access Toolbar").strong());
+                            for t in &quick_tools::STANDARD {
+                                let mut on = self.ui_state.quick_tools.iter().any(|c| c == t.command);
+                                if ui.checkbox(&mut on, t.label).changed() {
+                                    tick = Some(t.command);
+                                }
+                            }
+                            ui.separator();
+                            if ui.button("More Commands…").clicked() {
+                                more_commands = true;
+                                ui.close();
+                            }
+                        });
                     ui.add_space(8.0);
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -3937,6 +3965,54 @@ impl PagifyApp {
             self.close_tab(i);
         }
         self.bring_active_tab_into_the_strip(visible_tabs);
+        if let Some(command) = tick {
+            self.set_quick_tool(command);
+        }
+        if more_commands {
+            self.ui_state.more_commands_open = true;
+        }
+        quick
+    }
+
+    /// The quick tools' **More Commands…**: every ribbon button under its
+    /// tab's name, ticked while it is a quick tool. Hand and Select — every
+    /// tab's `leading()` — are left out: they are in the nine already.
+    fn draw_more_commands(&mut self, ctx: &egui::Context) {
+        if !self.ui_state.more_commands_open {
+            return;
+        }
+        let mut open = true;
+        let mut close = false;
+        let mut tick: Option<&'static str> = None;
+        egui::Window::new("More Commands")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(360.0)
+            .show(ctx, |ui| {
+                ui.set_width(360.0);
+                egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                    for tab in Tab::ALL {
+                        ui.label(egui::RichText::new(tab.label()).strong());
+                        for (_, label, command) in tab.buttons() {
+                            let command = command.text().trim();
+                            let mut on = self.ui_state.quick_tools.iter().any(|c| c == command);
+                            if ui.checkbox(&mut on, *label).changed() {
+                                tick = Some(command);
+                            }
+                        }
+                    }
+                });
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+            });
+        if let Some(command) = tick {
+            self.set_quick_tool(command);
+        }
+        if close || !open {
+            self.ui_state.more_commands_open = false;
+        }
     }
 
 
@@ -16165,8 +16241,9 @@ impl eframe::App for PagifyApp {
         let mut submitted = None;
 
         self.open_dropped_files(&ctx);
-        self.draw_title_bar(&ctx, ui);
-        let ribbon_command = self.draw_ribbon(ui);
+        let quick = self.draw_title_bar(&ctx, ui);
+        self.draw_more_commands(&ctx);
+        let ribbon_command = self.draw_ribbon(ui).or(quick);
         self.draw_command_bar(ui, command_id, &mut submitted);
         self.draw_main_area(&ctx, ui, command_id, ribbon_command, &mut submitted);
     }

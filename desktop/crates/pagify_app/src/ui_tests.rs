@@ -299,6 +299,86 @@ fn the_title_bar_shows_the_build_number_at_the_far_right() {
     assert!(version.right() > 1400.0 - 40.0, "the build number is not at the far right: {version:?}");
 }
 
+/// The title bar's nodes labelled `label` — the ribbon below has some of the
+/// same names.
+fn in_title_bar<'h>(h: &'h Harness<'static, PagifyApp>, label: &'h str) -> Vec<egui_kittest::Node<'h>> {
+    use egui_kittest::kittest::Queryable;
+    h.query_all_by_label(label).filter(|n| n.rect().center().y < 70.0).collect()
+}
+
+fn the_one_in_title_bar<'h>(h: &'h Harness<'static, PagifyApp>, label: &'h str) -> egui_kittest::Node<'h> {
+    let mut found = in_title_bar(h, label);
+    assert_eq!(found.len(), 1, "expected one {label:?} in the title bar");
+    found.remove(0)
+}
+
+/// **Asked for: Foxit's quick tools.** After the mark, in Foxit's order less
+/// Email, and before the documents; the word "Pagify" gave its room to them.
+#[test]
+fn the_quick_tools_are_the_defaults_after_the_logo() {
+    let h = harness("two-column.pdf");
+    let mut left = the_one_in_title_bar(&h, "Pagify logo").rect().right();
+    for label in ["Open", "Save", "Print", "Blank", "Undo", "Redo", "Hand"] {
+        let rect = the_one_in_title_bar(&h, label).rect();
+        assert!(rect.left() >= left, "{label} is not after what comes before it: {rect:?}");
+        left = rect.right();
+    }
+    let tab = the_one_in_title_bar(&h, "two-column.pdf").rect();
+    assert!(left <= tab.left(), "the quick tools are not before the tabs: {tab:?}");
+    assert!(in_title_bar(&h, "Pagify").is_empty(), "the word Pagify is still beside the logo");
+}
+
+#[test]
+fn a_quick_tool_runs_its_command() {
+    let mut h = harness("two-column.pdf");
+    h.state_mut().submit("l 300,300 400,300");
+    h.run_steps(2);
+    assert_eq!(h.state().tab().markup.existing(0).map(|l| l.len()).unwrap_or(0), 1, "the line was not drawn");
+    the_one_in_title_bar(&h, "Undo").click();
+    h.run_steps(2);
+    assert_eq!(h.state().tab().markup.existing(0).map(|l| l.len()).unwrap_or(0), 0, "Undo did not take the line away");
+}
+
+#[test]
+fn quick_tools_need_a_document_except_open_and_blank() {
+    use egui_kittest::kittest::NodeT;
+    let h = harness_from(PagifyApp::new(None));
+    assert!(the_one_in_title_bar(&h, "Save").accesskit_node().is_disabled(), "Save works with nothing open");
+    assert!(!the_one_in_title_bar(&h, "Open").accesskit_node().is_disabled(), "Open is greyed");
+    assert!(!the_one_in_title_bar(&h, "Blank").accesskit_node().is_disabled(), "Blank is greyed");
+}
+
+#[test]
+fn unticking_undo_in_the_menu_takes_it_off_the_bar() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness("two-column.pdf");
+    the_one_in_title_bar(&h, "Customize Quick Access Toolbar").click();
+    h.run_steps(2);
+    h.get_by_role_and_label(egui::accesskit::Role::CheckBox, "Undo").click();
+    h.run_steps(2);
+    assert!(in_title_bar(&h, "Undo").is_empty(), "Undo is still on the bar");
+    assert!(!h.state().ui_state.quick_tools.iter().any(|c| c == "undo"));
+}
+
+/// More Commands: any ribbon button can join the quick tools, after the nine.
+#[test]
+fn more_commands_adds_a_ribbon_button() {
+    use egui_kittest::kittest::{by, Queryable};
+    let mut h = harness("two-column.pdf");
+    h.state_mut().ui_state.more_commands_open = true;
+    h.run_steps(2);
+    // Under Home — the first tab with a Highlight. Far down a scrolled list,
+    // so asked by accessibility rather than at a spot on the screen.
+    h.query_all(by().role(egui::accesskit::Role::CheckBox).label("Highlight"))
+        .next()
+        .expect("no Highlight in More Commands")
+        .click_accesskit();
+    h.run_steps(2);
+    let hand = the_one_in_title_bar(&h, "Hand").rect();
+    let highlight = the_one_in_title_bar(&h, "Highlight").rect();
+    assert!(hand.right() <= highlight.left(), "Highlight is not after Hand: {hand:?} {highlight:?}");
+}
+
 /// Pages and Exact moved to the View tab: nothing by those names is left
 /// in the title bar.
 #[test]
@@ -345,31 +425,34 @@ fn the_title_bar_reads_left_to_right_and_sits_on_one_line() {
         found[0]
     };
     let logo = title_bar("Pagify logo");
-    let name = title_bar("Pagify");
+    let open = title_bar("Open");
+    let menu = title_bar("Customize Quick Access Toolbar");
     // The newest tab is the leftmost: text-lines.pdf was opened second.
     let first = title_bar("text-lines.pdf");
     let second = title_bar("two-column.pdf");
     let version = title_bar(&format!("v{}", pagify_shell::VERSION));
+    assert!(h.query_all_by_label("Pagify").all(|n| n.rect().center().y >= 70.0), "the word Pagify is back");
 
     // Left to right, in the order they were written.
-    assert!(logo.right() <= name.left(), "the name is not after the logo: {logo:?} {name:?}");
-    assert!(name.right() <= first.left(), "the first tab is not after the name: {name:?} {first:?}");
+    assert!(logo.right() <= open.left(), "the quick tools are not after the logo: {logo:?} {open:?}");
+    assert!(open.right() <= menu.left(), "the quick tools' menu is not after them: {open:?} {menu:?}");
+    assert!(menu.right() <= first.left(), "the first tab is not after the quick tools: {menu:?} {first:?}");
     assert!(first.right() <= second.left(), "the tabs are out of order: {first:?} {second:?}");
     assert!(second.right() <= version.left(), "the build number is not after the tabs: {second:?} {version:?}");
 
-    // **Left-aligned**: the strip starts where the name stops, rather than
-    // being pushed against the build number at the far side.
+    // **Left-aligned**: the strip starts where the quick tools stop, rather
+    // than being pushed against the build number at the far side.
     assert!(
-        first.left() - name.right() < 40.0,
-        "the tabs start {}px after the name — they are not left-aligned",
-        first.left() - name.right()
+        first.left() - menu.right() < 40.0,
+        "the tabs start {}px after the quick tools — they are not left-aligned",
+        first.left() - menu.right()
     );
     assert!(version.right() > 1400.0 - 40.0, "the build number is not at the right edge: {version:?}");
 
     // One line. A pixel and a half of slack for rounding to whole pixels.
     let centres = [
         ("logo", logo.center().y),
-        ("name", name.center().y),
+        ("quick tool", open.center().y),
         ("first tab", first.center().y),
         ("second tab", second.center().y),
         ("build number", version.center().y),
