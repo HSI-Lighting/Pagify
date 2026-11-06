@@ -121,6 +121,7 @@ impl crate::PagifyApp {
             Effect::RotatePage(degrees) => self.rotate_view(degrees),
             Effect::ReportTextLayer => self.report_text_layer(true),
             Effect::Say(text) => self.say_info(text),
+            Effect::Print => self.ui_state.print_wanted = true,
             Effect::CheckUpdate => self.spawn_update_check(true),
             Effect::ToggleLayers => {
                 if self.tab_mut().doc.is_none() {

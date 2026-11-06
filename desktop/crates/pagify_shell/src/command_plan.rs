@@ -67,6 +67,8 @@ pub enum Effect {
     ReportTextLayer,
     /// Say a line in the info colour.
     Say(String),
+    /// Open the print window, as Ctrl+P does.
+    Print,
     /// Start an update check; the caller has already said it is checking.
     CheckUpdate,
     /// Toggle the floating Layers panel, with its explanation on open and
@@ -260,6 +262,7 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::Zoom(target) => vec![Effect::Zoom(target.clone())],
         Verb::RotatePage(degrees) => vec![Effect::RotatePage(*degrees)],
         Verb::TextLayer => vec![Effect::ReportTextLayer],
+        Verb::Print => vec![Effect::Print],
         Verb::Pdfium => vec![Effect::Say(crate::pdfium::describe())],
         Verb::Version => vec![Effect::Say(format!("Pagify {}", crate::VERSION))],
         // The message comes first so it is on the bar while the check runs.
@@ -441,6 +444,7 @@ mod tests {
             (Verb::Zoom(ZoomTarget::Fit), vec![Effect::Zoom(ZoomTarget::Fit)]),
             (Verb::RotatePage(90), vec![Effect::RotatePage(90)]),
             (Verb::TextLayer, vec![Effect::ReportTextLayer]),
+            (Verb::Print, vec![Effect::Print]),
             (Verb::Pdfium, vec![Effect::Say(crate::pdfium::describe())]),
             (Verb::Version, vec![Effect::Say(format!("Pagify {}", crate::VERSION))]),
             (

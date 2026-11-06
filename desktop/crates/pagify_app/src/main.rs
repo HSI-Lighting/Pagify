@@ -1229,6 +1229,9 @@ struct UiState {
     /// ask "did that gesture end in an error?" without every function it calls
     /// having to hand a result back (see the click-away block in `interact`).
     errors_said: u64,
+    /// The `print` command asked for the print window; `handle_input` opens
+    /// it as Ctrl+P does, since only it has the `eframe::Frame`.
+    print_wanted: bool,
 }
 
 /// The session log.
@@ -3613,7 +3616,7 @@ impl PagifyApp {
         if keys.save {
             self.act(Verb::Save);
         }
-        if keys.print {
+        if keys.print || std::mem::take(&mut self.ui_state.print_wanted) {
             #[cfg(target_os = "windows")]
             self.open_print_window(frame);
             #[cfg(not(target_os = "windows"))]
@@ -4737,7 +4740,7 @@ impl PagifyApp {
             }, },
             prefs_state: PrefsState { ortho: false, defaults: tools::Defaults::default(), draw_fill: false, snaps: SnapSet::defaults(), grid_pt: 0.0, exact_pages: if cfg!(test) { false } else { pagify_shell::preview::load_exact_pages() }, },
             render_state: RenderState { renders: None, facts: None, previews: None, async_render: !cfg!(test), render_stats: RenderStats::default(), },
-            ui_state: UiState { show_thumbs: true, organize_open: false, show_layers: false, command_open: false, errors_said: 0, },
+            ui_state: UiState { show_thumbs: true, organize_open: false, show_layers: false, command_open: false, errors_said: 0, print_wanted: false, },
             clipboard_state: ClipboardState { object_clipboard: None, paste_count: 0, page_clipboard: None, paste_ghost: None, clipboard_dir: if cfg!(test) {
                 static APPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 std::env::temp_dir().join(format!(

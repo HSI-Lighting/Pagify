@@ -531,6 +531,8 @@ pub enum Verb {
     Finish,
 
     Help(Option<String>),
+    /// Open the print window, as Ctrl+P does — for the quick tools.
+    Print,
     /// Report which PDFium this build loaded. A wrong one presents as "some
     /// pages render oddly", so it is worth being answerable from the box.
     Pdfium,
@@ -983,7 +985,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "pick", "textlayer", "whytext",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
-        "unsecure", "redact", "ortho", "pagesrail", "exact",
+        "unsecure", "redact", "ortho", "pagesrail", "exact", "print",
     ];
     tokens.extend(PLANNED.iter().map(|(v, _, _)| *v));
     tokens
@@ -1344,11 +1346,12 @@ fn parse_document_edits(head: &str, rest: &[&str], tail: &str) -> Option<Result<
     })
 }
 
-/// One domain of [`parse`]: the 17 commands below.
+/// One domain of [`parse`]: the 18 commands below.
 fn parse_file_and_view(head: &str, rest: &[&str], tail: &str) -> Option<Result<Verb, String>> {
     Some(match head {
         "selecttool" => Ok(Verb::Pointer(PointerMode::Select)),
         "hand" | "pan" => Ok(Verb::Pointer(PointerMode::Pan)),
+        "print" => Ok(Verb::Print),
         "open" => {
             if tail.is_empty() {
                 // No path is not an error: it is a request for the file picker,

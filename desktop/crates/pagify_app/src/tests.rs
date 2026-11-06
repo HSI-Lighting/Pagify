@@ -311,6 +311,15 @@ mod tools_chain {
         assert!(infos(&app).iter().any(|s| s.contains("exact: off")), "{:?}", infos(&app));
     }
 
+    /// Print was only Ctrl+P; the quick tools need it as a command, and the
+    /// command asks for what Ctrl+P opens.
+    #[test]
+    fn the_print_command_asks_for_the_print_window() {
+        let mut app = app();
+        app.submit("print");
+        assert!(app.ui_state.print_wanted, "errors: {:?}", errors(&app));
+    }
+
     /// **Asked for: Pages and Exact "to the View tab".** They were
     /// checkboxes in the title bar.
     #[test]
