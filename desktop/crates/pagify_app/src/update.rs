@@ -22,6 +22,13 @@
 //! [`look`] is the whole decision, with no window and no thread, so each answer is
 //! tested against real folders. The app owns running it (`spawn_update_check`) and
 //! showing it (`draw_update_report`).
+//!
+//! **And GitHub** (the owner's ask, 2026-11-06: "the app has to check where the latest
+//! release is, github or dropbox"). [`look_everywhere`] also reads Pagify's feed in the
+//! HSI release repo, as every HSI app does, and where GitHub has the newer build it is
+//! downloaded, checked against the HSI update key and unpacked before it is offered.
+//! Pagify itself still opens no connection: Windows' own `curl.exe` fetches the two
+//! files, and `tar.exe` unpacks the zip (`tools/no_sockets.sh`).
 
 use std::path::{Path, PathBuf};
 
@@ -47,6 +54,15 @@ pub(crate) enum UpdateOutcome {
     /// No folder holding a build exists on this PC: where it looked, and the Dropbox
     /// roots it searched inside (none, if this PC has no Dropbox).
     NoFolder { tried: Vec<PathBuf>, searched: Vec<PathBuf> },
+    /// GitHub has `version`, newer than this build and than any in Dropbox: downloaded,
+    /// its signature checked, and unpacked into `folder`, ready to install.
+    Downloaded { version: String, folder: PathBuf },
+    /// GitHub's newest is `version` — this build's or older — and no folder on this PC
+    /// holds a build.
+    Released { version: String },
+    /// GitHub has `version`, newer than this build, but it could not be downloaded or
+    /// its signature did not hold: `why`.
+    Unfetched { version: String, why: String },
 }
 
 impl UpdateOutcome {
@@ -68,6 +84,9 @@ impl UpdateOutcome {
             Self::NoFolder { tried, searched } => {
                 format!("current={current} no-folder tried=[{}] searched=[{}]", list(tried), list(searched))
             }
+            Self::Downloaded { version, folder } => format!("current={current} github={version} downloaded folder={}", folder.display()),
+            Self::Released { version } => format!("current={current} github={version} not-newer"),
+            Self::Unfetched { version, why } => format!("current={current} github={version} unfetched: {why}"),
         }
     }
 }
@@ -232,6 +251,220 @@ fn dropbox_roots(info: &Path) -> Vec<PathBuf> {
         .flat_map(|accounts| accounts.values())
         .filter_map(|account| account.get("path")?.as_str().map(PathBuf::from))
         .collect()
+}
+
+// ---- GitHub ----
+
+/// The newest build Pagify's feed names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Release {
+    pub version: String,
+    /// The zip, an asset of the release `pagify-v<version>`.
+    pub url: String,
+    /// Its signature, as the feed carries it.
+    pub signature: String,
+}
+
+/// Pagify's feed in the HSI release repo — the `<app>/latest.json` every HSI app updates
+/// from (that repo's README). Read from raw.githubusercontent.com, never GitHub's API:
+/// the API allows an address 60 calls an hour, and the office's was found spent
+/// (2026-11-06).
+#[cfg(all(windows, not(test)))]
+const FEED_URL: &str = "https://raw.githubusercontent.com/HSI-Lighting/release/main/pagify/latest.json";
+
+/// The public half of `hsi-updater.key`, the key the HSI apps' builds are signed with,
+/// as their `tauri.conf.json` carries it: base64 of minisign's public-key text. A build
+/// from GitHub is unpacked only if this key signed it.
+const UPDATE_KEY: &str = "";
+
+/// What Windows' curl is always told: HTTPS only, redirects included (a release asset
+/// is served from another host), and a network that blocks certificate revocation
+/// lists is not a failed check.
+#[cfg(windows)]
+const CURL: [&str; 9] =
+    ["--fail", "--silent", "--show-error", "--location", "--proto", "=https", "--proto-redir", "=https", "--ssl-revoke-best-effort"];
+
+/// Look in Dropbox ([`look`]) and on GitHub, and take whichever holds the newer build
+/// ([`choose`]). With it, a line for the session log saying what GitHub answered.
+pub(crate) fn look_everywhere(current: &str, places: &Places) -> (UpdateOutcome, String) {
+    let local = look(current, places);
+    let online = latest_release();
+    let github = match &online {
+        Ok(release) => format!("github-feed={}", release.version),
+        Err(why) => format!("github-feed-unread: {why}"),
+    };
+    (choose(current, local, online.ok(), fetch), github)
+}
+
+/// Dropbox's answer, or GitHub's where GitHub has the newer build. A build is fetched
+/// only when it is newer than this one and than Dropbox's: a tie goes to Dropbox, which
+/// is already on this PC. A GitHub build that cannot be fetched leaves a newer one in
+/// Dropbox to be offered, and is otherwise said.
+fn choose(
+    current: &str,
+    local: UpdateOutcome,
+    online: Option<Release>,
+    fetch: impl FnOnce(&Release) -> Result<PathBuf, String>,
+) -> UpdateOutcome {
+    use UpdateOutcome::*;
+    let Some(release) = online else { return local };
+    let in_dropbox = match &local {
+        Newer { version, .. } | Current { version, .. } => Some(version.as_str()),
+        _ => None,
+    };
+    let newest = crate::newer_version(current, &release.version)
+        && in_dropbox.is_none_or(|version| crate::newer_version(version, &release.version));
+    if newest {
+        return match fetch(&release) {
+            Ok(folder) => Downloaded { version: release.version, folder },
+            Err(_) if matches!(local, Newer { .. }) => local,
+            Err(why) => Unfetched { version: release.version, why },
+        };
+    }
+    match local {
+        Newer { .. } | Current { .. } => local,
+        _ => Released { version: release.version },
+    }
+}
+
+/// The release the feed names for Windows — `None` for a feed without one, or for
+/// what is not a feed at all.
+fn read_feed(text: &str) -> Option<Release> {
+    let feed: serde_json::Value = serde_json::from_str(text.trim_start_matches('\u{FEFF}')).ok()?;
+    let windows = feed.get("platforms")?.get("windows-x86_64")?;
+    let field = |value: &serde_json::Value, key: &str| value.get(key)?.as_str().map(str::to_string);
+    Some(Release { version: field(&feed, "version")?, url: field(windows, "url")?, signature: field(windows, "signature")? })
+}
+
+/// What the feed says now. No test reaches GitHub.
+fn latest_release() -> Result<Release, String> {
+    #[cfg(test)]
+    let text = String::from("no network in tests");
+    #[cfg(all(windows, not(test)))]
+    let text = {
+        let mut args: Vec<std::ffi::OsString> = CURL.iter().map(Into::into).collect();
+        args.extend(["--max-time", "20", "--max-filesize", "1000000", FEED_URL].map(Into::into));
+        String::from_utf8_lossy(&windows_tool("curl.exe", &args)?).into_owned()
+    };
+    #[cfg(all(not(windows), not(test)))]
+    let text = String::from("builds on GitHub are for Windows");
+    read_feed(&text).ok_or_else(|| format!("not a feed with a Windows build: {}", text.chars().take(80).collect::<String>()))
+}
+
+/// Fetch `release` into a folder of its own under the temp folder — once: a zip
+/// already there that holds is not fetched again — and unpack it.
+fn fetch(release: &Release) -> Result<PathBuf, String> {
+    let dir = std::env::temp_dir().join(format!("pagify-download-{}", release.version));
+    let zip = dir.join(zip_name(&release.version));
+    let have = std::fs::read(&zip).is_ok_and(|bytes| signed_by(UPDATE_KEY, &bytes, &release.signature, &zip_name(&release.version)).is_ok());
+    if !have {
+        download(&release.url, &dir, &zip)?;
+    }
+    unpack_signed(UPDATE_KEY, release, &zip, &dir)
+}
+
+#[cfg(windows)]
+fn download(url: &str, dir: &Path, zip: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut args: Vec<std::ffi::OsString> = CURL.iter().map(Into::into).collect();
+    args.extend(["--max-time", "900", "--max-filesize", "500000000", "--output"].map(Into::into));
+    args.extend([zip.as_os_str().to_owned(), url.into()]);
+    windows_tool("curl.exe", &args).map(drop)
+}
+
+#[cfg(not(windows))]
+fn download(_url: &str, _dir: &Path, _zip: &Path) -> Result<(), String> {
+    Err("builds on GitHub are for Windows".into())
+}
+
+/// Unpack `zip` into `dir` if `key` signed it as `release`'s zip. One that does not
+/// hold is deleted, never unpacked. The folder holding its `Pagify.exe`, for the
+/// update script to install from as it would from Dropbox.
+fn unpack_signed(key: &str, release: &Release, zip: &Path, dir: &Path) -> Result<PathBuf, String> {
+    let bytes = std::fs::read(zip).map_err(|e| format!("{}: {e}", zip.display()))?;
+    if let Err(why) = signed_by(key, &bytes, &release.signature, &zip_name(&release.version)) {
+        let _ = std::fs::remove_file(zip);
+        return Err(why);
+    }
+    unpack(zip, dir)?;
+    let build = dir.join("Pagify");
+    if build.join("Pagify.exe").is_file() {
+        Ok(build)
+    } else {
+        Err(format!("{} holds no Pagify\\Pagify.exe", zip.display()))
+    }
+}
+
+#[cfg(windows)]
+fn unpack(zip: &Path, dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    windows_tool("tar.exe", &["-xf".into(), zip.into(), "-C".into(), dir.into()]).map(drop)
+}
+
+#[cfg(not(windows))]
+fn unpack(_zip: &Path, _dir: &Path) -> Result<(), String> {
+    Err("builds on GitHub are for Windows".into())
+}
+
+/// Whether the holder of `key` signed `bytes` as the file `name`. `key` and
+/// `signature` are as Tauri writes them: base64 of minisign's own text. The name is
+/// in the signed comment, so an older build signed in its day cannot be passed off
+/// under a newer number — installed, and then offered again forever.
+fn signed_by(key: &str, bytes: &[u8], signature: &str, name: &str) -> Result<(), String> {
+    let text = |base64: &str| unbase64(base64).and_then(|bytes| String::from_utf8(bytes).ok());
+    let key = text(key)
+        .and_then(|key| minisign_verify::PublicKey::decode(&key).ok())
+        .ok_or("the update key built into Pagify is not a key")?;
+    let signature = text(signature)
+        .and_then(|signature| minisign_verify::Signature::decode(&signature).ok())
+        .ok_or("the feed's signature cannot be read")?;
+    key.verify(bytes, &signature, false).map_err(|_| "the download is not signed with the HSI update key")?;
+    if signature.trusted_comment().split('\t').any(|part| part == format!("file:{name}")) {
+        Ok(())
+    } else {
+        Err(format!("the download is signed as another file than {name}"))
+    }
+}
+
+/// Standard base64, padding and line breaks allowed — all a key and a signature need,
+/// which is not worth a crate.
+fn unbase64(text: &str) -> Option<Vec<u8>> {
+    const DIGITS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let (mut bytes, mut bits, mut held) = (Vec::new(), 0u32, 0u32);
+    for c in text.bytes().filter(|c| !c.is_ascii_whitespace() && *c != b'=') {
+        held = held << 6 | DIGITS.iter().position(|&d| d == c)? as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            bytes.push((held >> bits) as u8);
+        }
+    }
+    Some(bytes)
+}
+
+/// The zip's name, which its signature names too.
+fn zip_name(version: &str) -> String {
+    format!("pagify_{version}_windows.zip")
+}
+
+/// Run one of Windows' own tools — `curl.exe`, `tar.exe` — from System32, never
+/// whatever of that name is first on the PATH (Git's GNU tar cannot read a zip), and
+/// with no console window. What it printed, or why it failed.
+#[cfg(windows)]
+fn windows_tool(tool: &str, args: &[std::ffi::OsString]) -> Result<Vec<u8>, String> {
+    use std::os::windows::process::CommandExt;
+    let system = std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+    let out = std::process::Command::new(system.join("System32").join(tool))
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .output()
+        .map_err(|e| format!("{tool}: {e}"))?;
+    if out.status.success() {
+        Ok(out.stdout)
+    } else {
+        Err(format!("{tool}: {}", String::from_utf8_lossy(&out.stderr).trim()))
+    }
 }
 
 // ---- Remembering where a build was found ----
@@ -471,5 +704,226 @@ mod tests {
         assert_eq!(remembered(), Some(gone.clone()));
         std::fs::remove_dir_all(&gone).unwrap();
         assert_eq!(remembered(), None);
+    }
+
+    // ---- GitHub: the feed ----
+
+    #[test]
+    fn the_feed_names_the_windows_build() {
+        let feed = r#"{ "version": "0.1.118", "notes": "Pagify 0.1.118", "pub_date": "2026-11-06T09:00:00Z",
+            "platforms": { "windows-x86_64": { "signature": "c2ln",
+                "url": "https://github.com/HSI-Lighting/release/releases/download/pagify-v0.1.118/pagify_0.1.118_windows.zip" } } }"#;
+        assert_eq!(
+            read_feed(feed),
+            Some(Release {
+                version: "0.1.118".into(),
+                url: "https://github.com/HSI-Lighting/release/releases/download/pagify-v0.1.118/pagify_0.1.118_windows.zip".into(),
+                signature: "c2ln".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_feed_with_no_windows_build_or_no_feed_at_all_offers_nothing() {
+        assert_eq!(read_feed(r#"{"version":"0.1.118","platforms":{"android-aarch64":{"signature":"s","url":"u"}}}"#), None);
+        // What raw.githubusercontent.com answers for a feed not published yet.
+        assert_eq!(read_feed("404: Not Found"), None);
+    }
+
+    // ---- GitHub: the signature ----
+
+    fn b64(bytes: &[u8]) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    /// A key pair as `tauri signer generate` writes one: the public half as base64 of
+    /// minisign's own text.
+    fn test_key() -> (String, minisign::SecretKey) {
+        let minisign::KeyPair { pk, sk } = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+        (b64(pk.to_box().unwrap().to_string().as_bytes()), sk)
+    }
+
+    /// `bytes` signed as `tauri signer sign` signs the file `name`.
+    fn sign(sk: &minisign::SecretKey, bytes: &[u8], name: &str) -> String {
+        let comment = format!("timestamp:1792489463\tfile:{name}");
+        let signature = minisign::sign(None, sk, std::io::Cursor::new(bytes), Some(&comment), Some("signature from tauri secret key")).unwrap();
+        b64(signature.to_string().as_bytes())
+    }
+
+    #[test]
+    fn base64_reads_what_the_base64_crate_writes() {
+        for text in ["", "a", "ab", "abc", "untrusted comment: minisign public key\nRWQ+/x=="] {
+            assert_eq!(unbase64(&b64(text.as_bytes())), Some(text.as_bytes().to_vec()), "{text:?}");
+        }
+        assert_eq!(unbase64("not*base64"), None);
+    }
+
+    #[test]
+    fn a_build_signed_with_the_key_holds() {
+        let (key, sk) = test_key();
+        let zip = b"PK a build";
+        assert_eq!(signed_by(&key, zip, &sign(&sk, zip, "pagify_0.1.118_windows.zip"), "pagify_0.1.118_windows.zip"), Ok(()));
+    }
+
+    #[test]
+    fn a_changed_byte_or_another_key_does_not_hold() {
+        let (key, sk) = test_key();
+        let (other_key, _) = test_key();
+        let signature = sign(&sk, b"PK a build", "pagify_0.1.118_windows.zip");
+        assert!(signed_by(&key, b"PK a bui1d", &signature, "pagify_0.1.118_windows.zip").is_err());
+        assert!(signed_by(&other_key, b"PK a build", &signature, "pagify_0.1.118_windows.zip").is_err());
+    }
+
+    #[test]
+    fn a_build_signed_as_another_version_does_not_hold() {
+        // An older signed build put under a newer number would be installed, and then offered again forever.
+        let (key, sk) = test_key();
+        let signature = sign(&sk, b"PK old", "pagify_0.1.117_windows.zip");
+        assert!(signed_by(&key, b"PK old", &signature, "pagify_0.1.118_windows.zip").is_err());
+    }
+
+    #[test]
+    fn what_the_publishing_tool_signs_with_a_key_as_tauri_writes_one_holds() {
+        let minisign::KeyPair { pk, sk } = minisign::KeyPair::generate_encrypted_keypair(Some("a password".into())).unwrap();
+        // As `tauri signer generate` writes it: base64 of minisign's text, sealed with the password.
+        let key_file = b64(sk.to_box(None).unwrap().to_string().as_bytes());
+        let zip = scratch("signing").join("pagify_0.1.118_windows.zip");
+        std::fs::write(&zip, b"PK a build").unwrap();
+        let signature = crate::sign_update::sign(&key_file, "a password".into(), &zip).unwrap();
+        let key = b64(pk.to_box().unwrap().to_string().as_bytes());
+        assert_eq!(signed_by(&key, b"PK a build", &signature, "pagify_0.1.118_windows.zip"), Ok(()));
+        assert!(crate::sign_update::sign(&key_file, "not it".into(), &zip).is_err(), "signed with the wrong password");
+    }
+
+    /// By hand: a build another HSI app published, with the signature its feed carries,
+    /// holds against the key built in — Tauri's own signer and the real key, where the
+    /// tests above have only minisign and keys of their own.
+    ///
+    ///     PAGIFY_CHECK_FILE=<file, under its published name> PAGIFY_CHECK_SIGNATURE=<feed signature> \
+    ///         cargo test -p pagify_app --bins published_by_another -- --ignored
+    #[test]
+    #[ignore]
+    fn a_build_published_by_another_hsi_app_holds_against_the_key_built_in() {
+        let file = PathBuf::from(std::env::var_os("PAGIFY_CHECK_FILE").expect("PAGIFY_CHECK_FILE"));
+        let signature = std::env::var("PAGIFY_CHECK_SIGNATURE").expect("PAGIFY_CHECK_SIGNATURE");
+        let name = file.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(signed_by(UPDATE_KEY, &std::fs::read(&file).unwrap(), &signature, &name), Ok(()));
+    }
+
+    #[test]
+    fn the_key_built_in_is_a_public_key() {
+        let key = unbase64(UPDATE_KEY).and_then(|text| String::from_utf8(text).ok());
+        assert!(
+            key.is_some_and(|key| minisign_verify::PublicKey::decode(&key).is_ok()),
+            "UPDATE_KEY is not the public half of hsi-updater.key yet"
+        );
+    }
+
+    // ---- GitHub or Dropbox ----
+
+    fn release(version: &str) -> Release {
+        Release { version: version.into(), url: String::new(), signature: String::new() }
+    }
+
+    fn newer_in_dropbox(version: &str) -> UpdateOutcome {
+        UpdateOutcome::Newer { version: version.into(), folder: PathBuf::from(r"D:\Dropbox\YASEEN\pagify desktop") }
+    }
+
+    fn downloaded(release: &Release) -> Result<PathBuf, String> {
+        Ok(PathBuf::from(format!(r"T:\pagify-download-{}\Pagify", release.version)))
+    }
+
+    fn not_downloaded(_: &Release) -> Result<PathBuf, String> {
+        panic!("downloaded a build that is not the newest")
+    }
+
+    #[test]
+    fn a_github_build_newer_than_dropbox_is_downloaded_and_offered() {
+        assert_eq!(
+            choose("0.1.8", newer_in_dropbox("0.1.9"), Some(release("0.1.10")), downloaded),
+            UpdateOutcome::Downloaded { version: "0.1.10".into(), folder: PathBuf::from(r"T:\pagify-download-0.1.10\Pagify") }
+        );
+    }
+
+    #[test]
+    fn a_tie_or_an_older_github_build_leaves_dropbox_and_downloads_nothing() {
+        for github in ["0.1.9", "0.1.7"] {
+            assert_eq!(choose("0.1.8", newer_in_dropbox("0.1.9"), Some(release(github)), not_downloaded), newer_in_dropbox("0.1.9"));
+        }
+        let current = UpdateOutcome::Current { version: "0.1.8".into(), folder: PathBuf::from(r"D:\x") };
+        assert_eq!(choose("0.1.8", current.clone(), Some(release("0.1.8")), not_downloaded), current);
+    }
+
+    #[test]
+    fn with_no_build_on_this_pc_github_decides() {
+        let none = UpdateOutcome::NoFolder { tried: vec![], searched: vec![] };
+        assert!(matches!(choose("0.1.8", none.clone(), Some(release("0.1.9")), downloaded), UpdateOutcome::Downloaded { .. }));
+        assert_eq!(choose("0.1.8", none, Some(release("0.1.8")), not_downloaded), UpdateOutcome::Released { version: "0.1.8".into() });
+        let syncing = UpdateOutcome::Incomplete { folder: PathBuf::from(r"D:\x") };
+        assert_eq!(choose("0.1.8", syncing, Some(release("0.1.7")), not_downloaded), UpdateOutcome::Released { version: "0.1.7".into() });
+    }
+
+    #[test]
+    fn github_out_of_reach_leaves_the_dropbox_answer() {
+        let none = UpdateOutcome::NoFolder { tried: vec![PathBuf::from(r"D:\x")], searched: vec![] };
+        assert_eq!(choose("0.1.8", none.clone(), None, not_downloaded), none);
+        assert_eq!(choose("0.1.8", newer_in_dropbox("0.1.9"), None, not_downloaded), newer_in_dropbox("0.1.9"));
+    }
+
+    #[test]
+    fn a_download_that_fails_is_said_unless_dropbox_has_a_newer_build() {
+        let failed = |_: &Release| Err("curl.exe: Could not resolve host".to_string());
+        let none = UpdateOutcome::NoFolder { tried: vec![], searched: vec![] };
+        assert_eq!(
+            choose("0.1.8", none, Some(release("0.1.10")), failed),
+            UpdateOutcome::Unfetched { version: "0.1.10".into(), why: "curl.exe: Could not resolve host".into() }
+        );
+        assert_eq!(choose("0.1.8", newer_in_dropbox("0.1.9"), Some(release("0.1.10")), failed), newer_in_dropbox("0.1.9"));
+    }
+
+    #[test]
+    fn a_downloaded_build_is_not_remembered_as_the_update_folder() {
+        assert_eq!(UpdateOutcome::Downloaded { version: "0.1.9".into(), folder: PathBuf::from(r"T:\x") }.found_in(), None);
+    }
+
+    // ---- GitHub: unpacking ----
+
+    /// A zip as `build.ps1` makes one: a `Pagify` folder, signed as `version`'s.
+    #[cfg(windows)]
+    fn signed_zip(tag: &str, version: &str) -> (PathBuf, String, Release) {
+        let dir = scratch(tag);
+        let build = dir.join("src").join("Pagify");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(build.join("Pagify.exe"), b"MZ new").unwrap();
+        std::fs::write(build.join("pdfium.dll"), b"MZ dll").unwrap();
+        let zip = dir.join(zip_name(version));
+        let os = |s: &str| std::ffi::OsString::from(s);
+        windows_tool("tar.exe", &[os("-a"), os("-cf"), zip.clone().into(), os("-C"), dir.join("src").into(), os("Pagify")]).unwrap();
+        let (key, sk) = test_key();
+        let signature = sign(&sk, &std::fs::read(&zip).unwrap(), &zip_name(version));
+        (zip, key, Release { version: version.into(), url: String::new(), signature })
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_signed_zip_is_unpacked_into_a_folder_the_update_script_installs_from() {
+        let (zip, key, release) = signed_zip("unpack", "0.1.9");
+        let out = zip.with_file_name("out");
+        let folder = unpack_signed(&key, &release, &zip, &out).unwrap();
+        assert_eq!(folder, out.join("Pagify"));
+        assert_eq!(std::fs::read(folder.join("Pagify.exe")).unwrap(), b"MZ new");
+        assert!(folder.join("pdfium.dll").is_file());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_zip_whose_signature_does_not_hold_is_deleted_and_not_unpacked() {
+        let (zip, _, release) = signed_zip("tampered", "0.1.9");
+        let (other_key, _) = test_key();
+        let out = zip.with_file_name("out");
+        assert!(unpack_signed(&other_key, &release, &zip, &out).is_err());
+        assert!(!zip.exists(), "a zip that failed its check was kept");
+        assert!(!out.join("Pagify").exists(), "a zip that failed its check was unpacked");
     }
 }

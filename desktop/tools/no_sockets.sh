@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# Check that nothing in Pagify opens a network connection.
+# Check that nothing in Pagify opens a network connection of its own.
 #
-# "Pagify makes no network connections" is a sentence the security posture
-# relies on: the one socket the program had — the timestamp verb's HTTP client
-# over TcpStream — went with the SM signatures plan (§8a), and a claim about
-# the whole program deserves a check on the whole program rather than a
-# comment in one module. Two checks, both must pass:
+# "Pagify opens no network connection of its own" is a sentence the security
+# posture relies on: the one socket the program had — the timestamp verb's HTTP
+# client over TcpStream — went with the SM signatures plan (§8a), and a claim
+# about the whole program deserves a check on the whole program rather than a
+# comment in one module. One thing does reach the network, deliberately: on
+# Windows the update check (`update.rs`) has Windows' own curl.exe fetch
+# Pagify's feed and a newer build from GitHub, and installs that build only if
+# the HSI update key signed it — a separate program run for two known files,
+# which this check allows. Two checks, both must pass:
 #
 #   1. No source file in the engine or the desktop crates names a socket type
 #      or a network module — std's, tokio's, async-std's, libc's, mio's.

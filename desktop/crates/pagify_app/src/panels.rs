@@ -90,7 +90,8 @@ impl crate::PagifyApp {
             ui.label(format!("This is Pagify {}.", pagify_shell::VERSION));
             ui.add_space(6.0);
             // With no build to install, the reader can point at where it is, once.
-            let found_a_build = matches!(outcome, UpdateOutcome::Newer { .. } | UpdateOutcome::Current { .. });
+            let found_a_build =
+                matches!(outcome, UpdateOutcome::Newer { .. } | UpdateOutcome::Current { .. } | UpdateOutcome::Downloaded { .. });
             let mut buttons = |ui: &mut egui::Ui, install_label: Option<(&str, &std::path::PathBuf)>| {
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
@@ -126,6 +127,20 @@ impl crate::PagifyApp {
                         "Found {} but it holds no readable version.txt, or no Pagify.exe to install.                          Dropbox may still be syncing — try again in a minute.",
                         folder.display()
                     ));
+                    // Reached, GitHub answers instead (`update::choose`).
+                    ui.label("Nor could Pagify's feed on GitHub be read.");
+                    buttons(ui, None);
+                }
+                UpdateOutcome::Downloaded { version, folder } => {
+                    ui.label(format!("Pagify {version} is available, downloaded from GitHub."));
+                    buttons(ui, Some(("Update now", folder)));
+                }
+                UpdateOutcome::Released { version } => {
+                    ui.label(format!("Nothing newer on GitHub: its newest build is {version}."));
+                    buttons(ui, None);
+                }
+                UpdateOutcome::Unfetched { version, why } => {
+                    ui.label(format!("Pagify {version} is on GitHub, but it could not be downloaded: {why}"));
                     buttons(ui, None);
                 }
                 UpdateOutcome::NoFolder { tried, searched } => {
@@ -141,6 +156,7 @@ impl crate::PagifyApp {
                             ui.label(format!("   {}", root.display()));
                         }
                     }
+                    ui.label("Nor could Pagify's feed on GitHub be read.");
                     ui.label("If you know where it is, choose that folder — Pagify remembers it.");
                     buttons(ui, None);
                 }

@@ -7,9 +7,10 @@
 #
 # `-Publish` additionally copies the signed build into the Dropbox folder
 # every PC this runs on already syncs — see `UPDATE_FOLDER` in main.rs, which
-# is what actually looks for it. Opt-in and separate from a plain build: a
-# routine local rebuild must never silently push itself out to every other
-# machine.
+# is what actually looks for it — and, signed with the HSI update key, to
+# GitHub (HSI-Lighting/release), which every installed Pagify also reads (see
+# `update.rs`). Opt-in and separate from a plain build: a routine local
+# rebuild must never silently push itself out to every other machine.
 param(
     [switch]$Publish
 )
@@ -148,4 +149,56 @@ if ($Publish) {
     Compress-Archive -Path $Out -DestinationPath $Zip
 
     Write-Host "==> published $Version to $UpdateFolder (loose files + $Zip)"
+
+    # GitHub: the same zip, signed with the HSI update key, as release
+    # `pagify-v<ver>` of HSI-Lighting/release, and `pagify/latest.json` there
+    # naming it - the feed every installed Pagify reads beside this folder
+    # (`update.rs`), as every HSI app reads its own (that repo's README). The
+    # key is found as that repo's publish.ps1 finds it; its password comes
+    # from HSI_UPDATER_KEY_PASSWORD, never this command line.
+    $KeysDir = if ($env:HSI_KEYS_DIR) { $env:HSI_KEYS_DIR } else { [Environment]::GetEnvironmentVariable("HSI_KEYS_DIR", "User") }
+    $Key = if ($env:HSI_UPDATER_KEY) { $env:HSI_UPDATER_KEY } elseif ($KeysDir) { Join-Path $KeysDir "hsi-updater.key" } else { $null }
+    if (-not $Key -or -not (Test-Path $Key)) {
+        Write-Warning "no HSI update key (set HSI_KEYS_DIR or HSI_UPDATER_KEY): published to Dropbox only, NOT to GitHub"
+        return
+    }
+    $Asset = "pagify_${Version}_windows.zip"
+    $Signed = Join-Path $env:TEMP $Asset
+    Copy-Item $Zip $Signed -Force
+    $Signature = & cargo run -q --release --locked -p pagify_app --example sign_update -- $Key $Signed
+    if ($LASTEXITCODE -ne 0 -or -not $Signature) { throw "signing $Asset failed" }
+
+    # Only the HSI-Lighting account can write the release repo: its token, as git keeps it.
+    $env:GIT_TERMINAL_PROMPT = "0"; $env:GCM_INTERACTIVE = "never"
+    $Token = ("protocol=https`nhost=github.com`nusername=HSI-Lighting`n`n" | git credential fill | Where-Object { $_ -like "password=*" }) -replace '^password=', ''
+    if (-not $Token) { throw "git holds no GitHub credential for HSI-Lighting" }
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $Api = "https://api.github.com/repos/HSI-Lighting/release"
+    $Headers = @{ Authorization = "Bearer $Token"; Accept = "application/vnd.github+json" }
+    $Tag = "pagify-v$Version"
+    try { $Release = Invoke-RestMethod "$Api/releases/tags/$Tag" -Headers $Headers }
+    catch {
+        $New = @{ tag_name = $Tag; target_commitish = "main"; name = "Pagify $Version"; body = "Pagify $Version for Windows: unzip, or let Pagify update itself." }
+        $Release = Invoke-RestMethod "$Api/releases" -Method Post -Headers $Headers -ContentType "application/json" -Body ($New | ConvertTo-Json)
+    }
+    # Publishing the same version again replaces its zip.
+    foreach ($Old in @($Release.assets | Where-Object { $_.name -eq $Asset })) {
+        Invoke-RestMethod "$Api/releases/assets/$($Old.id)" -Method Delete -Headers $Headers | Out-Null
+    }
+    Invoke-RestMethod "https://uploads.github.com/repos/HSI-Lighting/release/releases/$($Release.id)/assets?name=$Asset" `
+        -Method Post -Headers $Headers -ContentType "application/zip" -InFile $Signed | Out-Null
+    $Url = "https://github.com/HSI-Lighting/release/releases/download/$Tag/$Asset"
+
+    $Feed = [ordered]@{
+        version   = $Version
+        notes     = "Pagify $Version"
+        pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+        platforms = [ordered]@{ "windows-x86_64" = [ordered]@{ signature = "$Signature"; url = $Url } }
+    } | ConvertTo-Json -Depth 4
+    $FeedApi = "$Api/contents/pagify/latest.json"
+    $Put = @{ message = "Pagify $Version (windows)"; branch = "main"; content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Feed)) }
+    try { $Put.sha = (Invoke-RestMethod "$FeedApi`?ref=main" -Headers $Headers).sha } catch { }
+    Invoke-RestMethod $FeedApi -Method Put -Headers $Headers -ContentType "application/json" -Body ($Put | ConvertTo-Json) | Out-Null
+    Remove-Item $Signed
+    Write-Host "==> published $Version to GitHub: $Url (feed pagify/latest.json)"
 }

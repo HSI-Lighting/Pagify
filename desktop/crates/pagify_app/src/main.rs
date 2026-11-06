@@ -2325,8 +2325,8 @@ struct PageResult {
 /// so it gets the same "spawn a thread, poll a channel" treatment `Reading`
 /// above already uses for OCR.
 struct UpdateCheck {
-    /// What the look found — see [`update::check`].
-    done: std::sync::mpsc::Receiver<update::UpdateOutcome>,
+    /// What the look found, and what GitHub answered — see [`update::look_everywhere`].
+    done: std::sync::mpsc::Receiver<(update::UpdateOutcome, String)>,
     /// Asked for by the reader (Help ▸ Check for Updates, or `checkupdate`), not the
     /// launch-time look: the answer is always shown, not only when it is "newer".
     explicit: bool,
@@ -5362,7 +5362,7 @@ impl PagifyApp {
         let current = pagify_shell::VERSION.to_string();
         let (tx, done) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(update::look(&current, &update::Places::this_pc()));
+            let _ = tx.send(update::look_everywhere(&current, &update::Places::this_pc()));
         });
         self.update_state.update_check = Some(UpdateCheck { done, explicit });
     }
@@ -5372,11 +5372,11 @@ impl PagifyApp {
         let Some(check) = &self.update_state.update_check else { return };
         let explicit = check.explicit;
         match check.done.try_recv() {
-            Ok(outcome) => {
+            Ok((outcome, github)) => {
                 self.update_state.update_check = None;
                 self.recording_state.session_log.record(
                     "update",
-                    &format!("explicit={explicit} {}", outcome.log_line(pagify_shell::VERSION)),
+                    &format!("explicit={explicit} {} {github}", outcome.log_line(pagify_shell::VERSION)),
                 );
                 // Where a build was found is where to look first next time.
                 if let Some(folder) = outcome.found_in() {
@@ -5386,7 +5386,9 @@ impl PagifyApp {
                     // The report takes over from a launch-time prompt for the same build.
                     self.update_state.update_available = None;
                     self.update_state.update_report = Some(outcome);
-                } else if let update::UpdateOutcome::Newer { version, folder } = outcome {
+                } else if let update::UpdateOutcome::Newer { version, folder } | update::UpdateOutcome::Downloaded { version, folder } =
+                    outcome
+                {
                     self.update_state.update_available = Some((version, folder));
                 }
             }
@@ -18338,6 +18340,13 @@ mod update_script_tests;
 
 #[cfg(test)]
 mod update_check_tests;
+
+/// The tool `build.ps1 -Publish` signs a build for GitHub with, as it is, so the
+/// update tests check what it signs (its `main` is the example's own).
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../examples/sign_update.rs"]
+mod sign_update;
 
 #[cfg(test)]
 mod paragraph_should_justify_tests;
