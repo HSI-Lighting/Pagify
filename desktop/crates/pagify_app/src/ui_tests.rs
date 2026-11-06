@@ -2615,8 +2615,15 @@ fn a_document_that_wants_a_password_asks_for_one_in_a_window() {
     // Type into it and press Open, as a person would.
     h.state_mut().tab_mut().secure_state.password_typed = String::from("pagify").into();
     h.run_steps(1);
-    // Exact, because the ribbon has an "Open..." of its own.
-    h.get_by_label("Open").click();
+    // Exact, because the ribbon has an "Open..." of its own; below the title
+    // bar, because its quick tools have an "Open" too.
+    {
+        use egui_kittest::kittest::Queryable;
+        h.query_all_by_label("Open")
+            .find(|n| n.rect().center().y >= 70.0)
+            .expect("no Open in the password window")
+            .click();
+    }
     h.run_steps(3);
 
     assert!(h.state().tab().doc.is_some(), "the window did not open the document");
