@@ -7,7 +7,7 @@
 #
 # `-Publish` additionally copies the signed build into the Dropbox folder
 # every PC this runs on already syncs — see `UPDATE_FOLDER` in main.rs, which
-# is what actually looks for it — and, signed with the HSI update key, to
+# is what actually looks for it — and, signed with Pagify's update key, to
 # GitHub (HSI-Lighting/release), which every installed Pagify also reads (see
 # `update.rs`). Opt-in and separate from a plain build: a routine local
 # rebuild must never silently push itself out to every other machine.
@@ -150,16 +150,16 @@ if ($Publish) {
 
     Write-Host "==> published $Version to $UpdateFolder (loose files + $Zip)"
 
-    # GitHub: the same zip, signed with the HSI update key, as release
+    # GitHub: the same zip, signed with Pagify's update key, as release
     # `pagify-v<ver>` of HSI-Lighting/release, and `pagify/latest.json` there
     # naming it - the feed every installed Pagify reads beside this folder
     # (`update.rs`), as every HSI app reads its own (that repo's README). The
-    # key is found as that repo's publish.ps1 finds it; its password comes
-    # from HSI_UPDATER_KEY_PASSWORD, never this command line.
-    $KeysDir = if ($env:HSI_KEYS_DIR) { $env:HSI_KEYS_DIR } else { [Environment]::GetEnvironmentVariable("HSI_KEYS_DIR", "User") }
-    $Key = if ($env:HSI_UPDATER_KEY) { $env:HSI_UPDATER_KEY } elseif ($KeysDir) { Join-Path $KeysDir "hsi-updater.key" } else { $null }
-    if (-not $Key -or -not (Test-Path $Key)) {
-        Write-Warning "no HSI update key (set HSI_KEYS_DIR or HSI_UPDATER_KEY): published to Dropbox only, NOT to GitHub"
+    # key is kept on the PC that publishes (`examples/make_update_key.rs`);
+    # PAGIFY_UPDATE_KEY names another place. Its password, if it has one,
+    # comes from PAGIFY_UPDATE_KEY_PASSWORD, never this command line.
+    $Key = if ($env:PAGIFY_UPDATE_KEY) { $env:PAGIFY_UPDATE_KEY } else { "E:\KEYS\Pagify\pagify-updater.key" }
+    if (-not (Test-Path $Key)) {
+        Write-Warning "no Pagify update key at $Key (PAGIFY_UPDATE_KEY names another place): published to Dropbox only, NOT to GitHub"
         return
     }
     $Asset = "pagify_${Version}_windows.zip"

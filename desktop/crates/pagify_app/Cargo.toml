@@ -14,7 +14,7 @@ zeroize = "1"
 # pagify_shell/pdf_core, so this adds an edge, not a new crate.
 serde_json = "1"
 
-# Checks a build downloaded from GitHub against the HSI update key before it is
+# Checks a build downloaded from GitHub against Pagify's update key before it is
 # unpacked (`update.rs`). Verification only, no dependencies of its own.
 minisign-verify = "0.2"
 

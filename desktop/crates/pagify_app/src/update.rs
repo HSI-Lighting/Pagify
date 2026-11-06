@@ -26,7 +26,7 @@
 //! **And GitHub** (the owner's ask, 2026-11-06: "the app has to check where the latest
 //! release is, github or dropbox"). [`look_everywhere`] also reads Pagify's feed in the
 //! HSI release repo, as every HSI app does, and where GitHub has the newer build it is
-//! downloaded, checked against the HSI update key and unpacked before it is offered.
+//! downloaded, checked against Pagify's update key and unpacked before it is offered.
 //! Pagify itself still opens no connection: Windows' own `curl.exe` fetches the two
 //! files, and `tar.exe` unpacks the zip (`tools/no_sockets.sh`).
 
@@ -269,13 +269,16 @@ pub(crate) struct Release {
 /// from (that repo's README). Read from raw.githubusercontent.com, never GitHub's API:
 /// the API allows an address 60 calls an hour, and the office's was found spent
 /// (2026-11-06).
-#[cfg(all(windows, not(test)))]
+#[cfg(windows)]
 const FEED_URL: &str = "https://raw.githubusercontent.com/HSI-Lighting/release/main/pagify/latest.json";
 
-/// The public half of `hsi-updater.key`, the key the HSI apps' builds are signed with,
-/// as their `tauri.conf.json` carries it: base64 of minisign's public-key text. A build
-/// from GitHub is unpacked only if this key signed it.
-const UPDATE_KEY: &str = "";
+/// The public half of Pagify's own update key (`examples/make_update_key.rs`, made
+/// 2026-11-06; the private half is kept on the PC that publishes, in
+/// `E:\KEYS\Pagify`), as Tauri writes one: base64 of minisign's public-key text. A
+/// build from GitHub is unpacked only if this key signed it. The owner chose the HSI
+/// apps' shared key first; it is not on the PC Pagify is published from. Key id
+/// `B318C8916BCECD5B`.
+const UPDATE_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIzMThDODkxNkJDRUNENUIKUldSYnpjNXJrY2dZczJJMHB3NFlBREtpQ2tCYXZDV05GQklEUU5NNm1IQXJZY2FTelBYUldHbEUK";
 
 /// What Windows' curl is always told: HTTPS only, redirects included (a release asset
 /// is served from another host), and a network that blocks certificate revocation
@@ -336,19 +339,22 @@ fn read_feed(text: &str) -> Option<Release> {
     Some(Release { version: field(&feed, "version")?, url: field(windows, "url")?, signature: field(windows, "signature")? })
 }
 
-/// What the feed says now. No test reaches GitHub.
+/// What the feed says now. No test reaches GitHub, but the one run by hand.
 fn latest_release() -> Result<Release, String> {
     #[cfg(test)]
     let text = String::from("no network in tests");
     #[cfg(all(windows, not(test)))]
-    let text = {
-        let mut args: Vec<std::ffi::OsString> = CURL.iter().map(Into::into).collect();
-        args.extend(["--max-time", "20", "--max-filesize", "1000000", FEED_URL].map(Into::into));
-        String::from_utf8_lossy(&windows_tool("curl.exe", &args)?).into_owned()
-    };
+    let text = feed()?;
     #[cfg(all(not(windows), not(test)))]
     let text = String::from("builds on GitHub are for Windows");
     read_feed(&text).ok_or_else(|| format!("not a feed with a Windows build: {}", text.chars().take(80).collect::<String>()))
+}
+
+#[cfg(windows)]
+fn feed() -> Result<String, String> {
+    let mut args: Vec<std::ffi::OsString> = CURL.iter().map(Into::into).collect();
+    args.extend(["--max-time", "20", "--max-filesize", "1000000", FEED_URL].map(Into::into));
+    Ok(String::from_utf8_lossy(&windows_tool("curl.exe", &args)?).into_owned())
 }
 
 /// Fetch `release` into a folder of its own under the temp folder — once: a zip
@@ -418,7 +424,7 @@ fn signed_by(key: &str, bytes: &[u8], signature: &str, name: &str) -> Result<(),
     let signature = text(signature)
         .and_then(|signature| minisign_verify::Signature::decode(&signature).ok())
         .ok_or("the feed's signature cannot be read")?;
-    key.verify(bytes, &signature, false).map_err(|_| "the download is not signed with the HSI update key")?;
+    key.verify(bytes, &signature, false).map_err(|_| "the download is not signed with Pagify's update key")?;
     if signature.trusted_comment().split('\t').any(|part| part == format!("file:{name}")) {
         Ok(())
     } else {
@@ -796,19 +802,16 @@ mod tests {
         assert!(crate::sign_update::sign(&key_file, "not it".into(), &zip).is_err(), "signed with the wrong password");
     }
 
-    /// By hand: a build another HSI app published, with the signature its feed carries,
-    /// holds against the key built in — Tauri's own signer and the real key, where the
-    /// tests above have only minisign and keys of their own.
-    ///
-    ///     PAGIFY_CHECK_FILE=<file, under its published name> PAGIFY_CHECK_SIGNATURE=<feed signature> \
-    ///         cargo test -p pagify_app --bins published_by_another -- --ignored
+    /// By hand, after a publish — it reaches GitHub: the feed as published, the zip it
+    /// names downloaded, checked against the key built in and unpacked, as an installed
+    /// copy does it (`cargo test -p pagify_app --bins the_published_build -- --ignored`).
+    #[cfg(windows)]
     #[test]
     #[ignore]
-    fn a_build_published_by_another_hsi_app_holds_against_the_key_built_in() {
-        let file = PathBuf::from(std::env::var_os("PAGIFY_CHECK_FILE").expect("PAGIFY_CHECK_FILE"));
-        let signature = std::env::var("PAGIFY_CHECK_SIGNATURE").expect("PAGIFY_CHECK_SIGNATURE");
-        let name = file.file_name().unwrap().to_string_lossy().into_owned();
-        assert_eq!(signed_by(UPDATE_KEY, &std::fs::read(&file).unwrap(), &signature, &name), Ok(()));
+    fn the_published_build_downloads_holds_and_unpacks() {
+        let release = read_feed(&feed().unwrap()).expect("the published feed names a Windows build");
+        let folder = fetch(&release).unwrap();
+        assert!(folder.join("Pagify.exe").is_file() && folder.join("pdfium.dll").is_file(), "{}", folder.display());
     }
 
     #[test]
@@ -816,7 +819,7 @@ mod tests {
         let key = unbase64(UPDATE_KEY).and_then(|text| String::from_utf8(text).ok());
         assert!(
             key.is_some_and(|key| minisign_verify::PublicKey::decode(&key).is_ok()),
-            "UPDATE_KEY is not the public half of hsi-updater.key yet"
+            "UPDATE_KEY is not a public key"
         );
     }
 

@@ -8,7 +8,7 @@
 # comment in one module. One thing does reach the network, deliberately: on
 # Windows the update check (`update.rs`) has Windows' own curl.exe fetch
 # Pagify's feed and a newer build from GitHub, and installs that build only if
-# the HSI update key signed it — a separate program run for two known files,
+# Pagify's own update key signed it — a separate program run for two known files,
 # which this check allows. Two checks, both must pass:
 #
 #   1. No source file in the engine or the desktop crates names a socket type

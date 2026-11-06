@@ -395,7 +395,7 @@ one commit per finding, each with a test built from the audit's own input;
   a network client, server, TLS stack or async runtime. The one exception is
   deliberate: on Windows the update check has Windows' own `curl.exe` fetch
   Pagify's feed and a newer build from GitHub (HSI-Lighting/release), and
-  installs that build only if the HSI update key signed it (`update.rs`).
+  installs that build only if Pagify's own update key signed it (`update.rs`).
 - **A bundle that ships is signed with a Developer ID, or it is not built.**
   `bundle.sh` refuses to build an unsigned bundle unless the caller says it
   stays on this machine (`install.sh` does), and after signing checks that the
