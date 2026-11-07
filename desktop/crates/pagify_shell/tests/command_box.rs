@@ -734,15 +734,39 @@ fn sharecopy_with_no_path_asks_where_and_with_a_path_means_that_path() {
     }
 }
 
-/// **A new blank document, the same shape**: it has to be written somewhere
-/// before it is a document at all, so bare it asks where.
+/// **A new blank document**: bare it asks what paper; a paper alone asks where
+/// to save it; a path means that path, A4 unless a paper comes first.
 #[test]
-fn blankdoc_with_no_path_asks_where_and_with_a_path_means_that_path() {
-    assert!(matches!(head("blankdoc"), Dispatch::Pagify(Verb::BlankDocDialog)));
-    match head("blankdoc /tmp/new sheet.pdf") {
-        Dispatch::Pagify(Verb::BlankDoc(path)) => assert_eq!(path, std::path::PathBuf::from("/tmp/new sheet.pdf")),
+fn blankdoc_takes_a_paper_and_a_path_and_asks_for_what_is_missing() {
+    let verb = |line: &str| match head(line) {
+        Dispatch::Pagify(verb) => verb,
+        other => panic!("{line}: expected a verb, got {other:?}"),
+    };
+    let a4 = (595.0, 842.0);
+    assert_eq!(verb("blankdoc"), Verb::BlankDocWindow);
+    assert_eq!(verb("blankdoc /tmp/new sheet.pdf"), Verb::BlankDoc { size: a4, path: "/tmp/new sheet.pdf".into() });
+    assert_eq!(verb("blankdoc A3 /tmp/big.pdf"), Verb::BlankDoc { size: (842.0, 1191.0), path: "/tmp/big.pdf".into() });
+    assert_eq!(verb("blankdoc letter"), Verb::BlankDocDialog((612.0, 792.0)));
+}
+
+/// Any other paper as width x height in millimetres, turned by swapping them.
+#[test]
+fn blankdoc_takes_a_size_in_millimetres() {
+    match head("blankdoc 297x210 /tmp/wide.pdf") {
+        Dispatch::Pagify(Verb::BlankDoc { size: (w, h), path }) => {
+            assert!((w - 841.89).abs() < 0.01 && (h - 595.28).abs() < 0.01, "{w} x {h}");
+            assert_eq!(path, std::path::PathBuf::from("/tmp/wide.pdf"));
+        }
         other => panic!("expected BlankDoc, got {other:?}"),
     }
+}
+
+/// A PDF page is between 3 and 14,400 points a side; a size outside that is
+/// said, not written as a file named "0x10".
+#[test]
+fn blankdoc_refuses_a_size_no_pdf_page_can_have() {
+    assert!(matches!(head("blankdoc 0x10 /tmp/x.pdf"), Dispatch::Bad(_)));
+    assert!(matches!(head("blankdoc 6000x100"), Dispatch::Bad(_)));
 }
 
 #[test]

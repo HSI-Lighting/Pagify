@@ -169,10 +169,13 @@ pub enum Effect {
     SaveShareCopy(std::path::PathBuf),
     /// Ask the platform where to write that copy.
     ShareCopyDialog,
-    /// Write a new blank document to this path, then open it.
-    NewBlank(std::path::PathBuf),
+    /// Write a new blank document of one `size` sheet (points) to this path,
+    /// then open it.
+    NewBlank { size: (f32, f32), path: std::path::PathBuf },
     /// Ask the platform where to write it.
-    NewBlankDialog,
+    NewBlankDialog((f32, f32)),
+    /// Ask what paper.
+    BlankPaperWindow,
     /// Extract pages to a file.
     RunExtract { pages: String, dest: std::path::PathBuf },
     /// Import pages from a file.
@@ -368,8 +371,9 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::SaveAsDialog => vec![Effect::SaveAsDialog],
         Verb::ShareCopy(path) => vec![Effect::SaveShareCopy(path.clone())],
         Verb::ShareCopyDialog => vec![Effect::ShareCopyDialog],
-        Verb::BlankDoc(path) => vec![Effect::NewBlank(path.clone())],
-        Verb::BlankDocDialog => vec![Effect::NewBlankDialog],
+        Verb::BlankDoc { size, path } => vec![Effect::NewBlank { size: *size, path: path.clone() }],
+        Verb::BlankDocDialog(size) => vec![Effect::NewBlankDialog(*size)],
+        Verb::BlankDocWindow => vec![Effect::BlankPaperWindow],
         Verb::Extract { pages, dest } => {
             vec![Effect::RunExtract { pages: pages.clone(), dest: dest.clone() }]
         }
@@ -617,8 +621,12 @@ mod tests {
             (Verb::SaveAsDialog, vec![Effect::SaveAsDialog]),
             (Verb::ShareCopy("s.pdf".into()), vec![Effect::SaveShareCopy("s.pdf".into())]),
             (Verb::ShareCopyDialog, vec![Effect::ShareCopyDialog]),
-            (Verb::BlankDoc("b.pdf".into()), vec![Effect::NewBlank("b.pdf".into())]),
-            (Verb::BlankDocDialog, vec![Effect::NewBlankDialog]),
+            (
+                Verb::BlankDoc { size: (842.0, 1191.0), path: "b.pdf".into() },
+                vec![Effect::NewBlank { size: (842.0, 1191.0), path: "b.pdf".into() }],
+            ),
+            (Verb::BlankDocDialog((612.0, 792.0)), vec![Effect::NewBlankDialog((612.0, 792.0))]),
+            (Verb::BlankDocWindow, vec![Effect::BlankPaperWindow]),
             (
                 Verb::Extract { pages: "1-2".into(), dest: "o.pdf".into() },
                 vec![Effect::RunExtract { pages: "1-2".into(), dest: "o.pdf".into() }],

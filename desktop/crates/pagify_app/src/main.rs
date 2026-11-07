@@ -47,6 +47,7 @@ mod render_queue_tests;
 mod print_window;
 #[cfg(target_os = "windows")]
 mod print_windows;
+mod blank_paper;
 mod quick_tools;
 mod suggest;
 mod ribbon;
@@ -1250,6 +1251,8 @@ struct UiState {
     /// How many suggestions the box drew last frame — the list on screen,
     /// which is what the keys act on.
     suggestions_listed: usize,
+    /// The paper window bare `blankdoc` opens, while it is open.
+    blank_paper: Option<blank_paper::BlankPaper>,
 }
 
 /// The session log.
@@ -4982,7 +4985,7 @@ impl PagifyApp {
             }, },
             prefs_state: PrefsState { ortho: false, defaults: tools::Defaults::default(), draw_fill: false, snaps: SnapSet::defaults(), grid_pt: 0.0, exact_pages: if cfg!(test) { false } else { pagify_shell::preview::load_exact_pages() }, },
             render_state: RenderState { renders: None, facts: None, previews: None, async_render: !cfg!(test), render_stats: RenderStats::default(), },
-            ui_state: UiState { show_thumbs: true, organize_open: false, show_layers: false, command_open: false, errors_said: 0, print_wanted: false, quick_tools: if cfg!(test) { quick_tools::defaults() } else { quick_tools::path().map_or_else(quick_tools::defaults, |path| quick_tools::load_from(&path)) }, more_commands_open: false, suggestion_at: None, suggestions_closed: false, suggestions_listed: 0, },
+            ui_state: UiState { show_thumbs: true, organize_open: false, show_layers: false, command_open: false, errors_said: 0, print_wanted: false, quick_tools: if cfg!(test) { quick_tools::defaults() } else { quick_tools::path().map_or_else(quick_tools::defaults, |path| quick_tools::load_from(&path)) }, more_commands_open: false, suggestion_at: None, suggestions_closed: false, suggestions_listed: 0, blank_paper: None, },
             clipboard_state: ClipboardState { object_clipboard: None, paste_count: 0, page_clipboard: None, paste_ghost: None, clipboard_dir: if cfg!(test) {
                 static APPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 std::env::temp_dir().join(format!(
@@ -10394,21 +10397,22 @@ impl PagifyApp {
         }
     }
 
-    /// Bare `blankdoc`: a new document is a file before it is anything, so ask
-    /// where it goes — beside the open document, if there is one.
-    fn new_blank_dialog(&mut self) {
+    /// A paper chosen and no path: a new document is a file before it is
+    /// anything, so ask where it goes — beside the open document, if there is one.
+    pub(crate) fn new_blank_dialog(&mut self, size: (f32, f32)) {
         let mut dialog = rfd::FileDialog::new().set_title("New blank document").add_filter("PDF", &["pdf"]);
         if let Some(dir) = self.tab().doc.as_ref().and_then(|d| d.session.path().parent().map(|p| p.to_path_buf())) {
             dialog = dialog.set_directory(dir);
         }
         match dialog.set_file_name("Untitled.pdf").save_file() {
-            Some(path) => self.new_blank(&path),
+            Some(path) => self.new_blank(&path, size),
             None => self.say_info("nothing chosen."),
         }
     }
 
-    /// `blankdoc <path>`: write one A4 sheet there and open it in a tab of its own.
-    fn new_blank(&mut self, dest: &std::path::Path) {
+    /// `blankdoc [paper] <path>`: write one `size` sheet (points) there and open
+    /// it in a tab of its own.
+    fn new_blank(&mut self, dest: &std::path::Path, size: (f32, f32)) {
         // **Never over a file a tab is reading.** PDFium loads pages from it
         // as they are needed; replacing it would pull them out from under that tab.
         let target = std::fs::canonicalize(dest).ok();
@@ -10416,7 +10420,7 @@ impl PagifyApp {
             self.say_error("that file is open in a tab — choose another name for the new document.");
             return;
         }
-        match Session::write_blank(dest) {
+        match Session::write_blank(dest, size) {
             Ok(()) => self.open(&dest.to_string_lossy()),
             Err(e) => self.say_error(format!("blankdoc: {e}")),
         }
@@ -16431,6 +16435,7 @@ impl eframe::App for PagifyApp {
         self.open_dropped_files(&ctx);
         let quick = self.draw_title_bar(&ctx, ui);
         self.draw_more_commands(&ctx);
+        self.draw_blank_paper(&ctx);
         let ribbon_command = self.draw_ribbon(ui).or(quick);
         let picked = self.draw_command_bar(ui, command_id, &mut submitted);
         self.draw_main_area(&ctx, ui, command_id, ribbon_command.or(picked), &mut submitted);

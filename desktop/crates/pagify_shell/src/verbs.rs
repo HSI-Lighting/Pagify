@@ -162,10 +162,13 @@ pub enum Verb {
     ShareCopy(PathBuf),
     /// Ask where, rather than being told: bare `sharecopy`.
     ShareCopyDialog,
-    /// Write a new blank document to this path and open it.
-    BlankDoc(PathBuf),
-    /// Ask where, rather than being told: bare `blankdoc`.
-    BlankDocDialog,
+    /// Write a new blank document of one sheet, `size` in points, to this
+    /// path and open it: `blankdoc [paper] <path>`, A4 when no paper is named.
+    BlankDoc { size: (f32, f32), path: PathBuf },
+    /// A paper and no path: ask where to save it.
+    BlankDocDialog((f32, f32)),
+    /// Bare `blankdoc`: ask what paper.
+    BlankDocWindow,
     Page(PageTarget),
     Zoom(ZoomTarget),
     /// Rotate the *page*, in degrees clockwise. Quarter turns only — PDF stores
@@ -903,6 +906,36 @@ pub fn parse(line: &str) -> Option<Result<Verb, String>> {
         .or_else(|| parse_file_and_view(head.as_str(), rest, tail))
         .or_else(|| parse_marks_and_misc(head.as_str(), rest, tail))
 }
+
+/// The papers `blankdoc` knows by name, upright, in points.
+pub const PAPERS: [(&str, f32, f32); 6] = [
+    ("A4", 595.0, 842.0),
+    ("A3", 842.0, 1191.0),
+    ("A5", 420.0, 595.0),
+    ("Letter", 612.0, 792.0),
+    ("Legal", 612.0, 1008.0),
+    ("Tabloid", 792.0, 1224.0),
+];
+
+/// A PDF page's smallest and largest side, in points (ISO 32000, Annex C).
+pub const PAGE_SIDE_PT: std::ops::RangeInclusive<f32> = 3.0..=14_400.0;
+
+/// A paper as typed: a name from [`PAPERS`], or width x height in millimetres.
+/// `None` when the word is not a paper at all, so it can be a path.
+fn paper(word: &str) -> Option<Result<(f32, f32), String>> {
+    if let Some(&(_, w, h)) = PAPERS.iter().find(|(name, _, _)| name.eq_ignore_ascii_case(word)) {
+        return Some(Ok((w, h)));
+    }
+    let (w, h) = word.split_once(|c| matches!(c, 'x' | 'X' | '×'))?;
+    let (w, h) = (w.parse::<f32>().ok()?, h.parse::<f32>().ok()?);
+    let size = (w * 72.0 / 25.4, h * 72.0 / 25.4);
+    if PAGE_SIDE_PT.contains(&size.0) && PAGE_SIDE_PT.contains(&size.1) {
+        Some(Ok(size))
+    } else {
+        Some(Err(format!("blankdoc: a PDF page is 1.1 to 5080 mm a side, not {w} x {h} mm")))
+    }
+}
+
 /// Resolve a path as a person typed it.
 ///
 /// Three things go wrong otherwise, and all three make a file simply refuse to
@@ -1384,11 +1417,17 @@ fn parse_file_and_view(head: &str, rest: &[&str], tail: &str) -> Option<Result<V
                 Ok(Verb::ShareCopy(resolve_path(tail)))
             }
         }
+        // Bare asks what paper; a paper alone asks where; a path means that path.
         "blankdoc" => {
-            if tail.is_empty() {
-                Ok(Verb::BlankDocDialog)
-            } else {
-                Ok(Verb::BlankDoc(resolve_path(tail)))
+            let first = rest.first().copied().unwrap_or("");
+            match paper(first) {
+                _ if tail.is_empty() => Ok(Verb::BlankDocWindow),
+                Some(Err(why)) => Err(why),
+                Some(Ok(size)) => match tail[first.len()..].trim() {
+                    "" => Ok(Verb::BlankDocDialog(size)),
+                    path => Ok(Verb::BlankDoc { size, path: resolve_path(path) }),
+                },
+                None => Ok(Verb::BlankDoc { size: (PAPERS[0].1, PAPERS[0].2), path: resolve_path(tail) }),
             }
         }
 

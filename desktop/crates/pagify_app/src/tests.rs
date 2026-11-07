@@ -345,6 +345,35 @@ mod tools_chain {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **Asked for: "i want the pages sizes to be adjustable".** A paper
+    /// named before the path is the paper written.
+    #[test]
+    fn blankdoc_with_a_paper_writes_a_page_of_that_paper() {
+        let dir = std::env::temp_dir().join(format!("pagify-blankdoc-paper-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let dest = dir.join("wide.pdf");
+
+        let mut app = app();
+        app.submit(&format!("blankdoc 297x210 {}", dest.display()));
+
+        assert!(errors(&app).is_empty(), "errors: {:?}", errors(&app));
+        let size = app.tab().doc.as_ref().expect("the blank did not open").session.page_sizes().expect("sizes")[0];
+        assert!((size.width_pt - 841.89).abs() < 0.1 && (size.height_pt - 595.28).abs() < 0.1, "{size:?}");
+        drop(app);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Blank button runs bare `blankdoc`: it asks what paper, starting on
+    /// A4 upright, before it asks where.
+    #[test]
+    fn bare_blankdoc_asks_what_paper_starting_on_a4_upright() {
+        let mut app = app();
+        app.submit("blankdoc");
+        let paper = app.ui_state.blank_paper.expect("no paper window");
+        assert_eq!(paper.size_pt(), (595.0, 842.0));
+    }
+
     /// Writing over a file that a tab is reading would pull the pages out
     /// from under it.
     #[test]

@@ -53,16 +53,17 @@ impl Session {
         *self.path.lock().unwrap_or_else(|e| e.into_inner()) = path;
     }
 
-    /// Write a new document of one A4 sheet of plain paper to `path`. Only
-    /// writes: the caller opens it by the ordinary open path, as Android does.
+    /// Write a new document of one sheet of plain paper, `size` in points, to
+    /// `path`. Only writes: the caller opens it by the ordinary open path, as
+    /// Android does.
     ///
     /// Made under the registry lock, because building a document shares
     /// PDFium with every session reading one.
-    pub fn write_blank(path: &Path) -> Result<()> {
+    pub fn write_blank(path: &Path, size: (f32, f32)) -> Result<()> {
         pdfium::ensure_bound();
-        let a4 = pdf_core::document::PageSize { width_pt: 595.0, height_pt: 842.0 };
+        let sheet = pdf_core::document::PageSize { width_pt: size.0, height_pt: size.1 };
         let bytes = registry::exclusive(|| {
-            pdf_core::document::blank_document(1, a4, None, pdf_core::document::Ruling::None)
+            pdf_core::document::blank_document(1, sheet, None, pdf_core::document::Ruling::None)
         })?;
         std::fs::write(path, bytes)?;
         Ok(())
