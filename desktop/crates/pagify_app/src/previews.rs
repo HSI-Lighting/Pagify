@@ -48,11 +48,12 @@ pub(crate) struct PreviewWorker {
     pub(crate) in_flight: HashMap<(u64, usize, u8), (u32, u8, Option<pdf_core::document::Rect>)>,
     /// What hayro could not draw, as `(document, epoch, page)`: asked of PDFium.
     pub(crate) refused: HashSet<(u64, u64, usize)>,
-    /// Pages hayro may draw differently, as `(document, epoch, page)`: their
-    /// pictures, not their thumbnails, asked of PDFium.
-    pub(crate) differs: HashSet<(u64, u64, usize)>,
-    /// `(document, page)` already written to the session log as PDFium's.
-    logged: HashSet<(u64, usize)>,
+    /// Pages hayro may draw differently, as `(document, page)`: their pictures, not
+    /// their thumbnails, asked of PDFium **in this state and every later one**. An
+    /// edit seldom takes away what makes a page differ (a font not in the file), and
+    /// hayro's picture first, then PDFium's, changed the edited page twice after
+    /// every edit (reported from use on the datasheet, 0.1.119).
+    pub(crate) differs: HashSet<(u64, usize)>,
 }
 
 impl PreviewWorker {
@@ -116,7 +117,6 @@ impl PreviewWorker {
             in_flight: HashMap::new(),
             refused: HashSet::new(),
             differs: HashSet::new(),
-            logged: HashSet::new(),
         })
     }
 }
@@ -157,7 +157,7 @@ impl crate::PagifyApp {
         }
         let Some(worker) = self.render_state.previews.as_mut() else { return Err(job) };
         let state = (job.doc, job.epoch, job.page);
-        if worker.refused.contains(&state) || (job.step < THUMB_STEP_BASE && worker.differs.contains(&state)) {
+        if worker.refused.contains(&state) || (job.step < THUMB_STEP_BASE && worker.differs.contains(&(job.doc, job.page))) {
             return Err(job);
         }
         let slot = (job.doc, job.page, crate::slot_kind(&job.crop, job.step));
@@ -190,29 +190,25 @@ impl crate::PagifyApp {
             if worker.in_flight.get(&slot) == Some(&(d.step, d.rotation as u8, d.crop)) {
                 worker.in_flight.remove(&slot);
             }
-            let state = (d.doc, d.epoch, d.page);
+            // Found to differ for the first time: said once in the session log.
+            let mut first = false;
             match &back.exactly {
                 Some((_, None)) => {
-                    worker.refused.insert(state);
+                    worker.refused.insert((d.doc, d.epoch, d.page));
                 }
-                Some((_, Some(_))) => {
-                    worker.differs.insert(state);
-                }
+                Some((_, Some(_))) => first = worker.differs.insert((d.doc, d.page)),
                 None => {}
             }
-            arrived.push(back);
+            arrived.push((back, first));
         }
-        for PreviewDone { done, exactly } in arrived {
-            let (doc, page) = (done.doc, done.page);
+        for (PreviewDone { done, exactly }, first) in arrived {
+            let page = done.page;
             if done.image.is_ok() && self.file_picture(ctx, done) {
                 self.render_state.render_stats.previewed += 1;
             }
             let Some((job, reason)) = exactly else { continue };
-            if let Some(reason) = reason {
-                let first = self.render_state.previews.as_mut().is_some_and(|w| w.logged.insert((doc, page)));
-                if first {
-                    self.recording_state.session_log.record("render", &format!("page {} drawn by PDFium: {}", page + 1, reason.reason()));
-                }
+            if let (Some(reason), true) = (reason, first) {
+                self.recording_state.session_log.record("render", &format!("page {} drawn by PDFium: {}", page + 1, reason.reason()));
             }
             self.ask_for_render(ctx, job);
         }

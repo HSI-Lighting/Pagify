@@ -1042,7 +1042,10 @@ impl crate::PagifyApp {
                     let textless = self.textless_for(ctx, page, zoom, (w, h));
                     // Or, the moment after an edit applied, the typed words over that same page
                     // until the page's own new picture is there.
-                    let settling = if textless.is_none() { self.settling_for(ctx, page, zoom, picture.is_some()) } else { None };
+                    // Ended by a picture of the page as it now is: not one held from before the edit,
+                    // which still shows the old words, nor its thumbnail.
+                    let drawn_now = self.tab().doc.as_ref().is_some_and(|d| d.caches.drawn_now(page));
+                    let settling = if textless.is_none() { self.settling_for(ctx, page, zoom, picture.is_some() && drawn_now) } else { None };
                     // **With the render worker, a page with no picture yet is still a page**:
                     // paper where it will be, and everything on it (the zoom's anchor, the
                     // pointer, the pending tool) works while its picture is made — which for

@@ -85,6 +85,13 @@ pub(crate) struct DocCaches {
     /// change — see [`crate::PagifyApp::textless_for`]. One at a time: only the open
     /// paragraph has one.
     pub(crate) textless: Option<Textless>,
+    /// **Each page's picture from before the last edit, drawn until its new one comes** — one
+    /// per (page, turn) — and the rail's thumbnails the same way. Reported from use: "when the
+    /// edit is applied the whole PDF reloads"; every picture went with the caches and a page with
+    /// none is white paper while it is drawn again. Never a picture of the document as it is: let
+    /// go of when the page's new picture is filed, when its render fails, and as it scrolls away.
+    pub(super) held: std::collections::HashMap<(usize, u8), egui::TextureHandle>,
+    pub(super) held_thumbs: std::collections::HashMap<usize, egui::TextureHandle>,
 }
 
 /// A picture of `page` with `objects` left out (see [`crate::PagifyApp::textless_for`]),
@@ -132,9 +139,12 @@ impl DocCaches {
     /// [`crate::Doc::rendered_is_stale`], so the next one added is right by
     /// default.
     pub(super) fn invalidate(&mut self) {
-        self.textures.clear();
-        self.exact.clear();
-        self.thumbs.clear();
+        // Not thrown away but held, drawn until each page's new picture comes; the exact picture,
+        // the sharper, over a quantised one of the same page.
+        for ((page, _, turn), picture) in self.textures.drain().chain(self.exact.drain()) {
+            self.held.insert((page, turn), picture);
+        }
+        self.held_thumbs.extend(self.thumbs.drain());
         self.detail = None;
         self.locked.get_mut().clear();
         self.page_blocks.get_mut().take();
@@ -149,6 +159,12 @@ impl DocCaches {
         self.hits.get_mut().take();
         self.facts.clear();
         self.textless = None;
+    }
+
+    /// Whether `page` has a picture of the document as it is now — not only one [`Self::held`]
+    /// from before an edit, nor its thumbnail.
+    pub(crate) fn drawn_now(&self, page: usize) -> bool {
+        self.textures.keys().chain(self.exact.keys()).any(|(p, _, _)| *p == page)
     }
 
     /// Forget `text`, `layers` and `foreign` if they were read under another undo
@@ -178,6 +194,7 @@ impl DocCaches {
         self.textures.retain(|(page, _, _), _| *page >= keep_from && *page < keep_to);
         self.exact.retain(|(page, _, _), _| *page >= keep_from && *page < keep_to);
         self.facts.retain(|page, _| *page >= keep_from && *page < keep_to);
+        self.held.retain(|(page, _), _| *page >= keep_from && *page < keep_to);
         if self.detail.as_ref().is_some_and(|d| d.page < keep_from || d.page >= keep_to) {
             self.detail = None;
         }

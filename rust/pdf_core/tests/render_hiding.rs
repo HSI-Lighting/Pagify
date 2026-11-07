@@ -92,6 +92,26 @@ fn a_hidden_object_is_not_drawn_and_nothing_else_changes() {
     assert_eq!(changed_elsewhere, 0, "pixels outside the hidden word that changed");
 }
 
+/// Reported from use (0.1.119): under the Edit Text box a gold lamp turned blue and a warm grey band
+/// cool. The picture was PDFium's true BGRA where the page's own pictures are RGBA: pdfium-render
+/// asks for `FPDF_REVERSE_BYTE_ORDER`, the hand-made render did not. Black on white cannot show it.
+#[test]
+fn a_coloured_page_keeps_its_colours_when_drawn_hiding_a_word() {
+    if skip_without_pdfium().is_none() {
+        return;
+    }
+    let _lock = serial();
+    let page = b"1 0.5 0 rg 72 500 100 100 re f BT /F1 24 Tf 72 700 Td (Hello) Tj ET";
+    let doc = PdfiumDocument::open_bytes(helvetica_page(page), None).expect("open");
+    let hello = word(&doc, "Hello").object;
+    let plain = doc.render_page_to_bitmap(0, &request()).expect("plain render");
+    let hidden = doc.render_page_hiding(0, &request(), &[hello]).expect("hiding render");
+    // The middle of the orange square: 122 pt across, 792 - 550 = 242 pt down.
+    let at = (242.0 * SCALE) as usize * plain.stride + (122.0 * SCALE) as usize * 4;
+    assert_eq!(&plain.data[at..at + 3], &[255, 128, 0], "test assumption: the plain render is orange, red first");
+    assert_eq!(&hidden.data[at..at + 3], &plain.data[at..at + 3], "the page drawn hiding a word is not in the page's own colours");
+}
+
 #[test]
 fn hiding_leaves_the_document_as_it_was() {
     if skip_without_pdfium().is_none() {

@@ -1000,11 +1000,14 @@ impl Document for PdfiumDocument {
             Rotation::Clockwise180 => 2,
             Rotation::Clockwise270 => 3,
         };
-        // `fpdfview.h`, and the same two flags `build_render_config` ends up with.
+        // `fpdfview.h`, and the flags `build_render_config` ends up with — **the byte order
+        // too**: pdfium-render asks for it by default, which is why its pictures are RGBA
+        // (`PDFIUM_OUTPUT_ORDER`). Left out, this one came back BGRA: a gold lamp drew blue.
         const FPDF_ANNOT: c_int = 0x01;
+        const FPDF_REVERSE_BYTE_ORDER: c_int = 0x10;
         const FPDF_RENDER_LIMITEDIMAGECACHE: c_int = 0x200;
         const FPDF_BITMAP_BGRA: c_int = 4;
-        let mut flags = FPDF_RENDER_LIMITEDIMAGECACHE;
+        let mut flags = FPDF_RENDER_LIMITEDIMAGECACHE | FPDF_REVERSE_BYTE_ORDER;
         if request.render_annotations {
             flags |= FPDF_ANNOT;
         }

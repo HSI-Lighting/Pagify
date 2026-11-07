@@ -192,3 +192,44 @@ fn a_shrunk_picture_averages_what_each_pixel_covers() {
     let board = egui::ColorImage::new([2, 2], vec![black, white, white, black]);
     assert_eq!(shrink(&board, 1, 1).pixels, [egui::Color32::from_rgba_premultiplied(127, 127, 127, 255)]);
 }
+
+/// Reported from use (0.1.119): "when the edit is applied the whole PDF reloads." Every page picture
+/// went with the caches, and a page with none is drawn as white paper until its new one comes.
+/// **The picture from before the edit is drawn until then**, and let go of once it has come.
+#[test]
+fn an_edited_page_is_drawn_from_its_old_picture_until_the_new_one_comes() {
+    let mut h = crate::ui_tests::async_harness(&crate::ui_tests::fixture("pages-ladder.pdf"));
+    assert!(until(&mut h, page_0_pictured), "page 1 never got its picture");
+    h.state_mut().tab_mut().doc.as_mut().expect("doc").rendered_is_stale();
+    assert!(!page_0_pictured(h.state()), "test assumption: the edit threw the page's picture away");
+    let doc = h.state().tab().doc.as_ref().expect("doc");
+    assert!(stand_in_for(doc, 0, 4, 0).is_some(), "the page is blank paper until its new picture comes");
+    assert!(until(&mut h, page_0_pictured), "the new picture never came");
+    let held = h.state().tab().doc.as_ref().expect("doc").caches.held.keys().any(|(page, _)| *page == 0);
+    assert!(!held, "the picture from before the edit is still kept after the new one came");
+}
+
+/// A page hayro may draw differently is PDFium's once that is known, **in the states after an edit
+/// too**. It was hayro's first in every new state, then PDFium's: on the datasheet the words of the
+/// edited page changed face twice after every edit (reported from use, 0.1.119).
+#[test]
+fn after_an_edit_a_page_hayro_may_draw_differently_goes_straight_to_pdfium() {
+    let session = Session::open(crate::ui_tests::fixture("two-column.pdf")).expect("open");
+    let mark = pdf_core::document::Rect { left: 72.0, top: 72.0, right: 200.0, bottom: 90.0 };
+    session.highlight(0, vec![mark], pdf_core::document::Color { r: 255, g: 230, b: 0, a: 255 }).expect("highlight");
+    let path = std::env::temp_dir().join(format!("pagify-highlighted-edit-{}.pdf", std::process::id()));
+    session.save_to(&path, false).expect("save");
+    let mut h = crate::ui_tests::async_harness(path.to_str().expect("path"));
+    let pdfiums = |app: &PagifyApp| page_0_pictured(app) && app.render_state.render_stats.applied >= 1;
+    assert!(until(&mut h, pdfiums), "PDFium's picture never arrived: {:?}", h.state().render_state.render_stats);
+    h.state_mut().tab_mut().doc.as_mut().expect("doc").rendered_is_stale();
+    let ctx = h.ctx.clone();
+    let (doc, epoch, session) = {
+        let d = h.state().tab().doc.as_ref().expect("doc");
+        (d.id, d.render_epoch, d.session.clone())
+    };
+    let ask = |step| RenderJob { doc, epoch, page: 0, step, rotation: Rotation::None, scale: 1.0, crop: None, session: session.clone(), hide: None };
+    assert!(h.state_mut().ask_for_preview(&ctx, ask(EXACT_STEP_BASE + 100)).is_err(), "hayro was asked for the page again");
+    assert!(h.state_mut().ask_for_preview(&ctx, ask(THUMB_STEP_BASE + 100)).is_ok(), "its thumbnail is still hayro's");
+    let _ = std::fs::remove_file(&path);
+}

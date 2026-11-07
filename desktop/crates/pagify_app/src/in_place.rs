@@ -142,6 +142,20 @@ pub(crate) fn fit_rows(mut galley: Arc<egui::Galley>, widths: &[Option<f32>]) ->
     galley
 }
 
+/// The width each row of a box whose words have changed is drawn at, from `widths` (the page's own,
+/// per line, as [`fit_rows`] takes them) — **each line as Apply will write it**: a line that says what
+/// it said is kept as the page has it, and in a justified paragraph a retyped line but the last keeps
+/// the width it had. `None` for the rest; nothing at all once the box's rows no longer pair with the
+/// page's lines (a line added or taken away, a row wrapped) or a look was changed.
+pub(crate) fn kept_widths(typed: &str, original: &str, widths: &[Option<f32>], justify: bool, look_dirty: bool, rows: usize) -> Vec<Option<f32>> {
+    let (typed, was): (Vec<&str>, Vec<&str>) = (typed.split('\n').collect(), original.split('\n').collect());
+    if look_dirty || typed.len() != was.len() || rows != typed.len() {
+        return Vec::new();
+    }
+    let last = typed.len() - 1;
+    widths.iter().enumerate().map(|(i, width)| width.filter(|_| typed.get(i) == was.get(i) || (justify && i < last))).collect()
+}
+
 /// `galley` with every gap between the letters of row *i* widened by `per_row[i]` px (narrowed,
 /// if negative); a row with no amount, or 0, is left as it is. **For the spacing a page keeps
 /// apart from its `Tc`**: a producer that letter-spaces a line writes a `TJ` number after every

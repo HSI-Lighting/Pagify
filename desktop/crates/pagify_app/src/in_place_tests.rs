@@ -610,3 +610,62 @@ fn drawn_lettering_and_justified_paragraphs_keep_alignment_greyed() {
     assert!(crate::edit_text_gates(&edit).center.is_none());
     assert!(crate::edit_text_gates(&edit).justify.is_some(), "justifying is not built");
 }
+
+/// The rows of the open box, each one's last letter against where the page's own letters of that line
+/// end, in screen px: `(drawn, page)`.
+fn row_ends(h: &mut egui_kittest::Harness<'static, PagifyApp>, page_lines: &[&str]) -> Vec<(f32, f32)> {
+    let (galley, at) = h.state().tab().edit.editing_run.as_ref().and_then(|e| e.shown.clone()).expect("drawn");
+    page_lines.iter().enumerate().map(|(row, text)| (last_letter_right(&galley, at, row), page_ink_right_px(h, text))).collect()
+}
+
+/// Reported from use (0.1.119, the datasheet's "Description"): one letter deleted and every line
+/// of the box changed width. **A line nobody typed in is written back as it was**, so the box
+/// keeps drawing it the page's width after another line changes: only the typed line may move.
+/// Lines the page draws with 20 pt more after each space (`Tw`), which the editor's own layout knows
+/// nothing of: laid out by the editor alone they come out far narrower than the page has them.
+const WORD_SPACED: &str = "BT /F1 10 Tf 20 Tw 100 700 Td (alpha beta gamma) Tj ET
+\r
+                           BT /F1 10 Tf 20 Tw 100 688 Td (delta epsilon zeta) Tj ET
+\r
+                           BT /F1 10 Tf 20 Tw 100 676 Td (eta theta iota) Tj ET
+";
+
+#[test]
+fn a_line_not_typed_in_keeps_the_pages_width_once_another_is() {
+    let mut app = opened(open_page("inplace-kept-widths", &[], WORD_SPACED));
+    type_a_letter(&mut app);
+    let mut h = harness_from(app);
+    h.run_steps(4);
+    for (row, (drawn, page)) in row_ends(&mut h, &["alpha beta gamma", "delta epsilon zeta"]).into_iter().enumerate() {
+        assert!((drawn - page).abs() < 1.0, "untouched line {row} ends at {drawn}, the page's at {page}");
+    }
+}
+
+/// **A retyped line of a justified paragraph is asked to keep the width it had** (Apply's `justified`),
+/// so the box shows it that wide: on the datasheet it was spread to the box's own width instead, which
+/// the editor's font had made 10-13% wider than the page's column.
+#[test]
+fn a_retyped_line_of_a_justified_paragraph_keeps_its_width() {
+    let mut app = opened(open_page("inplace-justified-width", &LINES, ""));
+    {
+        let edit = app.tab_mut().edit.editing_run.as_mut().expect("an editor");
+        edit.justify = true;
+        edit.buffer = edit.buffer.replace("delta epsilon zeta", "delta epsilon zet");
+    }
+    let mut h = harness_from(app);
+    h.run_steps(4);
+    for (row, (drawn, page)) in row_ends(&mut h, &["alpha beta gamma", "delta epsilon zeta"]).into_iter().enumerate() {
+        assert!((drawn - page).abs() < 1.0, "justified line {row} ends at {drawn}, the page's at {page}");
+    }
+}
+
+/// Applied, the typed look stays up until the page has **a picture of its own as it now is**: not a
+/// picture held from before the edit, which still shows the old words.
+#[test]
+fn a_picture_from_before_the_edit_does_not_end_the_typed_look() {
+    let mut h = typed_and_settled();
+    h.state_mut().apply_editing_page();
+    settle(&mut h, 1);
+    let drawn_now = h.state().tab().doc.as_ref().is_some_and(|d| d.caches.drawn_now(0));
+    assert!(drawn_now || h.state().tab().edit.settling.is_some(), "the typed look went before the page's new picture came");
+}

@@ -12217,6 +12217,11 @@ impl PagifyApp {
     fn refresh_after_page_change(&mut self) {
         let Some(doc) = &mut self.tab_mut().doc else { return };
         doc.rendered_is_stale();
+        // Pages added, taken out or moved: a picture held by its old number would be another page's.
+        // ponytail: an undo or redo of such a change goes through `keep_up` and keeps them for the
+        // moment until the new pictures come; key them by page identity if that is ever seen.
+        doc.caches.held.clear();
+        doc.caches.held_thumbs.clear();
         if let (Ok(count), Ok(sizes)) = (doc.session.page_count(), doc.session.page_sizes()) {
             doc.page_count = count;
             // Rebuilt in the layout the reader chose. `Strip::new` is
@@ -15494,12 +15499,12 @@ impl PagifyApp {
 
     /// Where the page's own letters of each line of the open box end: the right edge of the last mark of
     /// ink in the line's box, in page points. **Not the line's box edge**, which can run well past its
-    /// letters (a table cell's padding): the invisible rows are spread to the letters. Empty - no fit -
-    /// once the words have changed, on a page too heavy to read its letters, and for a box that is not
-    /// edited in place.
+    /// letters (a table cell's padding): the invisible rows are spread to the letters. Still read once
+    /// the words have changed: the lines Apply keeps are drawn to them ([`in_place::kept_widths`]).
+    /// Empty - no fit - on a page too heavy to read its letters, and for a box that is not edited in place.
     fn line_ink_rights(&mut self, page: usize) -> Vec<Option<f32>> {
         let areas: Vec<(f32, f32, f32, f32)> =
-            match self.tab().edit.editing_run.as_ref().filter(|e| e.page == page && e.in_place() && !e.changed()) {
+            match self.tab().edit.editing_run.as_ref().filter(|e| e.page == page && e.in_place()) {
                 Some(edit) => edit.lines.iter().map(|(_, r)| (r.left, r.top, r.right, r.bottom)).collect(),
                 None => return Vec::new(),
             };
@@ -15673,6 +15678,12 @@ impl PagifyApp {
                 if let Some(worker) = self.render_state.renders.as_mut() {
                     worker.failed.insert((done.doc, done.epoch, done.page, done.step, done.rotation as u8));
                 }
+                // No new picture is coming, so the old one goes: after a lock or a redaction it shows
+                // what is no longer there.
+                if let Some(doc) = self.tabs.iter_mut().filter_map(|t| t.doc.as_mut()).find(|d| d.id == done.doc) {
+                    doc.caches.held.retain(|(page, _), _| *page != done.page);
+                    doc.caches.held_thumbs.remove(&done.page);
+                }
                 continue;
             }
             let (page, detail, took, textless) = (done.page, done.crop.is_some(), done.took, done.hide.is_some());
@@ -15741,6 +15752,7 @@ impl PagifyApp {
                     },
                 );
                 doc.caches.thumbs.insert(done.page, handle);
+                doc.caches.held_thumbs.remove(&done.page);
             }
             None if done.step >= EXACT_STEP_BASE => {
                 let handle = ctx.load_texture(
@@ -15751,6 +15763,7 @@ impl PagifyApp {
                 // One picture a page and turn: a new size replaces the old.
                 doc.caches.exact.retain(|(p, _, r), _| !(*p == done.page && *r == rotation));
                 doc.caches.exact.insert((done.page, done.step, rotation), handle);
+                doc.caches.held.remove(&(done.page, rotation));
             }
             None => {
                 let handle = ctx.load_texture(
@@ -15759,6 +15772,7 @@ impl PagifyApp {
                     egui::TextureOptions::LINEAR,
                 );
                 doc.caches.textures.insert((done.page, done.step, rotation), handle);
+                doc.caches.held.remove(&(done.page, rotation));
                 Self::trim_scales(doc, done.page, done.step, rotation);
             }
             Some(crop) => {
@@ -15974,6 +15988,8 @@ impl PagifyApp {
             }
             held = Some(existing.clone());
         }
+        // From before the last edit, until the new one comes: the rail does not blank on every edit.
+        let held = held.or_else(|| doc.caches.held_thumbs.get(&page).cloned());
         let (width_pt, _) = doc.strip.size_of(page)?;
         let scale = width_px as f32 / width_pt.max(1.0);
         if async_render {
@@ -16404,6 +16420,11 @@ fn stand_in_for(doc: &Doc, page: usize, step: u32, rotation: u8) -> Option<(egui
         .map(|(_, texture)| texture.clone())
     {
         return Some((texture, false));
+    }
+    // The page as it was before the last edit, until its new picture comes: not blank paper, and
+    // sharper than its thumbnail. Asked for at once all the same, like a thumbnail.
+    if let Some(texture) = doc.caches.held.get(&(page, rotation)) {
+        return Some((texture.clone(), true));
     }
     // The thumbnail is of the page upright, so only a view that is upright.
     if rotation == 0 {
@@ -16873,7 +16894,12 @@ impl PagifyApp {
             let galley = if in_place_now && same {
                 in_place::fit_rows(galley, &widths)
             } else {
-                in_place::spread_rows(galley, &tracking_px)
+                // Reported from use (0.1.119): one letter deleted on the datasheet and every line of
+                // the box grew 10-13% wider, spread to the box's own width. The lines Apply keeps as
+                // the page has them, or at the width they had, are drawn that wide.
+                let rows = galley.rows.len();
+                let kept = in_place::kept_widths(buf.as_str(), &original, &widths, justify, look_dirty, rows);
+                in_place::fit_rows(in_place::spread_rows(galley, &tracking_px), &kept)
             };
             // Each row's ink: where its first letter starts and how wide its letters are.
             let inks: Vec<(f32, f32)> = galley
