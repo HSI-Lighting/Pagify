@@ -320,6 +320,52 @@ mod tools_chain {
         assert!(app.ui_state.print_wanted, "errors: {:?}", errors(&app));
     }
 
+    /// **Asked for: "blank doc is not built, build it too".** `blankdoc` was a
+    /// planned verb. It writes one A4 sheet where it is told and opens it in a
+    /// tab of its own, leaving the document already open where it was.
+    #[test]
+    fn the_blankdoc_command_writes_an_a4_sheet_and_opens_it_in_a_new_tab() {
+        let dir = std::env::temp_dir().join(format!("pagify-blankdoc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let dest = dir.join("new.pdf");
+
+        let mut app = app();
+        app.submit(&format!("blankdoc {}", dest.display()));
+
+        assert!(errors(&app).is_empty(), "errors: {:?}", errors(&app));
+        assert!(dest.exists(), "nothing was written");
+        assert_eq!(app.tabs.len(), 2, "the open document lost its tab");
+        let doc = app.tab().doc.as_ref().expect("the blank did not open");
+        assert_eq!(doc.session.path(), dest);
+        assert_eq!(doc.page_count, 1);
+        let size = doc.session.page_sizes().expect("sizes")[0];
+        assert_eq!((size.width_pt, size.height_pt), (595.0, 842.0));
+        drop(app);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Writing over a file that a tab is reading would pull the pages out
+    /// from under it.
+    #[test]
+    fn blankdoc_over_an_open_document_writes_nothing_and_says_so() {
+        let dir = std::env::temp_dir().join(format!("pagify-blankdoc-open-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let open = dir.join("open.pdf");
+        std::fs::copy(fixture("pages-ladder.pdf"), &open).expect("copy the fixture");
+        let before = std::fs::read(&open).expect("read");
+
+        let mut app = PagifyApp::new(Some(&open.to_string_lossy()));
+        app.submit(&format!("blankdoc {}", open.display()));
+
+        assert!(errors(&app).iter().any(|e| e.contains("open")), "errors: {:?}", errors(&app));
+        assert_eq!(std::fs::read(&open).expect("read"), before, "the open file was overwritten");
+        assert_eq!(app.tabs.len(), 1);
+        drop(app);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// **Asked for: Pages and Exact "to the View tab".** They were
     /// checkboxes in the title bar.
     #[test]

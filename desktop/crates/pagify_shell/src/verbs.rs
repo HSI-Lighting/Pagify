@@ -162,6 +162,10 @@ pub enum Verb {
     ShareCopy(PathBuf),
     /// Ask where, rather than being told: bare `sharecopy`.
     ShareCopyDialog,
+    /// Write a new blank document to this path and open it.
+    BlankDoc(PathBuf),
+    /// Ask where, rather than being told: bare `blankdoc`.
+    BlankDocDialog,
     Page(PageTarget),
     Zoom(ZoomTarget),
     /// Rotate the *page*, in degrees clockwise. Quarter turns only — PDF stores
@@ -777,7 +781,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("autobookmarks", "the navigation phase", "the Auto Create Bookmarks tool"),
     ("autoscroll", "the viewing phase", "the AutoScroll tool"),
     ("autotag", "the accessibility phase", "the Autotag Document tool"),
-    ("blankdoc", "the conversion phase", "the Blank tool"),
     ("calcorder", "the forms phase", "the Calculation Order tool"),
     ("calculator", "the annotation phase", "the Accounting Calculator tool"),
     ("callout", "the annotation phase", "the Callout tool"),
@@ -969,7 +972,7 @@ fn split_path_and_extra(tail: &str) -> Option<(String, String)> {
 /// Every token this table claims, for the collision test and for help.
 pub fn claimed_tokens() -> Vec<&'static str> {
     let mut tokens = vec![
-        "open", "close", "save", "saveas", "sharecopy", "page", "p", "next", "zoom", "z", "fit",
+        "open", "close", "save", "saveas", "sharecopy", "blankdoc", "page", "p", "next", "zoom", "z", "fit",
         "rotate", "undo", "redo", "pdfium", "version", "checkupdate", "quit", "exit", "help",
         "close!", "quit!", "exit!",
         // Several page operations are spelt out rather than taking the short
@@ -1346,7 +1349,7 @@ fn parse_document_edits(head: &str, rest: &[&str], tail: &str) -> Option<Result<
     })
 }
 
-/// One domain of [`parse`]: the 18 commands below.
+/// One domain of [`parse`]: the 19 commands below.
 fn parse_file_and_view(head: &str, rest: &[&str], tail: &str) -> Option<Result<Verb, String>> {
     Some(match head {
         "selecttool" => Ok(Verb::Pointer(PointerMode::Select)),
@@ -1379,6 +1382,13 @@ fn parse_file_and_view(head: &str, rest: &[&str], tail: &str) -> Option<Result<V
                 Ok(Verb::ShareCopyDialog)
             } else {
                 Ok(Verb::ShareCopy(resolve_path(tail)))
+            }
+        }
+        "blankdoc" => {
+            if tail.is_empty() {
+                Ok(Verb::BlankDocDialog)
+            } else {
+                Ok(Verb::BlankDoc(resolve_path(tail)))
             }
         }
 

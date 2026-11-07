@@ -734,6 +734,17 @@ fn sharecopy_with_no_path_asks_where_and_with_a_path_means_that_path() {
     }
 }
 
+/// **A new blank document, the same shape**: it has to be written somewhere
+/// before it is a document at all, so bare it asks where.
+#[test]
+fn blankdoc_with_no_path_asks_where_and_with_a_path_means_that_path() {
+    assert!(matches!(head("blankdoc"), Dispatch::Pagify(Verb::BlankDocDialog)));
+    match head("blankdoc /tmp/new sheet.pdf") {
+        Dispatch::Pagify(Verb::BlankDoc(path)) => assert_eq!(path, std::path::PathBuf::from("/tmp/new sheet.pdf")),
+        other => panic!("expected BlankDoc, got {other:?}"),
+    }
+}
+
 #[test]
 fn import_can_still_tell_a_path_from_a_page_range() {
     match head("import /tmp/other.pdf 1-3") {

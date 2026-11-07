@@ -17,12 +17,14 @@ const fn tool(glyph: &'static str, label: &'static str, command: &'static str) -
     QuickTool { glyph, label, command }
 }
 
-/// Foxit's list, in its order, less Email (Pagify's is not built yet). Each
-/// runs a command string, like every ribbon button.
-pub(crate) const STANDARD: [QuickTool; 9] = [
+/// Foxit's list, in its order, less Email (Pagify's is not built yet), plus
+/// Save for sharing (asked for). Each runs a command string, like every ribbon
+/// button.
+pub(crate) const STANDARD: [QuickTool; 10] = [
     tool("\u{E2C8}", "Open", "open"),
     tool("\u{E161}", "Save", "save"),
     tool("\u{EB60}", "Save As", "saveas"),
+    tool("\u{E80D}", "Save for sharing", "sharecopy"),
     tool("\u{E8AD}", "Print", "print"),
     tool("\u{E66D}", "Blank", "blankdoc"),
     tool("\u{E166}", "Undo", "undo"),
@@ -153,8 +155,16 @@ mod tests {
     }
 
     #[test]
-    fn the_nine_come_first_in_their_own_order() {
+    fn the_menu_list_comes_first_in_its_own_order() {
         assert_eq!(labels(&["redo", "highlight", "open"]), ["Open", "Redo", "Highlight"]);
+    }
+
+    /// **Asked for: "add save for sharing".** In the menu, after Save As.
+    #[test]
+    fn save_for_sharing_is_in_the_menu_after_save_as() {
+        let commands: Vec<&str> = STANDARD.iter().map(|t| t.command).collect();
+        let at = commands.iter().position(|c| *c == "saveas").expect("Save As");
+        assert_eq!(commands.get(at + 1), Some(&"sharecopy"), "{commands:?}");
     }
 
     #[test]

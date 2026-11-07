@@ -4076,7 +4076,7 @@ impl PagifyApp {
 
     /// The quick tools' **More Commands…**: every ribbon button under its
     /// tab's name, ticked while it is a quick tool. Hand and Select — every
-    /// tab's `leading()` — are left out: they are in the nine already.
+    /// tab's `leading()` — are left out: they are in the menu's list already.
     fn draw_more_commands(&mut self, ctx: &egui::Context) {
         if !self.ui_state.more_commands_open {
             return;
@@ -10391,6 +10391,34 @@ impl PagifyApp {
         match dialog.set_file_name(format!("{stem} (for sharing).pdf")).save_file() {
             Some(path) => self.save_share_copy(path),
             None => self.say_info("nothing chosen."),
+        }
+    }
+
+    /// Bare `blankdoc`: a new document is a file before it is anything, so ask
+    /// where it goes — beside the open document, if there is one.
+    fn new_blank_dialog(&mut self) {
+        let mut dialog = rfd::FileDialog::new().set_title("New blank document").add_filter("PDF", &["pdf"]);
+        if let Some(dir) = self.tab().doc.as_ref().and_then(|d| d.session.path().parent().map(|p| p.to_path_buf())) {
+            dialog = dialog.set_directory(dir);
+        }
+        match dialog.set_file_name("Untitled.pdf").save_file() {
+            Some(path) => self.new_blank(&path),
+            None => self.say_info("nothing chosen."),
+        }
+    }
+
+    /// `blankdoc <path>`: write one A4 sheet there and open it in a tab of its own.
+    fn new_blank(&mut self, dest: &std::path::Path) {
+        // **Never over a file a tab is reading.** PDFium loads pages from it
+        // as they are needed; replacing it would pull them out from under that tab.
+        let target = std::fs::canonicalize(dest).ok();
+        if target.is_some() && self.tabs.iter().any(|t| t.doc.as_ref().is_some_and(|d| std::fs::canonicalize(d.session.path()).ok() == target)) {
+            self.say_error("that file is open in a tab — choose another name for the new document.");
+            return;
+        }
+        match Session::write_blank(dest) {
+            Ok(()) => self.open(&dest.to_string_lossy()),
+            Err(e) => self.say_error(format!("blankdoc: {e}")),
         }
     }
 

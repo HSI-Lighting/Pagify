@@ -169,6 +169,10 @@ pub enum Effect {
     SaveShareCopy(std::path::PathBuf),
     /// Ask the platform where to write that copy.
     ShareCopyDialog,
+    /// Write a new blank document to this path, then open it.
+    NewBlank(std::path::PathBuf),
+    /// Ask the platform where to write it.
+    NewBlankDialog,
     /// Extract pages to a file.
     RunExtract { pages: String, dest: std::path::PathBuf },
     /// Import pages from a file.
@@ -364,6 +368,8 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::SaveAsDialog => vec![Effect::SaveAsDialog],
         Verb::ShareCopy(path) => vec![Effect::SaveShareCopy(path.clone())],
         Verb::ShareCopyDialog => vec![Effect::ShareCopyDialog],
+        Verb::BlankDoc(path) => vec![Effect::NewBlank(path.clone())],
+        Verb::BlankDocDialog => vec![Effect::NewBlankDialog],
         Verb::Extract { pages, dest } => {
             vec![Effect::RunExtract { pages: pages.clone(), dest: dest.clone() }]
         }
@@ -611,6 +617,8 @@ mod tests {
             (Verb::SaveAsDialog, vec![Effect::SaveAsDialog]),
             (Verb::ShareCopy("s.pdf".into()), vec![Effect::SaveShareCopy("s.pdf".into())]),
             (Verb::ShareCopyDialog, vec![Effect::ShareCopyDialog]),
+            (Verb::BlankDoc("b.pdf".into()), vec![Effect::NewBlank("b.pdf".into())]),
+            (Verb::BlankDocDialog, vec![Effect::NewBlankDialog]),
             (
                 Verb::Extract { pages: "1-2".into(), dest: "o.pdf".into() },
                 vec![Effect::RunExtract { pages: "1-2".into(), dest: "o.pdf".into() }],
