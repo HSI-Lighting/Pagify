@@ -1,5 +1,6 @@
 package com.hsilighting.pagify.data
 
+import com.hsilighting.pagify.core.ReadingPlace
 import com.hsilighting.pagify.core.RecentDocument
 import com.hsilighting.pagify.core.RecentKind
 import com.hsilighting.pagify.core.recentsFromJson
@@ -57,5 +58,44 @@ class RecentDocumentsStoreTest {
 
         assertEquals(listOf("a", "c"), recentsFromJson(file.readText()).map { it.uri })
         assertEquals(listOf("a", "c"), store.documents.value.map { it.uri })
+    }
+
+    /** Where a document is being read is stored on its row, and only its row. */
+    @Test
+    fun `a reading place is stored on its own document and survives a restart`() = runBlocking<Unit> {
+        val file = libraryOf("a", "b")
+        val place = ReadingPlace(page = 3, zoom = 2f, x = 0.4f, y = 0.6f)
+
+        RecentDocumentsStore(file).rememberPlace("b", place)
+
+        val reread = RecentDocumentsStore(file).apply { load() }.documents.value
+        assertEquals(listOf("a", "b"), reread.map { it.uri })
+        assertEquals(listOf(null, place), reread.map { it.place })
+    }
+
+    /** What `open()` restores from: the row as stored, place carried across. */
+    @Test
+    fun `remembering a document hands back where it was being read`() = runBlocking<Unit> {
+        val file = libraryOf("a")
+        val store = RecentDocumentsStore(file)
+        val place = ReadingPlace(page = 5, y = 0.25f)
+        store.rememberPlace("a", place)
+
+        assertEquals(place, store.remember(drawing("a")).place)
+    }
+
+    /** Turning the setting off: no record of where anything was read, every row kept. */
+    @Test
+    fun `forgetting places keeps every document`() = runBlocking<Unit> {
+        val file = libraryOf("a", "b")
+        RecentDocumentsStore(file).apply {
+            rememberPlace("a", ReadingPlace(page = 2))
+            rememberPlace("b", ReadingPlace(page = 4, zoom = 3f))
+            forgetPlaces()
+        }
+
+        val reread = recentsFromJson(file.readText())
+        assertEquals(listOf("a", "b"), reread.map { it.uri })
+        assertEquals(listOf(null, null), reread.map { it.place })
     }
 }

@@ -63,6 +63,7 @@ fun PagifyApp(
     onThemeChange: (ThemeChoice) -> Unit,
     onCardTextScale: (Float) -> Unit,
     onShowViewfinder: (Boolean) -> Unit,
+    onRememberReadingPlace: (Boolean) -> Unit,
     onToggleRecording: () -> Unit,
     onReturnToLibrary: () -> Unit,
     /** Contacts read off business cards. */
@@ -198,6 +199,7 @@ fun PagifyApp(
                     onThemeChange = onThemeChange,
                     onCardTextScale = onCardTextScale,
                     onShowViewfinder = onShowViewfinder,
+                    onRememberReadingPlace = onRememberReadingPlace,
                     onShowThumbnails = onShowThumbnails,
                     isRecording = state.isRecording,
                     onToggleRecording = onToggleRecording,

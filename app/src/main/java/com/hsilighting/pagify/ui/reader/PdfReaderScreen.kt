@@ -56,6 +56,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -82,6 +83,7 @@ import com.hsilighting.pagify.core.PageSize
 import com.hsilighting.pagify.core.PdfFont
 import com.hsilighting.pagify.core.PdfMetadata
 import com.hsilighting.pagify.core.pinchProgressAfter
+import com.hsilighting.pagify.core.ReadingPlace
 import com.hsilighting.pagify.core.SessionRecorder
 import com.hsilighting.pagify.core.TextSegment
 import com.hsilighting.pagify.ui.components.AnnotationToolbar
@@ -121,8 +123,12 @@ import com.hsilighting.pagify.ui.components.ThumbnailStrip
 import com.hsilighting.pagify.ui.components.ViewportWindow
 import com.hsilighting.pagify.ui.components.pinchToZoom
 import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -235,6 +241,10 @@ fun PdfReaderScreen(
     onCaptureLasso: (Boolean) -> Unit,
     /** The reader has taken the scroll a history step asked for. */
     onJumpHandled: () -> Unit,
+    /** The reader has held still here; remember it for the next open. */
+    onReadingPlace: (ReadingPlace) -> Unit,
+    /** The reader has gone back to where the document was last being read. */
+    onPlaceRestored: () -> Unit,
     onShowMetadata: (Boolean) -> Unit,
     // ---------------------------------------------------------- page organiser --
     onShowPageOrganiser: (Boolean) -> Unit,
@@ -558,6 +568,8 @@ fun PdfReaderScreen(
                     onClearSelection = onClearSelection,
                     onCaptureViewport = onCaptureViewport,
                     onJumpHandled = onJumpHandled,
+                    onReadingPlace = onReadingPlace,
+                    onPlaceRestored = onPlaceRestored,
                     onPageVisible = onPageVisible,
                     onZoomInOn = onZoomInOn,
                     onZoomTo = onZoomTo,
@@ -879,6 +891,8 @@ private fun PageList(
         mask: List<Offset>,
     ) -> Unit,
     onJumpHandled: () -> Unit,
+    onReadingPlace: (ReadingPlace) -> Unit,
+    onPlaceRestored: () -> Unit,
     onPageVisible: (Int) -> Unit,
     onZoomInOn: (Int, Float) -> Unit,
     onZoomTo: (Float) -> Unit,
@@ -959,6 +973,61 @@ private fun PageList(
         delay(SCROLL_SETTLE_MILLIS)
         scrollingProgrammatically = false
         onJumpHandled()
+    }
+
+    // Back to where this document was last being read. The page is already the
+    // current one, and pinned if it was magnified; what is left is the spot on it.
+    LaunchedEffect(state.restorePlace) {
+        val place = state.restorePlace ?: return@LaunchedEffect
+        if (place.zoom > PdfReaderState.FIT_WIDTH_ZOOM) {
+            recenterRequest = Offset(place.x, place.y)
+        } else {
+            scrollingProgrammatically = true
+            listState.scrollToItem(place.page)
+            // How far down is a fraction of the page's height, which is known
+            // only once the list has laid the page out.
+            val height = snapshotFlow {
+                listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == place.page }?.size
+            }.filterNotNull().first()
+            listState.scrollToItem(place.page, (place.y * height).roundToInt())
+            delay(SCROLL_SETTLE_MILLIS)
+            scrollingProgrammatically = false
+        }
+        onPlaceRestored()
+    }
+
+    // Where the reader is once it has held still, so the document reopens there.
+    // Once per resting point rather than per frame, and written as it happens
+    // rather than on the way out, because an app swiped away gets no way out.
+    // Silent until a restore is applied: the list's first layout is at the top,
+    // and reporting that would overwrite the place being restored.
+    val latestState by rememberUpdatedState(state)
+    LaunchedEffect(listState) {
+        snapshotFlow {
+            val now = latestState
+            val pinned = now.zoomedPage
+            when {
+                now.restorePlace != null -> null
+                pinned != null -> ReadingPlace(
+                    page = pinned,
+                    zoom = now.zoom,
+                    x = window.left + window.width / 2f,
+                    y = window.top + window.height / 2f,
+                )
+                else -> {
+                    val index = listState.firstVisibleItemIndex
+                    listState.layoutInfo.visibleItemsInfo
+                        .firstOrNull { it.index == index && it.size > 0 }
+                        ?.let { ReadingPlace(page = index, y = listState.firstVisibleItemScrollOffset / it.size.toFloat()) }
+                }
+            }
+        }
+            .distinctUntilChanged()
+            .collectLatest { place ->
+                if (place == null) return@collectLatest
+                delay(PLACE_SETTLE_MILLIS)
+                onReadingPlace(place)
+            }
     }
 
     // Which page you are actually looking at.
@@ -1671,6 +1740,9 @@ private const val DOUBLE_TAP_ZOOM = 2.5f
 
 /** How long to ignore visibility echoes after scrolling the reader ourselves. */
 private const val SCROLL_SETTLE_MILLIS = 250L
+
+/** How long the reader must hold still before where it is counts as a reading place. */
+private const val PLACE_SETTLE_MILLIS = 500L
 
 
 /**

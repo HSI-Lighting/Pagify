@@ -36,7 +36,46 @@ data class RecentDocument(
      * survive the upgrade instead of trying to open a PDF in the 3D viewer.
      */
     val kind: RecentKind = RecentKind.Document,
+    /** Where it was being read, so opening it again lands there. Null: the top. */
+    val place: ReadingPlace? = null,
 )
+
+/**
+ * Where a document was being read.
+ *
+ * Fractions of the page rather than pixels, so a place survives the phone being
+ * turned or the thumbnail rail being shown — anything that changes how wide a
+ * page is drawn.
+ *
+ * At [zoom] 1 (fit-width, the scrolling list) [page] is the page at the top of the
+ * screen and [y] how far down it the screen starts; [x] is unused. Magnified,
+ * [page] is the pinned page and ([x], [y]) the point at the centre of the screen,
+ * which is what the magnified view opens on.
+ */
+data class ReadingPlace(
+    val page: Int,
+    val zoom: Float = 1f,
+    val x: Float = 0.5f,
+    val y: Float = 0f,
+)
+
+/**
+ * This place inside a document of [pageCount] pages, or null when it cannot be one.
+ *
+ * The file may have lost pages since it was read, and a place is read back from
+ * a file that anything could have written.
+ */
+fun ReadingPlace.within(pageCount: Int, zooms: ClosedFloatingPointRange<Float>): ReadingPlace? {
+    if (pageCount <= 0 || !isFinite()) return null
+    return ReadingPlace(
+        page = page.coerceIn(0, pageCount - 1),
+        zoom = zoom.coerceIn(zooms),
+        x = x.coerceIn(0f, 1f),
+        y = y.coerceIn(0f, 1f),
+    )
+}
+
+private fun ReadingPlace.isFinite() = zoom.isFinite() && x.isFinite() && y.isFinite()
 
 /** The screens a remembered file can be reopened in. */
 enum class RecentKind(val stored: String) {
@@ -75,13 +114,20 @@ enum class RecentKind(val stored: String) {
  * The newest wins, which is the part that keeps the list working: its URI is
  * the one just proven to open, where the one it replaces may be a grant that
  * has since expired.
+ *
+ * **Its place comes from the entry it replaces** unless it brings its own: every
+ * open remembers a fresh entry, and without this, opening a document would forget
+ * where it was being read.
  */
 fun promoteRecent(
     existing: List<RecentDocument>,
     document: RecentDocument,
     limit: Int = RECENT_DOCUMENT_LIMIT,
-): List<RecentDocument> =
-    (listOf(document) + existing.filterNot { it.isTheSameDocumentAs(document) }).take(limit)
+): List<RecentDocument> {
+    val place = document.place ?: existing.firstOrNull { it.isTheSameDocumentAs(document) }?.place
+    return (listOf(document.copy(place = place)) + existing.filterNot { it.isTheSameDocumentAs(document) })
+        .take(limit)
+}
 
 /**
  * Whether two entries stand for one document. See [promoteRecent].
@@ -148,6 +194,18 @@ fun List<RecentDocument>.toRecentsJson(): String = JSONArray(
             put("pageCount", document.pageCount)
             put("openedAtMillis", document.openedAtMillis)
             put("kind", document.kind.stored)
+            // `org.json` throws on NaN, and one throw here would stop the whole
+            // library saving, so a place that is not a number is left out.
+            document.place?.takeIf { it.isFinite() }?.let { place ->
+                put(
+                    "place",
+                    JSONObject()
+                        .put("page", place.page)
+                        .put("zoom", place.zoom.toDouble())
+                        .put("x", place.x.toDouble())
+                        .put("y", place.y.toDouble()),
+                )
+            }
         }
     },
 ).toString()
@@ -173,6 +231,14 @@ fun recentsFromJson(json: String): List<RecentDocument> {
             pageCount = entry.optInt("pageCount", 0),
             openedAtMillis = entry.optLong("openedAtMillis", 0L),
             kind = RecentKind.of(entry.optString("kind")),
+            place = entry.optJSONObject("place")?.let { place ->
+                ReadingPlace(
+                    page = place.optInt("page", 0),
+                    zoom = place.optDouble("zoom", 1.0).toFloat(),
+                    x = place.optDouble("x", 0.5).toFloat(),
+                    y = place.optDouble("y", 0.0).toFloat(),
+                )
+            },
         )
     }
 

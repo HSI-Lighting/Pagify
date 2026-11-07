@@ -2,6 +2,7 @@ package com.hsilighting.pagify.data
 
 import android.content.Context
 import android.util.Log
+import com.hsilighting.pagify.core.ReadingPlace
 import com.hsilighting.pagify.core.RecentDocument
 import com.hsilighting.pagify.core.forgetRecent
 import com.hsilighting.pagify.core.promoteRecent
@@ -58,10 +59,30 @@ class RecentDocumentsStore(private val file: File) {
      */
     suspend fun load() = lock.withLock { loadOnce() }
 
-    /** Record a document as just opened, and write the list back. */
-    suspend fun remember(document: RecentDocument) = lock.withLock {
+    /**
+     * Record a document as just opened, and write the list back.
+     *
+     * @return the row as stored, which carries where it was last being read.
+     */
+    suspend fun remember(document: RecentDocument): RecentDocument = lock.withLock {
         loadOnce()
-        write(promoteRecent(_documents.value, document))
+        val documents = promoteRecent(_documents.value, document)
+        write(documents)
+        documents.first()
+    }
+
+    /** Where the document at [uri] is being read. Nothing is written if it is not listed. */
+    suspend fun rememberPlace(uri: String, place: ReadingPlace) = lock.withLock {
+        loadOnce()
+        val documents = _documents.value
+        if (documents.none { it.uri == uri }) return@withLock
+        write(documents.map { if (it.uri == uri) it.copy(place = place) else it })
+    }
+
+    /** Erase where every document was being read, keeping the documents. */
+    suspend fun forgetPlaces() = lock.withLock {
+        loadOnce()
+        write(_documents.value.map { it.copy(place = null) })
     }
 
     /**

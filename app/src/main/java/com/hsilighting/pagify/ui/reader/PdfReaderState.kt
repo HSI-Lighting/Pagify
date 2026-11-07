@@ -18,6 +18,7 @@ import com.hsilighting.pagify.core.AnnotationTool
 import com.hsilighting.pagify.core.EditState
 import com.hsilighting.pagify.core.PageSize
 import com.hsilighting.pagify.core.PdfMetadata
+import com.hsilighting.pagify.core.ReadingPlace
 
 /**
  * Everything the reader screen draws from. One immutable snapshot per emission,
@@ -266,6 +267,12 @@ data class PdfReaderState(
      * it has scrolled, so the same page can be asked for twice in a row.
      */
     val jumpToPage: Int? = null,
+    /**
+     * Where to put the reader once the document is on screen: where it was last
+     * being read. Cleared by the reader once applied; until then it reports no
+     * place of its own, so the first layout at the top cannot overwrite this one.
+     */
+    val restorePlace: ReadingPlace? = null,
 
     // ------------------------------------------------------------- selection --
     /**

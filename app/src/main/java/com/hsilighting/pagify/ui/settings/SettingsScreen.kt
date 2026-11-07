@@ -59,6 +59,7 @@ fun SettingsScreen(
     onThemeChange: (ThemeChoice) -> Unit,
     onCardTextScale: (Float) -> Unit,
     onShowViewfinder: (Boolean) -> Unit,
+    onRememberReadingPlace: (Boolean) -> Unit,
     showThumbnails: Boolean,
     onShowThumbnails: (Boolean) -> Unit,
     isRecording: Boolean,
@@ -201,6 +202,16 @@ fun SettingsScreen(
                     "to a handle from the map itself.",
                 checked = settings.showViewfinder,
                 onCheckedChange = onShowViewfinder,
+            )
+        }
+
+        SettingCard {
+            ToggleRow(
+                title = "Reopen where you left off",
+                detail = "Opens each PDF at the page, position and zoom you were last " +
+                    "reading. Turning this off forgets every saved place.",
+                checked = settings.rememberReadingPlace,
+                onCheckedChange = onRememberReadingPlace,
             )
         }
 

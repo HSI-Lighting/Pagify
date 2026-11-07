@@ -366,4 +366,76 @@ class RecentDocumentsTest {
         val again = promoteRecent(library, model())
         assertEquals(2, again.size)
     }
+
+    // ---------------------------------------------------------- reading place --
+
+    private val scrolled = ReadingPlace(page = 4, y = 0.5f)
+    private val zoomed = ReadingPlace(page = 7, zoom = 3.5f, x = 0.25f, y = 0.8f)
+
+    @Test
+    fun `where a document was being read survives the file`() {
+        val library = listOf(doc("a").copy(place = scrolled), doc("b").copy(place = zoomed), doc("c"))
+
+        val read = recentsFromJson(library.toRecentsJson())
+
+        assertEquals(listOf(scrolled, zoomed, null), read.map { it.place })
+    }
+
+    /** Every library on a phone today was written before places existed. */
+    @Test
+    fun `an entry written before places existed opens at the top`() {
+        val old = """[{"uri":"content://a","name":"A.pdf","sizeBytes":10,"pageCount":3,"openedAtMillis":1}]"""
+        assertEquals(null, recentsFromJson(old).single().place)
+    }
+
+    /**
+     * **Opening a document must not forget where it was read.** Every open
+     * remembers a fresh entry with no place; the place has to come across from
+     * the entry it replaces, or the feature undoes itself on the way in.
+     */
+    @Test
+    fun `reopening a document keeps where it was read`() {
+        val library = promoteRecent(listOf(doc("a").copy(place = zoomed), doc("b")), doc("a"))
+        assertEquals(zoomed, library.first().place)
+    }
+
+    /** The same file handed over by another app arrives under a new URI. */
+    @Test
+    fun `reopening a document under another URI keeps where it was read`() {
+        val before = doc("content://picker/1", name = "Plan.pdf", sizeBytes = 9_000L).copy(place = scrolled)
+        val again = doc("content://telegram/9", name = "Plan.pdf", sizeBytes = 9_000L)
+
+        assertEquals(scrolled, promoteRecent(listOf(before), again).single().place)
+    }
+
+    @Test
+    fun `a place given on open replaces the stored one`() {
+        val library = promoteRecent(listOf(doc("a").copy(place = scrolled)), doc("a").copy(place = zoomed))
+        assertEquals(zoomed, library.single().place)
+    }
+
+    /** The file may have lost pages since, or the place may be from a bad write. */
+    @Test
+    fun `a place is held inside the document it is restored into`() {
+        val wild = ReadingPlace(page = 40, zoom = 20f, x = -1f, y = 3f)
+
+        assertEquals(ReadingPlace(page = 2, zoom = 8f, x = 0f, y = 1f), wild.within(pageCount = 3, zooms = 1f..8f))
+        assertEquals(ReadingPlace(page = 0, zoom = 1f), ReadingPlace(page = -5, zoom = 0.2f).within(3, 1f..8f))
+        assertEquals(null, ReadingPlace(page = 1, zoom = Float.NaN).within(3, 1f..8f))
+        assertEquals(null, scrolled.within(pageCount = 0, zooms = 1f..8f))
+    }
+
+    /**
+     * `org.json` throws on NaN, and the store writes the whole library in one
+     * call — so one bad number would stop the library saving at all.
+     */
+    @Test
+    fun `a place that is not a number is dropped rather than breaking the file`() {
+        val library = listOf(doc("a").copy(place = ReadingPlace(page = 1, y = Float.NaN)), doc("b"))
+
+        val read = recentsFromJson(library.toRecentsJson())
+
+        assertEquals(listOf("a", "b"), read.map { it.uri })
+        assertEquals(null, read.first().place)
+    }
 }

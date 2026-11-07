@@ -69,8 +69,10 @@ import com.hsilighting.pagify.core.PageRemap
 import com.hsilighting.pagify.core.PdfCommand
 import com.hsilighting.pagify.core.PdfDocument
 import com.hsilighting.pagify.core.PdfPasswordException
+import com.hsilighting.pagify.core.ReadingPlace
 import com.hsilighting.pagify.core.RecentDocument
 import com.hsilighting.pagify.core.RecentKind
+import com.hsilighting.pagify.core.within
 import com.hsilighting.pagify.core.modelCacheKey
 import com.hsilighting.pagify.core.ThemeChoice
 import com.hsilighting.pagify.data.AppSettingsStore
@@ -392,9 +394,26 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch { settingsStore.update { it.copy(viewfinderMinimized = minimized) } }
     }
 
+    /** Off erases every saved place, not just stops using them. */
+    fun setRememberReadingPlace(remember: Boolean) {
+        viewModelScope.launch {
+            settingsStore.update { it.copy(rememberReadingPlace = remember) }
+            if (!remember) recentDocuments.forgetPlaces()
+        }
+    }
+
+    /**
+     * The settings file being read at startup.
+     *
+     * `open()` waits for it, because a document handed over by another app can
+     * open before it has finished — and reading the switch then would see the
+     * default, restoring a place for somebody who had turned that off.
+     */
+    private val settingsLoad: Job
+
     init {
         viewModelScope.launch { recentDocuments.load() }
-        viewModelScope.launch {
+        settingsLoad = viewModelScope.launch {
             settingsStore.load()
             // The fill lives in two places — here, for the chips to read, and in
             // the settings so it outlives the app — and this is where the two are
@@ -564,7 +583,14 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     var openDocumentUri: Uri? = null
         private set
 
-    fun open(uri: Uri, password: String? = null) {
+    /** Where the document on screen is being read, as the reader last reported it. */
+    private var readingPlace: ReadingPlace? = null
+
+    /**
+     * @param restore where to put the reader instead of where the library says it
+     *   was last read — a save reopens the file and has to land where it was.
+     */
+    fun open(uri: Uri, password: String? = null, restore: ReadingPlace? = null) {
         pendingUri = uri
         openDocumentUri = uri
         closeDocument()
@@ -609,30 +635,52 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
                 // and discovering it cannot when one is pressed.
                 val edits = repository.editState(opened)
 
-                _state.update {
-                    it.copy(
-                        phase = PdfReaderState.Phase.Ready,
-                        documentName = metadata.displayTitle(opened.sourceName),
-                        metadata = metadata,
-                        pageCount = opened.pageCount,
-                        currentPage = 0,
-                        pageSizes = mapOf(0 to firstPage),
-                        editState = edits,
-                        documentRevision = it.documentRevision + 1,
-                    )
-                }
                 // Remembered only once it has actually opened. A document that
                 // failed, or that asked for a password and never got one, is not
                 // something to offer again from the library as if it worked.
-                recentDocuments.remember(
+                // Before it is shown, because the row as stored says where it
+                // was last being read.
+                settingsLoad.join()
+                val remembering = settings.value.rememberReadingPlace
+                val remembered = recentDocuments.remember(
                     RecentDocument(
                         uri = uri.toString(),
                         name = opened.sourceName,
                         sizeBytes = repository.sizeOf(uri),
                         pageCount = opened.pageCount,
                         openedAtMillis = System.currentTimeMillis(),
+                        place = restore.takeIf { remembering },
                     ),
                 )
+                // Switched off, only a save's own place is used: that keeps the
+                // reader still across the reopen, and is never written down.
+                val place = (restore ?: remembered.place.takeIf { remembering })?.within(
+                    opened.pageCount,
+                    PdfReaderState.MIN_ZOOM..PdfReaderState.MAX_ZOOM,
+                )
+                readingPlace = place
+                val startPage = place?.page ?: 0
+                // The same rule as setZoom: above fit-width is the pinned view.
+                val pinned = startPage.takeIf { place != null && place.zoom > PdfReaderState.FIT_WIDTH_ZOOM }
+                // The page landed on is measured now, not by the sweep below, so
+                // the list lays it out at its real height before scrolling into it.
+                val startSize = if (startPage == 0) firstPage else repository.pageSize(opened, startPage)
+
+                _state.update {
+                    it.copy(
+                        phase = PdfReaderState.Phase.Ready,
+                        documentName = metadata.displayTitle(opened.sourceName),
+                        metadata = metadata,
+                        pageCount = opened.pageCount,
+                        currentPage = startPage,
+                        zoom = place?.zoom ?: PdfReaderState.FIT_WIDTH_ZOOM,
+                        zoomedPage = pinned,
+                        pageSizes = mapOf(0 to firstPage, startPage to startSize),
+                        editState = edits,
+                        documentRevision = it.documentRevision + 1,
+                        restorePlace = place,
+                    )
+                }
 
                 schedulePrefetch()
                 warmThumbnails()
@@ -1466,6 +1514,19 @@ frame = pending.frame,
 
     /** The reader has taken the scroll a history step asked for. */
     fun jumpHandled() = _state.update { it.copy(jumpToPage = null) }
+
+    /** The reader held still here: remember it, so the next open lands here. */
+    fun onReadingPlace(place: ReadingPlace) {
+        if (place == readingPlace) return
+        // Kept in memory either way, for a save to reopen at; written down only
+        // if the setting allows.
+        readingPlace = place
+        if (!settings.value.rememberReadingPlace) return
+        val uri = openDocumentUri?.toString() ?: return
+        viewModelScope.launch { recentDocuments.rememberPlace(uri, place) }
+    }
+
+    fun placeRestored() = _state.update { it.copy(restorePlace = null) }
 
     // -------------------------------------------------------------- selection --
 
@@ -2703,12 +2764,10 @@ frame = pending.frame,
                 commitMarks(doc)
                 repository.writeTo(doc, uri, scratchDir(), incremental)
                 SessionRecorder.record("SAVED", "incremental=$incremental")
-                // Reopen at the page the user was on, so saving does not feel like
-                // closing and re-opening the file.
-                val page = _state.value.currentPage
+                // Reopen where the user was, zoom and all, so saving does not feel
+                // like closing and re-opening the file.
                 _state.update { it.copy(isSaving = false, message = "Saved.") }
-                open(uri)
-                _state.update { it.copy(jumpToPage = page) }
+                open(uri, restore = readingPlace)
             } catch (t: Throwable) {
                 Log.e(TAG, "save failed", t)
                 _state.update { it.copy(isSaving = false, message = saveFailureMessage(t)) }

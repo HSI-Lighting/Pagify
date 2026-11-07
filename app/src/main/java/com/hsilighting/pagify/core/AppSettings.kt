@@ -61,6 +61,13 @@ data class AppSettings(
      * badges keep their proportions to each other at every setting.
      */
     val cardTextScale: Float = 1f,
+    /**
+     * Whether a PDF reopens where it was last being read (see `ReadingPlace`).
+     *
+     * Off means the app keeps no record of where anything was read: the places
+     * already saved are erased when it is turned off, not merely ignored.
+     */
+    val rememberReadingPlace: Boolean = true,
 )
 
 /** The settings as the file holds them. */
@@ -74,6 +81,7 @@ fun AppSettings.toSettingsJson(): String = JSONObject()
     .put(CAPTURE_FORMAT_KEY, captureFormat.name)
     .put(CAPTURE_FILL_KEY, captureFill.name)
     .put(CARD_TEXT_SCALE_KEY, cardTextScale.toDouble())
+    .put(REMEMBER_PLACE_KEY, rememberReadingPlace)
     .toString()
 
 /**
@@ -112,6 +120,7 @@ fun settingsFromJson(json: String): AppSettings {
             // or written by a later build with a wider range, must not produce
             // text too small to read or too large to fit a value on screen.
             .coerceIn(CARD_TEXT_MIN, CARD_TEXT_MAX),
+        rememberReadingPlace = stored.optBoolean(REMEMBER_PLACE_KEY, defaults.rememberReadingPlace),
     )
 }
 
@@ -134,6 +143,7 @@ private const val CAPTURE_SCALE_KEY = "captureScale"
 private const val CAPTURE_FORMAT_KEY = "captureFormat"
 private const val CAPTURE_FILL_KEY = "captureFill"
 private const val CARD_TEXT_SCALE_KEY = "cardTextScale"
+private const val REMEMBER_PLACE_KEY = "rememberReadingPlace"
 
 /** The range the review text may be scaled to. */
 const val CARD_TEXT_MIN = 0.8f

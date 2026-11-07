@@ -121,4 +121,18 @@ class AppSettingsTest {
         assertEquals(1f, fresh.viewfinderHandleX, 0.0001f)
         assertEquals(0.5f, fresh.viewfinderHandleY, 0.0001f)
     }
+
+    /** Turned off, it has to stay off: the file is the only thing that says so. */
+    @Test
+    fun `reopening where you left off can be turned off for good`() {
+        val off = AppSettings(rememberReadingPlace = false)
+        assertEquals(off, settingsFromJson(off.toSettingsJson()))
+    }
+
+    /** Every settings file on a phone today was written before the switch existed. */
+    @Test
+    fun `reopening where you left off is on unless turned off`() {
+        assertTrue(AppSettings().rememberReadingPlace)
+        assertTrue(settingsFromJson("""{"theme":"LIGHT"}""").rememberReadingPlace)
+    }
 }
