@@ -784,11 +784,7 @@ pub(crate) fn doc_tab_button(ui: &mut egui::Ui, label: &str, chosen: bool, lifte
     let gap = 8.0;
     let close_size = DOC_TAB_CLOSE;
     let shown = fit_tab_label(ui, label, DOC_TAB_MAX_TEXT);
-    let galley = ui.painter().layout_no_wrap(
-        shown.clone(),
-        egui::FontId::proportional(DOC_TAB_FONT),
-        theme::ink(),
-    );
+    let galley = tab_galley(ui, &shown);
     let size = egui::vec2(
         galley.size().x + padding.x * 2.0 + gap + close_size,
         (galley.size().y.max(close_size)) + padding.y * 2.0,
@@ -862,12 +858,7 @@ pub(crate) const DOC_TAB_MENU_WIDTH: f32 = 26.0;
 /// `label`, or as much of it as fits `max` points with an ellipsis where the
 /// middle was taken out, keeping the last characters.
 pub(crate) fn fit_tab_label(ui: &egui::Ui, label: &str, max: f32) -> String {
-    let width = |text: &str| {
-        ui.painter()
-            .layout_no_wrap(text.to_string(), egui::FontId::proportional(DOC_TAB_FONT), egui::Color32::WHITE)
-            .size()
-            .x
-    };
+    let width = |text: &str| tab_galley(ui, text).size().x;
     if width(label) <= max {
         return label.to_string();
     }
@@ -886,10 +877,25 @@ pub(crate) fn fit_tab_label(ui: &egui::Ui, label: &str, max: f32) -> String {
 /// How wide the tab for `label` is drawn, close button and padding included.
 pub(crate) fn doc_tab_width(ui: &egui::Ui, label: &str) -> f32 {
     let text = fit_tab_label(ui, label, DOC_TAB_MAX_TEXT);
-    let galley = ui
-        .painter()
-        .layout_no_wrap(text, egui::FontId::proportional(DOC_TAB_FONT), egui::Color32::WHITE);
-    galley.size().x + DOC_TAB_PADDING.0 * 2.0 + 8.0 + DOC_TAB_CLOSE
+    tab_galley(ui, &text).size().x + DOC_TAB_PADDING.0 * 2.0 + 8.0 + DOC_TAB_CLOSE
+}
+
+/// A tab's name as drawn — measured with the same call, so the room kept for it
+/// is the room it takes.
+fn tab_galley(ui: &egui::Ui, text: &str) -> std::sync::Arc<egui::Galley> {
+    ui.painter().layout_job(line_job(text, egui::FontId::proportional(DOC_TAB_FONT), theme::ink()))
+}
+
+/// `text` as one line, a Persian or Arabic name reading from the right — egui
+/// joins the letters but lays the words out left to right (`pagify_shell::bidi`).
+/// For anything that shows a name the user gave: a file, a folder.
+/// `Color32::PLACEHOLDER` takes the colour the widget would have used.
+pub(crate) fn line_job(text: &str, font: egui::FontId, colour: egui::Color32) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    for piece in pagify_shell::bidi::visual_pieces(text) {
+        job.append(&piece, 0.0, egui::TextFormat::simple(font.clone(), colour));
+    }
+    job
 }
 
 /// How many of the tabs, taken from the left, fit in `room`. All of them when

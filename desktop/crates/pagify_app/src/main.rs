@@ -3077,7 +3077,43 @@ fn install_fonts(ctx: &egui::Context, run_face: Option<Vec<u8>>, faces: &[(Strin
         fonts.font_data.insert(family.clone(), std::sync::Arc::new(egui::FontData::from_owned(bytes.as_ref().clone())));
         fonts.families.insert(egui::FontFamily::Name(family.clone().into()), vec![family, "Ubuntu-Light".to_owned()]);
     }
+
+    // **Every other script, from the system's own fonts, last in every family.**
+    // egui's fonts are Latin, Greek and Cyrillic: a document named in Persian drew
+    // its tab as a row of empty boxes. Last, so the program's own face keeps every
+    // letter it has, and after the icons, whose private-use codepoints a CJK font
+    // also maps.
+    let fallbacks = system_fallback_fonts();
+    for (name, bytes, index) in fallbacks {
+        let mut data = egui::FontData::from_static(bytes);
+        data.index = *index;
+        fonts.font_data.insert((*name).to_owned(), std::sync::Arc::new(data));
+    }
+    for family in fonts.families.values_mut() {
+        family.extend(fallbacks.iter().map(|(name, ..)| (*name).to_owned()));
+    }
     ctx.set_fonts(fonts);
+}
+
+/// The system fonts behind egui's own, read once for the life of the program.
+/// Segoe UI draws Arabic, Persian, Hebrew and more; Microsoft YaHei Chinese and
+/// Japanese. A font a PC does not have is left out.
+///
+/// `ponytail:` Windows' fonts only, a whole file each (YaHei is 19 MB, kept in memory); on
+/// another system nothing is added. Korean, Indic and Thai need their own (Malgun Gothic,
+/// Nirmala UI, Leelawadee UI) — add them here when a name in one turns up.
+fn system_fallback_fonts() -> &'static [(&'static str, &'static [u8], u32)] {
+    static FONTS: std::sync::OnceLock<Vec<(&'static str, &'static [u8], u32)>> = std::sync::OnceLock::new();
+    FONTS.get_or_init(|| {
+        let dir = std::path::PathBuf::from(std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into())).join("Fonts");
+        [("system-segoe-ui", "segoeui.ttf", 0), ("system-yahei", "msyh.ttc", 0)]
+            .into_iter()
+            .filter_map(|(name, file, index)| {
+                let bytes = std::fs::read(dir.join(file)).ok()?;
+                Some((name, &*Box::leak(bytes.into_boxed_slice()), index))
+            })
+            .collect()
+    })
 }
 
 fn install_icons(ctx: &egui::Context) {
@@ -3977,7 +4013,9 @@ impl PagifyApp {
                                 ui.set_min_width(280.0);
                                 for (i, name) in names.iter().enumerate().skip(visible) {
                                     let shown = fit_tab_label(ui, name, DOC_TAB_MAX_TEXT * 2.0);
-                                    if ui.button(shown).on_hover_text(name).clicked() {
+                                    let font = egui::TextStyle::Button.resolve(ui.style());
+                                    let named = |text: &str| ribbon::line_job(text, font.clone(), egui::Color32::PLACEHOLDER);
+                                    if ui.button(named(&shown)).on_hover_text(named(name)).clicked() {
                                         switch_to = Some(i);
                                         ui.close();
                                     }
@@ -4161,11 +4199,7 @@ impl PagifyApp {
 
             if self.ui_state.command_open {
                 ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(&name)
-                            .color(theme::violet_bright())
-                            .font(egui::FontId::monospace(13.0)),
-                    );
+                    ui.label(ribbon::line_job(&name, egui::FontId::monospace(13.0), theme::violet_bright()));
                     ui.colored_label(theme::ink_faint(), "›");
                     ui.colored_label(theme::ink_dim(), &wants);
                 });
@@ -4232,11 +4266,7 @@ impl PagifyApp {
                         ui.colored_label(theme::ink_faint(), format!("page {} of {page_count}", page + 1));
                         ui.add_space(8.0);
                     }
-                    ui.label(
-                        egui::RichText::new(name)
-                            .color(theme::violet_bright())
-                            .font(egui::FontId::monospace(13.0)),
-                    );
+                    ui.label(ribbon::line_job(name, egui::FontId::monospace(13.0), theme::violet_bright()));
                     ui.colored_label(theme::ink_faint(), ">");
                     // A tool that is waiting for clicks must say so even with
                     // the history folded away. Without this, arming a tool

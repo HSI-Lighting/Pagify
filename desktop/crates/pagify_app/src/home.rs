@@ -297,16 +297,12 @@ fn table(ui: &mut Ui, entries: &[&pagify_shell::recent::Entry]) -> Option<String
                 row.col(|ui| {
                     pdf_icon(ui);
                     ui.add_space(6.0);
-                    ui.label(egui::RichText::new(entry.name()).color(theme::ink()).font(FontId::proportional(13.0)));
+                    ui.label(crate::ribbon::line_job(&entry.name(), FontId::proportional(13.0), theme::ink()));
                 });
                 row.col(|ui| {
                     // Elided at the front, so the filename end of a long path
                     // stays readable — which is the part that identifies it.
-                    ui.label(
-                        egui::RichText::new(elide(&entry.location(), 46))
-                            .color(theme::ink_dim())
-                            .font(FontId::proportional(12.5)),
-                    );
+                    ui.label(crate::ribbon::line_job(&elide(&entry.location(), 46), FontId::proportional(12.5), theme::ink_dim()));
                 });
                 row.col(|ui| {
                     ui.label(

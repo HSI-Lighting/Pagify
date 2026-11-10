@@ -825,6 +825,53 @@ fn every_ribbon_glyph_can_actually_be_drawn() {
     );
 }
 
+/// Reported from use: a document named in Persian showed as a row of empty boxes in
+/// its tab — egui's own fonts have no letter of it. The system's fonts are behind
+/// them for that, in every family the app draws names and text in.
+#[test]
+fn a_file_name_in_persian_or_chinese_draws_letters_not_boxes() {
+    let ctx = egui::Context::default();
+    let mut frame = ctx.run_ui(Default::default(), |_| {});
+    frame.textures_delta.clear();
+    install_icons(&ctx);
+    let mut frame = ctx.run_ui(Default::default(), |_| {});
+    frame.textures_delta.clear();
+
+    for name in ["چالش_های موجود و  راهکارها.pdf", "项目报告.pdf"] {
+        for font in [egui::FontId::proportional(DOC_TAB_FONT), egui::FontId::monospace(13.0)] {
+            // Not ASCII: epaint's `has_glyph` asks whether a character's face is the one
+            // that draws the replacement box, and in Monospace that is Hack, which
+            // draws all of ASCII — "missing" for `_` and `pdf` that are plainly there.
+            let missing: String =
+                ctx.fonts_mut(|f| name.chars().filter(|&c| !c.is_ascii() && !f.has_glyph(&font, c)).collect());
+            assert!(missing.is_empty(), "{name} in {font:?} would draw boxes for {missing:?}");
+        }
+    }
+}
+
+/// The same name's words, read from the right as Explorer shows them: the first
+/// word at the right edge, `.pdf` at the left, and each word's own letters from
+/// the right. Read off where egui actually put each glyph.
+#[test]
+fn a_persian_file_name_in_a_tab_reads_from_the_right() {
+    let ctx = egui::Context::default();
+    let mut frame = ctx.run_ui(Default::default(), |_| {});
+    frame.textures_delta.clear();
+    install_icons(&ctx);
+    let mut frame = ctx.run_ui(Default::default(), |_| {});
+    frame.textures_delta.clear();
+
+    let job = crate::ribbon::line_job("چالش_های موجود و  راهکارها.pdf", egui::FontId::proportional(DOC_TAB_FONT), theme::ink());
+    let galley = ctx.fonts_mut(|f| f.layout_job(job));
+    let x = |c: char| {
+        galley.rows[0].row.glyphs.iter().find(|g| g.chr == c).map(|g| g.pos.x).unwrap_or_else(|| panic!("no {c:?} drawn"))
+    };
+    // p .pdf | ک of راهکارها | ج of موجود | چ of چالش — left to right.
+    assert!(x('p') < x('ک') && x('ک') < x('ج') && x('ج') < x('چ'), "words out of order: p {} ک {} ج {} چ {}", x('p'), x('ک'), x('ج'), x('چ'));
+    // چالش: ش is its last letter, so the leftmost.
+    assert!(x('ش') < x('چ'), "چالش drawn left to right");
+}
+
 /// `button_group_starts` names its dividers by index into `buttons()`,
 /// not by the tool itself — so an edit to `Tab::Draw`'s own button list
 /// that shifts anything could silently move the divider to in front of

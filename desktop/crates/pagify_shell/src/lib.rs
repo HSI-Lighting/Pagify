@@ -13,6 +13,7 @@
 
 pub mod align_page;
 pub mod appearance;
+pub mod bidi;
 pub mod passphrase;
 pub mod block_input;
 pub mod blocks;

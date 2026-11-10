@@ -23,6 +23,9 @@ zeroize = "1"
 # thread at a time and every use of it waits behind the same lock; a thumbnail
 # of a CAD page cost what the page did (1.8 s). The pages stay PDFium's.
 hayro = "0.9.0"
+# Orders a line's right-to-left words for egui, which shapes them but does not
+# order them (`bidi`). Already in the tree through pdf_core.
+unicode-bidi = "0.3"
 
 [dev-dependencies]
 # The comparison tool (`examples/compare_renderers.rs`) saves the two pictures
