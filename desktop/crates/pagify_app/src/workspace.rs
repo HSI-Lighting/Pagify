@@ -2,7 +2,7 @@
 //! closing documents, leaving the window.
 
 use crate::hub;
-use crate::{spawn_update_script, Awaiting, Closing, Doc, DocTab, Tab, NEXT_DOC_ID};
+use crate::{Awaiting, Closing, Doc, DocTab, Tab, NEXT_DOC_ID};
 use pagify_shell::measure::Calibration;
 use pagify_shell::reader::{Strip, PAGE_GAP_PT};
 use pagify_shell::Session;
@@ -88,7 +88,7 @@ impl crate::PagifyApp {
     /// program does once every window has said it is leaving.
     pub(crate) fn exit_program(pending_update: Option<&std::path::Path>) -> ! {
         if let Some(source) = pending_update {
-            spawn_update_script(source);
+            crate::update::install_and_restart(source);
         }
         std::process::exit(0);
     }

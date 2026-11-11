@@ -1026,3 +1026,49 @@ fn heavy_page_costs() {
         );
     }
 }
+
+// ---- right-to-left words are refused up front (§56) ----
+
+/// The runs of page 0 of a Persian fixture (`g3_spell_tests::arabic_pdf`: capitals
+/// read as Persian letters, lower case as Latin).
+fn persian_page(first: &str) -> (PagifyApp, Vec<TextRun>) {
+    let path = super::g3_spell_tests::arabic_pdf(first, "x");
+    let app = PagifyApp::new(Some(path.to_str().unwrap()));
+    let runs = app.tab().doc.as_ref().expect("the fixture opened").session.text_runs(0).expect("runs");
+    (app, runs)
+}
+
+/// Reported 2026-11-10 on a Persian title: the box drew boxes and the words
+/// backwards, and Apply failed three ways. Until right-to-left words can be
+/// written back, a click on them says so and opens nothing.
+#[test]
+fn a_click_on_persian_words_is_refused_and_opens_no_box() {
+    let (mut app, runs) = persian_page("STU VWA STU");
+    assert!(pagify_shell::bidi::has_right_to_left(&runs[0].text), "setup: {:?} is not Persian", runs[0].text);
+    app.submit("edittext");
+    assert_eq!(app.pick_text_run(0, centre(&runs[0].rect)), Err(edit::RIGHT_TO_LEFT.to_string()));
+    assert!(app.tab().edit.editing_run.is_none(), "a box opened over Persian words");
+}
+
+/// A paragraph opened from its Latin words that holds a Persian line is refused
+/// too: Apply could not write that line.
+#[test]
+fn a_paragraph_with_a_persian_line_is_refused_from_its_latin_words() {
+    // Two lines in one text object's font, one under the other.
+    let (mut app, runs) = persian_page("words on the first line) Tj 0 -17 Td (STU VWA STU");
+    let latin = runs.iter().find(|r| !pagify_shell::bidi::has_right_to_left(&r.text)).expect("a Latin line");
+    // Joined by hand: the detector does not take this fixture's two lines as one.
+    assert!(app.declare_group(0, runs.iter().map(|r| r.object).collect()), "setup: the lines could not be joined");
+    app.submit("edittext");
+    assert_eq!(app.pick_text_run(0, centre(&latin.rect)), Err(edit::RIGHT_TO_LEFT.to_string()), "{runs:?}");
+    assert!(app.tab().edit.editing_run.is_none());
+}
+
+/// Latin words still open as before.
+#[test]
+fn latin_words_beside_a_persian_page_still_open() {
+    let (mut app, runs) = persian_page("only latin words here");
+    app.submit("edittext");
+    app.pick_text_run(0, centre(&runs[0].rect)).expect("opened");
+    assert!(app.tab().edit.editing_run.is_some());
+}

@@ -66,6 +66,46 @@ impl crate::PagifyApp {
         self.act(Verb::Quit { force: false });
     }
 
+    /// While an update check runs, what it is doing: a download from GitHub and how
+    /// far it has got, or — for a check the reader asked for — that it is looking.
+    /// **Reported from use: with nothing on screen during a download, "was it just
+    /// downloading the files?"** Not a modal: Pagify goes on working meanwhile, and
+    /// asks to install once the download is done.
+    pub(crate) fn draw_update_progress(&mut self, ctx: &egui::Context) {
+        let Some(check) = &self.update_state.update_check else { return };
+        let explicit = check.explicit;
+        let downloading = crate::update::DOWNLOADING.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if downloading.is_none() && !explicit {
+            return;
+        }
+        egui::Window::new("Pagify update")
+            .id(egui::Id::new("update_progress"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::RIGHT_BOTTOM, [-16.0, -16.0])
+            .show(ctx, |ui| {
+                ui.set_width(320.0);
+                match &downloading {
+                    Some(download) => {
+                        ui.label(format!("Downloading Pagify {} from GitHub…", download.version));
+                        let (done, text) = download.said();
+                        let bar = match done {
+                            Some(done) => egui::ProgressBar::new(done),
+                            None => egui::ProgressBar::new(0.0).animate(true),
+                        };
+                        ui.add(bar.text(text));
+                        ui.label("You can go on working: Pagify asks to install it once it is here.");
+                    }
+                    None => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Looking for a newer build…");
+                        });
+                    }
+                }
+            });
+    }
+
     /// The reader pointed at the folder builds are published in: remember it, and look again.
     pub(crate) fn use_update_folder(&mut self, folder: std::path::PathBuf) {
         crate::update::remember(&folder);
@@ -124,7 +164,8 @@ impl crate::PagifyApp {
                 }
                 UpdateOutcome::Incomplete { folder } => {
                     ui.label(format!(
-                        "Found {} but it holds no readable version.txt, or no Pagify.exe to install.                          Dropbox may still be syncing — try again in a minute.",
+                        "Found {} but it holds no readable version.txt, or no Pagify.exe to install. \
+                         Dropbox may still be syncing — try again in a minute.",
                         folder.display()
                     ));
                     // Reached, GitHub answers instead (`update::choose`).

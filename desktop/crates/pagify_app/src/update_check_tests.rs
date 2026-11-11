@@ -276,3 +276,44 @@ fn the_folder_a_check_found_a_build_in_is_remembered() {
 
     assert_eq!(std::fs::read_to_string(&memory).unwrap(), here.to_string_lossy());
 }
+
+// ---- the download, shown ----
+
+/// **Reported from use (2026-11-11): "was it just downloading the files? … add a
+/// loading bar so the user knows the files are downloading and the app didn't
+/// just crash".** While a check downloads a build, a window says what and how far.
+#[test]
+fn a_download_under_way_is_shown_with_how_far_it_has_got() {
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = harness("two-column.pdf");
+    // A check still looking — its answer never comes in this test.
+    let (_answer, done) = std::sync::mpsc::channel();
+    h.state_mut().update_state.update_check = Some(crate::UpdateCheck { done, explicit: false });
+    h.run_steps(2);
+    assert!(h.query_by_label_contains("Downloading Pagify").is_none(), "a quiet launch check showed a window");
+
+    let started = std::time::Instant::now() - std::time::Duration::from_secs(10);
+    *crate::update::DOWNLOADING.lock().unwrap() =
+        Some(crate::update::Downloading { version: "9.9.9".into(), done: 12_000_000, total: Some(30_000_000), started });
+    h.run_steps(2);
+    let shown = (
+        h.query_by_label_contains("Downloading Pagify 9.9.9 from GitHub").is_some(),
+        h.query_by_label_contains("12.0 of 30.0 MB").is_some(),
+    );
+    *crate::update::DOWNLOADING.lock().unwrap() = None;
+    assert_eq!(shown, (true, true), "the download and its progress should be on screen");
+
+    h.run_steps(2);
+    assert!(h.query_by_label_contains("Downloading Pagify").is_none(), "the window outlived the download");
+}
+
+/// A check the reader asked for says it is looking, before any download.
+#[test]
+fn an_asked_for_check_says_it_is_looking() {
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = harness("two-column.pdf");
+    let (_answer, done) = std::sync::mpsc::channel();
+    h.state_mut().update_state.update_check = Some(crate::UpdateCheck { done, explicit: true });
+    h.run_steps(2);
+    h.get_by_label_contains("Looking for a newer build");
+}

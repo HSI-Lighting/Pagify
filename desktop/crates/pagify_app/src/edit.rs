@@ -33,6 +33,10 @@ struct BlockOpen {
     seed_is_drawn_lettering: bool,
 }
 
+/// What Edit Text says of right-to-left words on a page.
+pub(crate) const RIGHT_TO_LEFT: &str = "that text is written right to left (Persian, Arabic or Hebrew) — \
+     editing right-to-left words on a page is not supported yet.";
+
 
 impl crate::PagifyApp {
     /// The body of [`Self::pick_text_run`], filling `trace` as it goes.
@@ -110,6 +114,13 @@ impl crate::PagifyApp {
                  supported yet."
                     .into(),
             );
+        }
+        // Persian, Arabic and Hebrew words cannot be written back yet (§56 of the
+        // architecture document): refused before a box opens that draws them as
+        // boxes and backwards, and an Apply that fails three confusing ways.
+        if pagify_shell::bidi::has_right_to_left(&run.text) {
+            trace.path = PickPath::RefusedRightToLeft;
+            return Err(RIGHT_TO_LEFT.into());
         }
 
         // **A person's own join overrides the geometry.** Checked before the

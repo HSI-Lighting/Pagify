@@ -47,6 +47,11 @@ pub fn visual_pieces(text: &str) -> Vec<String> {
     out
 }
 
+/// Whether `text` holds any right-to-left letter (see [`rtl_script`]).
+pub fn has_right_to_left(text: &str) -> bool {
+    text.chars().any(rtl_script)
+}
+
 /// A character harfrust shapes right to left: Hebrew, Arabic, Syriac, Thaana, N'Ko
 /// and the rest of those blocks, and their presentation forms.
 ///

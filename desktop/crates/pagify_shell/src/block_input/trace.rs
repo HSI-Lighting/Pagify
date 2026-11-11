@@ -18,6 +18,8 @@ pub enum PickPath {
     Drawn,
     /// Rotated text, refused.
     RefusedRotated,
+    /// Right-to-left words (Persian, Arabic, Hebrew), refused.
+    RefusedRightToLeft,
     /// Nothing was there.
     #[default]
     None,
@@ -31,6 +33,7 @@ impl PickPath {
             PickPath::Joined => "joined",
             PickPath::Drawn => "drawn",
             PickPath::RefusedRotated => "refused-rotated",
+            PickPath::RefusedRightToLeft => "refused-rtl",
             PickPath::None => "none",
         }
     }

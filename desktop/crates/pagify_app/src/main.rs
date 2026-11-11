@@ -153,6 +153,7 @@ fn main() -> eframe::Result<()> {
 
     let mut files: Vec<String> = Vec::new();
     let mut startup: Vec<String> = Vec::new();
+    let mut install_update: Option<(String, String)> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -161,7 +162,34 @@ fn main() -> eframe::Result<()> {
                     startup.push(command);
                 }
             }
+            a if a == update::INSTALL_UPDATE => {
+                if let (Some(source), Some(result)) = (args.next(), args.next()) {
+                    install_update = Some((source, result));
+                }
+            }
             _ => files.push(arg),
+        }
+    }
+    // Run as administrator by a Pagify updating an install for all users
+    // (`update::install_as_administrator`): the install, and nothing else — no
+    // window, no hand-over to the Pagify that started it.
+    if let Some((source, result)) = install_update {
+        let dir = std::env::current_exe().ok().and_then(|exe| exe.parent().map(std::path::Path::to_path_buf));
+        let code = match dir {
+            Some(dir) => update::install_for_another(std::path::Path::new(&source), &dir, std::path::Path::new(&result)),
+            None => 1,
+        };
+        std::process::exit(code);
+    }
+    // Started by the Pagify that installed this build (`update::install_and_restart`).
+    // That one holds the one-Pagify lock until it has closed: this one would hand
+    // itself over to it and end. Then what it renamed aside can go. An environment
+    // variable, not an argument: a build from before reads arguments as files to open.
+    if let Some(pid) = std::env::var(update::AFTER_UPDATE).ok().and_then(|pid| pid.parse().ok()) {
+        std::env::remove_var(update::AFTER_UPDATE);
+        update::wait_for_exit(pid, 30_000);
+        if let Some(dir) = std::env::current_exe().ok().as_deref().and_then(std::path::Path::parent) {
+            update::forget_leftovers(dir);
         }
     }
 
@@ -1606,98 +1634,6 @@ fn explain(e: &PdfError) -> String {
         _ => return e.to_string(),
     };
     format!("{reason} — {tail}")
-}
-
-/// The batch script that carries out an update: wait for process `pid` to
-/// exit, put the new `Pagify.exe` and `pdfium.dll` from `source` where the old
-/// ones are in `install_dir`, check the exe really is the new one, relaunch.
-///
-/// **Reported from use: "when I click Update now it brings the same update
-/// window back".** Another Pagify window was open from the same folder. Windows
-/// does not let a running program's file be overwritten, the script waited only
-/// for *this* process, its `copy` failed with nothing to say so, and the old
-/// build relaunched and offered the same update again — every time.
-///
-/// So a file that cannot be overwritten is **renamed** out of the way first,
-/// which Windows does allow for a running program (the other window carries on
-/// from the renamed copy, and the leftover is cleared by a later update); the
-/// result is checked; a copy that cannot be finished puts the old file back
-/// rather than leave no exe at all; and a failure is said aloud (`notify`)
-/// and logged to `log`, not discovered as the same prompt again.
-fn update_script(
-    pid: u32,
-    source: &std::path::Path,
-    install_dir: &std::path::Path,
-    log: &std::path::Path,
-    notify: bool,
-) -> String {
-    let warn = if notify {
-        "powershell -NoProfile -Command \"Add-Type -AssemblyName System.Windows.Forms; \
-         [void][System.Windows.Forms.MessageBox]::Show('Pagify could not install the update: \
-         its files are in use or its folder cannot be written. Close every Pagify window and \
-         choose Update now again.', 'Pagify update')\""
-    } else {
-        "rem"
-    };
-    format!(
-        r#"@echo off
-set "sys=%SystemRoot%\System32"
-goto main
-:put
-copy /Y %1 %2 >NUL 2>&1 && exit /b 0
-set "old=%~nx2.old-%RANDOM%"
-ren %2 "%old%" >NUL 2>&1 || exit /b 1
-copy /Y %1 %2 >NUL 2>&1 && exit /b 0
-ren "%~dp2%old%" "%~nx2" >NUL 2>&1
-exit /b 1
-:main
-:wait
-"%sys%\tasklist.exe" /FI "PID eq {pid}" | "%sys%\find.exe" "{pid}" >NUL
-if not errorlevel 1 (
-    "%sys%\PING.EXE" -n 2 127.0.0.1 >NUL
-    goto wait
-)
-del /Q "{dir}\*.old-*" >NUL 2>&1
-call :put "{source_exe}" "{dest_exe}"
-call :put "{source_dll}" "{dest_dll}"
-"%sys%\fc.exe" /b "{source_exe}" "{dest_exe}" >NUL 2>&1
-if errorlevel 1 goto failed
-echo %date% %time% updated>>"{log}"
-goto relaunch
-:failed
-echo %date% %time% FAILED: the new Pagify.exe is not in place>>"{log}"
-{warn}
-:relaunch
-start "" "{dest_exe}"
-(goto) 2>NUL & del "%~f0"
-"#,
-        dir = install_dir.display(),
-        source_exe = source.join("Pagify.exe").display(),
-        dest_exe = install_dir.join("Pagify.exe").display(),
-        source_dll = source.join("pdfium.dll").display(),
-        dest_dll = install_dir.join("pdfium.dll").display(),
-        log = log.display(),
-    )
-}
-
-/// Wait for this process to exit, then put a newer build over it and relaunch
-/// — see [`update_script`]. Written out as a batch script and launched
-/// detached, because `pdfium.dll` stays locked open for as long as this
-/// process has it loaded, and nothing here can replace it out from under
-/// itself. If writing or launching the script fails, the update does not
-/// happen — the exit this was about to do already outweighs a dialog nobody
-/// can act on this late; what the script itself cannot finish it says.
-fn spawn_update_script(source: &std::path::Path) {
-    let Ok(exe) = std::env::current_exe() else { return };
-    let Some(install_dir) = exe.parent() else { return };
-    let pid = std::process::id();
-    let log = std::env::temp_dir().join("pagify-update.log");
-    let script = update_script(pid, source, install_dir, &log, true);
-    let path = std::env::temp_dir().join(format!("pagify-update-{pid}.bat"));
-    if std::fs::write(&path, script).is_err() {
-        return;
-    }
-    let _ = std::process::Command::new("cmd").arg("/C").arg(&path).spawn();
 }
 
 /// What a redaction has to add about forms the file draws elsewhere: the
@@ -3507,6 +3443,7 @@ impl PagifyApp {
         self.collect_reading(&ctx);
         self.collect_spell_scan(&ctx);
         self.collect_update_check(&ctx);
+        self.draw_update_progress(&ctx);
         self.draw_update_prompt(&ctx);
         self.draw_update_report(&ctx);
     }
@@ -12523,7 +12460,17 @@ impl PagifyApp {
     fn pick_text_run(&mut self, page: usize, at: AppPoint) -> Result<String, String> {
         let started = std::time::Instant::now();
         let mut trace = PickTrace::new(page, (at.x as f32, at.y as f32));
-        let outcome = self.pick_text_run_traced(page, at, &mut trace);
+        let mut outcome = self.pick_text_run_traced(page, at, &mut trace);
+        // A paragraph opened from Latin words can still hold a right-to-left line,
+        // which Apply cannot write: refused like a click on it. Nothing is typed
+        // yet, so there is nothing to put down.
+        if outcome.is_ok()
+            && self.tab().edit.editing_run.as_ref().is_some_and(|r| pagify_shell::bidi::has_right_to_left(&r.original))
+        {
+            self.tab_mut().edit.editing_run = None;
+            trace.path = block_input::PickPath::RefusedRightToLeft;
+            outcome = Err(edit::RIGHT_TO_LEFT.into());
+        }
         trace.total_ms = started.elapsed().as_secs_f32() * 1000.0;
         self.recording_state.session_log.record("pick", &block_input::format_pick_line(&trace));
         outcome
@@ -18682,8 +18629,6 @@ mod tab_strip_tests;
 #[cfg(test)]
 mod internal_link_tests;
 
-#[cfg(all(test, windows))]
-mod update_script_tests;
 
 #[cfg(test)]
 mod update_check_tests;

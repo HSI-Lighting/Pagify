@@ -37,7 +37,7 @@ fn said(h: &Harness<'static, PagifyApp>) -> String {
 /// and `_` as a zero-width non-joiner: the only way to put Arabic or
 /// Persian text into a fixture without shipping a font. What the checker
 /// sees is exactly what extraction returns for a real Arabic page.
-fn arabic_pdf(first: &str, second: &str) -> std::path::PathBuf {
+pub(crate) fn arabic_pdf(first: &str, second: &str) -> std::path::PathBuf {
     let cmap = "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
                 /CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n\
                 1 begincodespacerange\n<00> <FF>\nendcodespacerange\n\
