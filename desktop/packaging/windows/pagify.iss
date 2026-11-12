@@ -24,7 +24,7 @@
 ; SIGNING_THUMBPRINT in build.ps1, which this can be pointed at the same way.
 
 #define MyAppName "Pagify"
-#define MyAppVersion "0.1.122"
+#define MyAppVersion "0.1.123"
 #define MyAppPublisher "HSI Lighting"
 #define MyAppExeName "Pagify.exe"
 
@@ -51,6 +51,8 @@ SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+; Explorer is told when the entries below go, on uninstall.
+ChangesAssociations=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -78,6 +80,16 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
+
+[Registry]
+; Pagify registers itself as an app that opens PDFs at every start, for the
+; person running it (crates/pagify_app/src/pdf_app.rs). Nothing is written here;
+; these take the entries away again on uninstall.
+Root: HKCU; Subkey: "Software\Classes\Pagify.Document"; Flags: uninsdeletekey dontcreatekey
+Root: HKCU; Subkey: "Software\Classes\.pdf\OpenWithProgids"; ValueType: none; ValueName: "Pagify.Document"; Flags: uninsdeletevalue dontcreatekey
+Root: HKCU; Subkey: "Software\Classes\Applications\Pagify.exe"; Flags: uninsdeletekey dontcreatekey
+Root: HKCU; Subkey: "Software\HSI Lighting\Pagify"; Flags: uninsdeletekey dontcreatekey
+Root: HKCU; Subkey: "Software\RegisteredApplications"; ValueType: none; ValueName: "Pagify"; Flags: uninsdeletevalue dontcreatekey
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"

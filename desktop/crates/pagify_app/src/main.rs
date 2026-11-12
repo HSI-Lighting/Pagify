@@ -21,6 +21,7 @@ mod in_place;
 mod mac_open;
 mod nudge;
 mod update;
+mod pdf_app;
 mod focus;
 mod home;
 mod hub;
@@ -203,6 +204,8 @@ fn main() -> eframe::Result<()> {
     if matches!(running, instance::Start::Forwarded) {
         return Ok(());
     }
+    // In Windows' list of apps that open PDFs, as the one running now (`pdf_app`).
+    std::thread::spawn(pdf_app::register);
 
     // Not `.with_maximized(true)` here: combined with `with_inner_size` on
     // Windows, winit creates the window at that explicit size and silently
