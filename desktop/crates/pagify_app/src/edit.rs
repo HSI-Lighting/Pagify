@@ -379,6 +379,9 @@ impl crate::PagifyApp {
         // of. One object is left to the ordinary single-run path, which opens it with its own message.
         if let Some(index) = unit {
             if let Some(cell) = pb.units.get(index).filter(|unit| unit.cell) {
+                // The block the cell was cut from, in the pick line, as for every other block-aware click:
+                // without it a report about a cell reads `block=none`.
+                trace.block_facts(pb, cell.block);
                 if cell.objects.len() > 1 {
                     match self.open_cell(page, pb, index) {
                         Ok(message) => {
