@@ -1948,7 +1948,7 @@ impl Document for PdfiumDocument {
         let bytes = &base.bytes;
         let file = crate::pdf::File::parse(bytes)?;
         let page = self.page_object(&file, page_index)?;
-        let (stream, streams) = self.page_content(&file, &page)?;
+        let (stream, _streams) = self.page_content(&file, &page)?;
         let operations = content::parse(&stream)?;
         let placed = content::placed(&operations);
 
@@ -2026,16 +2026,8 @@ impl Document for PdfiumDocument {
         let to = operations[span.end - 1].span.end;
         let edited = content::splice(&stream, &[(from..to, Vec::new())]);
 
-        let mut replacements = Vec::new();
-        for (index, (number, dict)) in streams.iter().enumerate() {
-            let data = if index == 0 { edited.clone() } else { Vec::new() };
-            let packed = content::encode(&data)?;
-            let mut dict = dict.clone();
-            dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
-            dict.remove(b"DecodeParms");
-            replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
-        }
-        let rewritten = Self::write_edit(&base, &file, &replacements, &[])?;
+        let (replacements, extra) = self.own_content_replacements(&file, page_index, &page, &edited)?;
+        let rewritten = Self::write_edit(&base, &file, &replacements, &extra)?;
         self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
     }
 
@@ -2065,7 +2057,7 @@ impl Document for PdfiumDocument {
         let bytes = &base.bytes;
         let file = crate::pdf::File::parse(bytes)?;
         let page = self.page_object(&file, page_index)?;
-        let (stream, streams) = self.page_content(&file, &page)?;
+        let (stream, _streams) = self.page_content(&file, &page)?;
         let operations = content::parse(&stream)?;
         let placed = content::placed(&operations);
 
@@ -2102,16 +2094,8 @@ impl Document for PdfiumDocument {
             byte_ranges.into_iter().map(|r| (r, Vec::new())).collect();
         let edited = content::splice(&stream, &edits);
 
-        let mut replacements = Vec::new();
-        for (index, (number, dict)) in streams.iter().enumerate() {
-            let data = if index == 0 { edited.clone() } else { Vec::new() };
-            let packed = content::encode(&data)?;
-            let mut dict = dict.clone();
-            dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
-            dict.remove(b"DecodeParms");
-            replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
-        }
-        let rewritten = Self::write_edit(&base, &file, &replacements, &[])?;
+        let (replacements, extra) = self.own_content_replacements(&file, page_index, &page, &edited)?;
+        let rewritten = Self::write_edit(&base, &file, &replacements, &extra)?;
         self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
     }
 
@@ -2140,7 +2124,7 @@ impl Document for PdfiumDocument {
         let bytes = &base.bytes;
         let file = crate::pdf::File::parse(bytes)?;
         let page = self.page_object(&file, page_index)?;
-        let (stream, streams) = self.page_content(&file, &page)?;
+        let (stream, _streams) = self.page_content(&file, &page)?;
         let operations = content::parse(&stream)?;
         let placed = content::placed(&operations);
         let states = content::states(&operations);
@@ -2302,16 +2286,8 @@ impl Document for PdfiumDocument {
         let to = operations[last].span.end;
         let edited = content::splice(&stream, &[(from..to, written)]);
 
-        let mut replacements = Vec::new();
-        for (index, (number, dict)) in streams.iter().enumerate() {
-            let data = if index == 0 { edited.clone() } else { Vec::new() };
-            let packed = content::encode(&data)?;
-            let mut dict = dict.clone();
-            dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
-            dict.remove(b"DecodeParms");
-            replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
-        }
-        let rewritten = Self::write_edit(&base, &file, &replacements, &[])?;
+        let (replacements, extra) = self.own_content_replacements(&file, page_index, &page, &edited)?;
+        let rewritten = Self::write_edit(&base, &file, &replacements, &extra)?;
         self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
     }
 
@@ -2707,7 +2683,7 @@ impl Document for PdfiumDocument {
         let bytes = &base.bytes;
         let file = crate::pdf::File::parse(&bytes)?;
         let page = self.page_object(&file, page_index)?;
-        let (stream, streams) = self.page_content(&file, &page)?;
+        let (stream, _streams) = self.page_content(&file, &page)?;
         let operations = content::parse(&stream)?;
         let states = content::states(&operations);
         let placed = content::placed(&operations);
@@ -2751,9 +2727,6 @@ impl Document for PdfiumDocument {
             .cloned()
             .ok_or(PdfError::Unsupported("that page cannot be read"))?;
         page_dict.set(b"Resources", Object::Dict(resources));
-        let page_number = self.page_object_number(&file, page_index)?;
-        let mut page_bytes = Vec::new();
-        crate::pdf::write_object(&mut page_bytes, &Object::Dict(page_dict));
 
         // **Absolute, not cumulative.** An opacity set earlier is a `gs` this
         // wrote just inside the object's scope; setting it again replaces that
@@ -2780,16 +2753,17 @@ impl Document for PdfiumDocument {
             }
         };
 
-        let mut replacements = vec![(page_number, page_bytes)];
-        for (index, (stream_number, dict)) in streams.iter().enumerate() {
-            let data = if index == 0 { edited.clone() } else { Vec::new() };
-            let packed = content::encode(&data)?;
-            let mut dict = dict.clone();
-            dict.set(b"Filter", Object::Name(b"FlateDecode".to_vec()));
-            dict.remove(b"DecodeParms");
-            replacements.push((*stream_number, crate::pdf::write_stream(&dict, &packed)));
-        }
-        let rewritten = Self::write_edit(&base, &file, &replacements, &[(number, state_bytes)])?;
+        let stream_number = number.checked_add(1).ok_or(PdfError::Unsupported(
+            "this file already uses the highest object number a PDF can hold",
+        ))?;
+        let (page_number, page_body, added) =
+            self.own_content_stream(&file, page_index, page_dict, stream_number, &edited)?;
+        let rewritten = Self::write_edit(
+            &base,
+            &file,
+            &[(page_number, page_body)],
+            &[(number, state_bytes), added],
+        )?;
         self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
     }
 
@@ -2813,7 +2787,7 @@ impl Document for PdfiumDocument {
         let bytes = &base.bytes;
         let file = crate::pdf::File::parse(&bytes)?;
         let page = self.page_object(&file, page_index)?;
-        let (stream, streams) = self.page_content(&file, &page)?;
+        let (stream, _streams) = self.page_content(&file, &page)?;
         let operations = content::parse(&stream)?;
         let states = content::states(&operations);
         let placed = content::placed(&operations);
@@ -3105,17 +3079,9 @@ impl Document for PdfiumDocument {
         };
         let edited = content::splice(&stream, &[(lifted, stays), (landing_span, block)]);
 
-        let mut replacements = Vec::new();
-        for (index, (number, dict)) in streams.iter().enumerate() {
-            let data = if index == 0 { edited.clone() } else { Vec::new() };
-            let packed = content::encode(&data)?;
-            let mut dict = dict.clone();
-            dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
-            dict.remove(b"DecodeParms");
-            replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
-        }
+        let (replacements, extra) = self.own_content_replacements(&file, page_index, &page, &edited)?;
 
-        let rewritten = Self::write_edit(&base, &file, &replacements, &[])?;
+        let rewritten = Self::write_edit(&base, &file, &replacements, &extra)?;
         self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
     }
 
@@ -5866,53 +5832,28 @@ impl DocumentMut for PdfiumDocument {
         }
 
         let mut replacements = Vec::new();
-        match self.page_content(&file, &page) {
-            Ok((mut stream, streams)) => {
+        let content = match self.page_content(&file, &page) {
+            Ok((mut stream, _streams)) => {
                 stream.extend_from_slice(&painted);
-                for (index, (number, dict)) in streams.iter().enumerate() {
-                    let data = if index == 0 { stream.clone() } else { Vec::new() };
-                    let packed = crate::pdf::content::encode(&data)?;
-                    let mut dict = dict.clone();
-                    dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
-                    dict.remove(b"DecodeParms");
-                    replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
-                }
-                if let Some(dict) = page_dict {
-                    let page_number = self.page_object_number(&file, page_index)?;
-                    let mut body = Vec::new();
-                    crate::pdf::write_object(&mut body, &crate::pdf::Object::Dict(dict));
-                    replacements.push((page_number, body));
-                }
+                stream
             }
-            Err(_) => {
-                // No content stream: make one, exactly as `append_to_page`
-                // does — and, if a picture already needs the page dict
-                // rewritten for its Resources, set `/Contents` on that same
-                // dict rather than writing the page twice.
-                let number = next_number;
-                next_number += 1;
-                let packed = crate::pdf::content::encode(&painted)?;
-                let mut dict = crate::pdf::Dict(Vec::new());
-                dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
-                extra.push((number, crate::pdf::write_stream(&dict, &packed)));
-
-                let page_number = self.page_object_number(&file, page_index)?;
-                let mut dict = match page_dict {
-                    Some(dict) => dict,
-                    None => {
-                        let crate::pdf::Object::Dict(dict) = file.object(page_number)? else {
-                            return Err(PdfError::InvalidArgument("that page cannot be written".into()));
-                        };
-                        dict
-                    }
-                };
-                dict.set(b"Contents", crate::pdf::Object::Reference(number, 0));
-                let mut body = Vec::new();
-                crate::pdf::write_object(&mut body, &crate::pdf::Object::Dict(dict));
-                replacements.push((page_number, body));
-            }
-        }
-        let _ = next_number;
+            // No content stream: the painted operators are the whole content.
+            Err(_) => painted.clone(),
+        };
+        // If a picture already needs the page dict rewritten for its
+        // Resources, `/Contents` is set on that same dict, not written twice.
+        let dict = match page_dict {
+            Some(dict) => dict,
+            None => page
+                .as_dict()
+                .cloned()
+                .ok_or(PdfError::Unsupported("that page cannot be read"))?,
+        };
+        let stream_number = next_number;
+        let (page_number, body, added) =
+            self.own_content_stream(&file, page_index, dict, stream_number, &content)?;
+        replacements.push((page_number, body));
+        extra.push(added);
 
         let base_was_exact = base.exact;
         let rewritten = Self::write_edit(&base, &file, &replacements, &extra)?;
@@ -6560,7 +6501,7 @@ impl DocumentMut for PdfiumDocument {
         let bytes = &base.bytes;
         let file = crate::pdf::File::parse(bytes)?;
         let page = self.page_object(&file, page_index)?;
-        let (stream, streams) = self.page_content(&file, &page)?;
+        let (stream, _streams) = self.page_content(&file, &page)?;
         let operations = content::parse(&stream)?;
         let placed = content::placed(&operations);
         let fonts = self.page_fonts(&file, &page);
@@ -6630,16 +6571,8 @@ impl DocumentMut for PdfiumDocument {
         }
         let edited = content::splice(&stream, &edits);
 
-        let mut replacements = Vec::new();
-        for (index, (number, dict)) in streams.iter().enumerate() {
-            let data = if index == 0 { edited.clone() } else { Vec::new() };
-            let packed = content::encode(&data)?;
-            let mut dict = dict.clone();
-            dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
-            dict.remove(b"DecodeParms");
-            replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
-        }
-        let rewritten = Self::write_edit(&base, &file, &replacements, &[])?;
+        let (replacements, extra) = self.own_content_replacements(&file, page_index, &page, &edited)?;
+        let rewritten = Self::write_edit(&base, &file, &replacements, &extra)?;
         self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
     }
 
@@ -6775,6 +6708,56 @@ impl DocumentMut for PdfiumDocument {
         // copy would have validation vouch for the wrong file.
         self.written = None;
         Ok(())
+    }
+
+    /// A full copy with the desktop's fix-ups, **before** the password.
+    ///
+    /// Two things the ordinary save leaves for a preview or another device to
+    /// get wrong: a placed picture is an annotation (and a preview draws only
+    /// the page), and an edited page can name a font the file does not carry
+    /// (and every reader substitutes its own). Both are fixed on the plaintext
+    /// bytes here, then the password is applied — so a document with a password
+    /// is fixed up too, rather than refused the way `flattened_copy` is.
+    ///
+    /// **Never on the exact-bytes path.** `write_exact_if_unchanged` writes a
+    /// signed document's own bytes verbatim; nothing may be added to them.
+    /// Incremental saves do not come through here at all.
+    fn save_full_copy_with_fixups(
+        &mut self,
+        dest: &mut dyn Write,
+        fixups: &crate::document::SaveFixups<'_>,
+    ) -> Result<crate::document::SaveFixupReport> {
+        let started = std::time::Instant::now();
+        if self.write_exact_if_unchanged(dest)? {
+            return Ok(crate::document::SaveFixupReport::default());
+        }
+        let bytes = if self.remove_password {
+            self.without_password()?
+        } else {
+            self.document
+                .save_to_bytes()
+                .map_err(|e| PdfError::Pdfium(e.to_string()))?
+        };
+
+        // Fix 2: placed pictures and signature pictures become page pictures.
+        let pictures = crate::pdf::flatten::flatten_pictures(&bytes)?;
+        // Fix 3: fonts the file names but does not carry.
+        let fonts = crate::pdf::fonts::embed_missing(&pictures.bytes, fixups.find_face)?;
+
+        let bytes = match &self.security {
+            Some(wanted) => self.encrypted(&fonts.bytes, wanted)?,
+            None => fonts.bytes,
+        };
+        dest.write_all(&bytes)?;
+        self.dirty = false;
+        self.written = None;
+        Ok(crate::document::SaveFixupReport {
+            pictures: pictures.pictures,
+            fonts_stored: fonts.stored,
+            fonts_missing: fonts.missing,
+            width_mismatches: fonts.width_mismatches,
+            elapsed: started.elapsed(),
+        })
     }
 
     /// Append a delta rather than rewriting the file.
@@ -7002,6 +6985,11 @@ const ANNOT_SQUIGGLY: FPDF_ANNOTATION_SUBTYPE = 11;
 const ANNOT_STRIKEOUT: FPDF_ANNOTATION_SUBTYPE = 12;
 const ANNOT_INK: FPDF_ANNOTATION_SUBTYPE = 15;
 const ANNOT_STAMP: FPDF_ANNOTATION_SUBTYPE = 13;
+
+/// `FPDF_ANNOT_FLAG_PRINT`, from `fpdf_annot.h` (ISO 32000-1 table 165, bit 3):
+/// draw the annotation when printing. Without it a print job and a preview that
+/// draws the page as for print leave the mark out.
+const ANNOT_FLAG_PRINT: c_int = 4;
 
 /// `FPDFANNOT_COLORTYPE_Color` — the stroke/foreground colour.
 const COLORTYPE_COLOR: FPDFANNOT_COLORTYPE = 0;
@@ -7625,7 +7613,7 @@ impl PdfiumDocument {
             .map_err(|e| PdfError::Pdfium(e.to_string()))?;
         let file = crate::pdf::File::parse(&bytes)?;
         let page = self.page_object(&file, request.page_index)?;
-        let (stream, streams) = self.page_content(&file, &page)?;
+        let (stream, _streams) = self.page_content(&file, &page)?;
 
         let operations = content::parse(&stream)?;
         let placed = content::placed(&operations);
@@ -7766,23 +7754,10 @@ impl PdfiumDocument {
             }
         }
 
-        // The edited stream goes into the first of the page's content streams;
-        // any others are emptied. Concatenating them was how it was read, so
-        // this is the same content, and the page dictionary never changes.
-        let mut replacements = Vec::new();
-        for (index, (number, dict)) in streams.iter().enumerate() {
-            let data = if index == 0 { edited.clone() } else { Vec::new() };
-            let packed = content::encode(&data)?;
-            let mut dict = dict.clone();
-            dict.set(
-                b"Filter",
-                crate::pdf::Object::Name(b"FlateDecode".to_vec()),
-            );
-            dict.remove(b"DecodeParms");
-            replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
-        }
+        let (replacements, extra) =
+            self.own_content_replacements(&file, request.page_index, &page, &edited)?;
 
-        let rewritten = file.rewrite(&replacements)?;
+        let rewritten = file.rewrite_adding(&replacements, &extra, &crate::pdf::Dict(Vec::new()))?;
         let reopened = Self::open_bytes(rewritten, None)?;
         self.document = reopened.document;
         self.page_count = reopened.page_count;
@@ -7955,7 +7930,7 @@ fn font_to_unicode(
         let base = EditBase { bytes: self.readable_bytes()?, exact: false };
         let file = crate::pdf::File::parse(&base.bytes)?;
         let page = self.page_object(&file, page_index)?;
-        let (stream, streams) = self.page_content(&file, &page)?;
+        let (stream, _streams) = self.page_content(&file, &page)?;
         let operations = content::parse(&stream)?;
         let closing = closing_state(&operations)
             .ok_or(PdfError::Unsupported("this page's content stops inside a text object"))?;
@@ -8057,16 +8032,8 @@ fn font_to_unicode(
             }
         }
 
-        let mut replacements = Vec::new();
-        for (index, (number, dict)) in streams.iter().enumerate() {
-            let data = if index == 0 { edited.clone() } else { Vec::new() };
-            let packed = content::encode(&data)?;
-            let mut dict = dict.clone();
-            dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
-            dict.remove(b"DecodeParms");
-            replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
-        }
-        let rewritten = Self::write_edit(&base, &file, &replacements, &[])?;
+        let (replacements, extra) = self.own_content_replacements(&file, page_index, &page, &edited)?;
+        let rewritten = Self::write_edit(&base, &file, &replacements, &extra)?;
         Ok((base, rewritten))
     }
 
@@ -8612,7 +8579,7 @@ fn font_to_unicode(
         let bytes = &base.bytes;
         let file = crate::pdf::File::parse(&bytes)?;
         let page = self.page_object(&file, page_index)?;
-        let (stream, streams) = self.page_content(&file, &page)?;
+        let (stream, _streams) = self.page_content(&file, &page)?;
         let operations = content::parse(&stream)?;
         let placed = content::placed(&operations);
         let states = content::states(&operations);
@@ -8624,7 +8591,8 @@ fn font_to_unicode(
         let edits =
             self.run_move_edits(&facts, page_index, &run, by, &file, &page, &stream, &operations, &states, &placed)?;
         let edited = content::splice(&stream, &edits);
-        let rewritten = Self::write_edit(&base, &file, &stream_replacements(&streams, &edited)?, &[])?;
+        let (replacements, extra) = self.own_content_replacements(&file, page_index, &page, &edited)?;
+        let rewritten = Self::write_edit(&base, &file, &replacements, &extra)?;
         self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
     }
 
@@ -8800,7 +8768,7 @@ fn font_to_unicode(
         let bytes = &base.bytes;
         let file = crate::pdf::File::parse(&bytes)?;
         let page = self.page_object(&file, page_index)?;
-        let (stream, streams) = self.page_content(&file, &page)?;
+        let (stream, _streams) = self.page_content(&file, &page)?;
         let operations = content::parse(&stream)?;
         let placed = content::placed(&operations);
         let states = content::states(&operations);
@@ -8808,7 +8776,8 @@ fn font_to_unicode(
         let facts = PageFacts::new(self, page_index);
         let edits = self.resize_run_edits(&facts, page_index, run, sx, sy, &file, &page, &operations, &states, &placed)?;
         let edited = content::splice(&stream, &edits);
-        let rewritten = Self::write_edit(&base, &file, &stream_replacements(&streams, &edited)?, &[])?;
+        let (replacements, extra) = self.own_content_replacements(&file, page_index, &page, &edited)?;
+        let rewritten = Self::write_edit(&base, &file, &replacements, &extra)?;
         self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
     }
 
@@ -9634,7 +9603,7 @@ fn font_to_unicode(
         let bytes = &base.bytes;
         let file = crate::pdf::File::parse(&bytes)?;
         let page = self.page_object(&file, page_index)?;
-        let (stream, streams) = self.page_content(&file, &page)?;
+        let (stream, _streams) = self.page_content(&file, &page)?;
         let operations = content::parse(&stream)?;
         let states = content::states(&operations);
         let placed = content::placed(&operations);
@@ -9643,7 +9612,8 @@ fn font_to_unicode(
         let edits =
             self.transform_edits(&facts, page_index, object, page_matrix, &file, &page, &operations, &states, &placed)?;
         let edited = content::splice(&stream, &edits);
-        let rewritten = Self::write_edit(&base, &file, &stream_replacements(&streams, &edited)?, &[])?;
+        let (replacements, extra) = self.own_content_replacements(&file, page_index, &page, &edited)?;
+        let rewritten = Self::write_edit(&base, &file, &replacements, &extra)?;
         self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
     }
 
@@ -9906,7 +9876,7 @@ fn font_to_unicode(
         let bytes = &base.bytes;
         let file = crate::pdf::File::parse(&bytes)?;
         let page = self.page_object(&file, page_index)?;
-        let (stream, streams) = self.page_content(&file, &page)?;
+        let (stream, _streams) = self.page_content(&file, &page)?;
         let fonts = self.page_fonts(&file, &page);
 
         let operations = content::parse(&stream)?;
@@ -10123,22 +10093,22 @@ fn font_to_unicode(
         }
         let edited = content::splice(&stream, &[(operation.span.clone(), replacement)]);
 
-        let mut replacements = Vec::new();
-        for (index, (number, dict)) in streams.iter().enumerate() {
-            let data = if index == 0 { edited.clone() } else { Vec::new() };
-            let packed = content::encode(&data)?;
-            let mut dict = dict.clone();
-            dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
-            dict.remove(b"DecodeParms");
-            replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
-        }
+        // The page, where it had to be told about a font it did not have, and
+        // the one new stream holding the edited content.
+        let mut extra = std::mem::take(&mut batch.added);
+        let stream_number = batch.reserve(&file)?;
+        let dict = match batch.page_patch(self, &file, &page)? {
+            Some(dict) => dict,
+            None => page
+                .as_dict()
+                .cloned()
+                .ok_or(PdfError::Unsupported("that page cannot be read"))?,
+        };
+        let (page_number, body, added) =
+            self.own_content_stream(&file, page_index, dict, stream_number, &edited)?;
+        extra.push(added);
 
-        // The page, where it had to be told about a font it did not have.
-        if let Some(patch) = batch.page_patch(self, &file, page_index, &page)? {
-            replacements.push(patch);
-        }
-
-        let rewritten = Self::write_edit(&base, &file, &replacements, &batch.added)?;
+        let rewritten = Self::write_edit(&base, &file, &[(page_number, body)], &extra)?;
         // Recorded rather than returned, so the caller can say what happened
         // without every signature in the chain growing a field for it.
         let face = swap.map(|s| s.face);
@@ -10246,7 +10216,7 @@ fn font_to_unicode(
         let bytes = &base.bytes;
         let file = crate::pdf::File::parse(bytes)?;
         let page = self.page_object(&file, page_index)?;
-        let (stream, streams) = self.page_content(&file, &page)?;
+        let (stream, _streams) = self.page_content(&file, &page)?;
         let fonts = self.page_fonts(&file, &page);
 
         let operations = content::parse(&stream)?;
@@ -10811,7 +10781,11 @@ fn font_to_unicode(
         // The fonts the batch wrote into the file, and the page told of them — once,
         // from everything the batch embedded.
         let extra = std::mem::take(&mut batch.added);
-        let page_patch = batch.page_patch(self, &file, page_index, &page)?;
+        let page_patch = batch.page_patch(self, &file, &page)?;
+        let stream_number = match batch.next_object {
+            Some(number) => number,
+            None => file.next_object_number()?,
+        };
 
         // The document as these spans make it: the content stream spliced, packed
         // and written out, with the font objects the batch added. Written twice
@@ -10819,21 +10793,20 @@ fn font_to_unicode(
         let write = |spans: &[(std::ops::Range<usize>, Vec<u8>)]| -> Result<(Vec<u8>, std::time::Duration, std::time::Duration)> {
             let t = std::time::Instant::now();
             let edited = content::splice(&stream, spans);
-            let mut replacements = Vec::new();
-            for (index, (number, dict)) in streams.iter().enumerate() {
-                let data = if index == 0 { edited.clone() } else { Vec::new() };
-                let packed = content::encode(&data)?;
-                let mut dict = dict.clone();
-                dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
-                dict.remove(b"DecodeParms");
-                replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
-            }
-            if let Some(patch) = &page_patch {
-                replacements.push(patch.clone());
-            }
+            let dict = match &page_patch {
+                Some(dict) => dict.clone(),
+                None => page
+                    .as_dict()
+                    .cloned()
+                    .ok_or(PdfError::Unsupported("that page cannot be read"))?,
+            };
+            let (page_number, body, added) =
+                self.own_content_stream(&file, page_index, dict, stream_number, &edited)?;
+            let mut all_extra = extra.clone();
+            all_extra.push(added);
             let packed_in = t.elapsed();
             let t = std::time::Instant::now();
-            let rewritten = Self::write_edit(&base, &file, &replacements, &extra)?;
+            let rewritten = Self::write_edit(&base, &file, &[(page_number, body)], &all_extra)?;
             Ok((rewritten, packed_in, t.elapsed()))
         };
 
@@ -11203,7 +11176,7 @@ fn font_to_unicode(
         let bytes = &base.bytes;
         let file = crate::pdf::File::parse(&bytes)?;
         let page = self.page_object(&file, page_index)?;
-        let (stream, streams) = self.page_content(&file, &page)?;
+        let (stream, _streams) = self.page_content(&file, &page)?;
 
         let operations = content::parse(&stream)?;
         let placed = content::placed(&operations);
@@ -11241,17 +11214,9 @@ fn font_to_unicode(
 
         let edited = content::splice(&stream, &[(operation.span.clone(), replacement)]);
 
-        let mut replacements = Vec::new();
-        for (index, (number, dict)) in streams.iter().enumerate() {
-            let data = if index == 0 { edited.clone() } else { Vec::new() };
-            let packed = content::encode(&data)?;
-            let mut dict = dict.clone();
-            dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
-            dict.remove(b"DecodeParms");
-            replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
-        }
+        let (replacements, extra) = self.own_content_replacements(&file, page_index, &page, &edited)?;
 
-        let rewritten = Self::write_edit(&base, &file, &replacements, &[])?;
+        let rewritten = Self::write_edit(&base, &file, &replacements, &extra)?;
         self.adopt_edit(&base, rewritten, was_secured, plus, permissions)?;
         Ok(previous)
     }
@@ -11409,43 +11374,17 @@ fn font_to_unicode(
         let file = crate::pdf::File::parse(&bytes)?;
         let page = self.page_object(&file, page_index)?;
 
-        let mut replacements = Vec::new();
-        let mut extra = Vec::new();
-        match self.page_content(&file, &page) {
-            Ok((mut stream, streams)) => {
+        let edited = match self.page_content(&file, &page) {
+            Ok((mut stream, _streams)) => {
                 stream.extend_from_slice(operators);
-                for (index, (number, dict)) in streams.iter().enumerate() {
-                    // Everything into the first stream, the rest emptied — the
-                    // only shape that keeps a multi-part content stream
-                    // consistent.
-                    let data = if index == 0 { stream.clone() } else { Vec::new() };
-                    let packed = crate::pdf::content::encode(&data)?;
-                    let mut dict = dict.clone();
-                    dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
-                    dict.remove(b"DecodeParms");
-                    replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
-                }
+                stream
             }
-            Err(_) => {
-                // No content stream: make one, and point the page at it.
-                let number = file.next_object_number()?;
-                let packed = crate::pdf::content::encode(operators)?;
-                let mut dict = crate::pdf::Dict(Vec::new());
-                dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
-                extra.push((number, crate::pdf::write_stream(&dict, &packed)));
-
-                let page_number = self.page_object_number(&file, page_index)?;
-                let Ok(crate::pdf::Object::Dict(mut dict)) = file.object(page_number) else {
-                    return Err(PdfError::InvalidArgument("that page cannot be written".into()));
-                };
-                dict.set(b"Contents", crate::pdf::Object::Reference(number, 0));
-                let mut body = Vec::new();
-                crate::pdf::write_object(&mut body, &crate::pdf::Object::Dict(dict));
-                replacements.push((page_number, body));
-            }
-        }
-
-        let rewritten = Self::write_edit(&base, &file, &replacements, &extra)?;
+            // No content stream: the new operators are the page's whole content.
+            Err(_) => operators.to_vec(),
+        };
+        let (page_number, body, added) =
+            self.own_content_for(&file, page_index, &page, &edited)?;
+        let rewritten = Self::write_edit(&base, &file, &[(page_number, body)], &[added])?;
         self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
     }
 
@@ -11501,6 +11440,70 @@ fn font_to_unicode(
             return Err(PdfError::InvalidArgument("that page draws nothing".into()));
         }
         Ok((stream, streams))
+    }
+
+    /// A page whose `/Contents` is **one new stream object** holding `edited`.
+    ///
+    /// The one shape every byte-level edit writes a page in. An edit must never
+    /// put the page's whole content into one of the page's existing streams: a
+    /// page's streams can be named by other pages, and Save for sharing used to
+    /// give every flattened page the same `q` and `Q`. Writing the edited page
+    /// into the first stream then drew that page's words on every page that
+    /// shares it — the missing letters and doubled text of the 2026-11-16
+    /// report. So the edited content always goes into a fresh object, and only
+    /// this page is pointed at it. Old streams are left exactly as they were;
+    /// a full save drops whatever nothing refers to.
+    ///
+    /// `page_dict` is the page's own dictionary, carrying whatever else the
+    /// caller changed (`/Resources`, say). `number` must be a free object
+    /// number — the caller reserves one when it is already adding objects of
+    /// its own (see [`EmbedBatch::reserve`]).
+    fn own_content_stream(
+        &self,
+        file: &crate::pdf::File<'_>,
+        page_index: usize,
+        mut page_dict: crate::pdf::Dict,
+        number: u32,
+        edited: &[u8],
+    ) -> Result<(u32, Vec<u8>, (u32, Vec<u8>))> {
+        use crate::pdf::Object;
+        let packed = crate::pdf::content::encode(edited)?;
+        let mut stream_dict = crate::pdf::Dict(Vec::new());
+        stream_dict.set(b"Filter", Object::Name(b"FlateDecode".to_vec()));
+        let stream = crate::pdf::write_stream(&stream_dict, &packed);
+        page_dict.set(b"Contents", Object::Reference(number, 0));
+        let page_number = self.page_object_number(file, page_index)?;
+        let mut body = Vec::new();
+        crate::pdf::write_object(&mut body, &Object::Dict(page_dict));
+        Ok((page_number, body, (number, stream)))
+    }
+
+    /// [`Self::own_content_stream`] for a page already read, with the next free
+    /// object number.
+    fn own_content_for(
+        &self,
+        file: &crate::pdf::File<'_>,
+        page_index: usize,
+        page: &crate::pdf::Object,
+        edited: &[u8],
+    ) -> Result<(u32, Vec<u8>, (u32, Vec<u8>))> {
+        let dict =
+            page.as_dict().cloned().ok_or(PdfError::Unsupported("that page cannot be read"))?;
+        let number = file.next_object_number()?;
+        self.own_content_stream(file, page_index, dict, number, edited)
+    }
+
+    /// The replacements and new objects for writing `edited` as this page's own
+    /// content: the page, and the one stream object it now names.
+    fn own_content_replacements(
+        &self,
+        file: &crate::pdf::File<'_>,
+        page_index: usize,
+        page: &crate::pdf::Object,
+        edited: &[u8],
+    ) -> Result<(Vec<(u32, Vec<u8>)>, Vec<(u32, Vec<u8>)>)> {
+        let (page_number, body, added) = self.own_content_for(file, page_index, page, edited)?;
+        Ok((vec![(page_number, body)], vec![added]))
     }
 
     /// Make every lock real in the document itself, now.
@@ -13055,17 +13058,28 @@ struct EmbeddedFace {
 }
 
 impl EmbedBatch {
-    /// The page's object, rewritten to name every font embedded so far; `None`
-    /// when none was. The page gets resources of its own, copied from what it
-    /// inherits — the dictionary it inherits from is shared, and adding to it
-    /// would name these fonts on every page of the document.
+    /// The next free object number, taken for something other than a font.
+    fn reserve(&mut self, file: &crate::pdf::File<'_>) -> Result<u32> {
+        let number = match self.next_object {
+            Some(number) => number,
+            None => file.next_object_number()?,
+        };
+        self.next_object = Some(number.checked_add(1).ok_or(PdfError::Unsupported(
+            "this file already uses the highest object number a PDF can hold",
+        ))?);
+        Ok(number)
+    }
+
+    /// The page's dictionary, rewritten to name every font embedded so far;
+    /// `None` when none was. The page gets resources of its own, copied from
+    /// what it inherits -- the dictionary it inherits from is shared, and adding
+    /// to it would name these fonts on every page of the document.
     fn page_patch(
         &self,
         doc: &PdfiumDocument,
         file: &crate::pdf::File<'_>,
-        page_index: usize,
         page: &crate::pdf::Object,
-    ) -> Result<Option<(u32, Vec<u8>)>> {
+    ) -> Result<Option<crate::pdf::Dict>> {
         use crate::pdf::Object;
         if self.faces.is_empty() {
             return Ok(None);
@@ -13086,10 +13100,7 @@ impl EmbedBatch {
         let mut page_dict =
             page.as_dict().cloned().ok_or(PdfError::Unsupported("that page cannot be read"))?;
         page_dict.set(b"Resources", Object::Dict(resources));
-        let number = doc.page_object_number(file, page_index)?;
-        let mut page_bytes = Vec::new();
-        crate::pdf::write_object(&mut page_bytes, &Object::Dict(page_dict));
-        Ok(Some((number, page_bytes)))
+        Ok(Some(page_dict))
     }
 }
 
@@ -13601,25 +13612,6 @@ impl<'d> PageFacts<'d> {
         let text = self.text_objects.get()?;
         Some((text.iter().position(|o| *o == object)?, text.len()))
     }
-}
-
-/// The page's content, edited, as the stream objects to write back: the
-/// whole of it in the first, the rest emptied — how every stream edit here
-/// writes a page.
-fn stream_replacements(
-    streams: &[(u32, crate::pdf::Dict)],
-    edited: &[u8],
-) -> Result<Vec<(u32, Vec<u8>)>> {
-    let mut replacements = Vec::new();
-    for (index, (number, dict)) in streams.iter().enumerate() {
-        let data = if index == 0 { edited } else { &[][..] };
-        let packed = crate::pdf::content::encode(data)?;
-        let mut dict = dict.clone();
-        dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
-        dict.remove(b"DecodeParms");
-        replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
-    }
-    Ok(replacements)
 }
 
 /// One thing drawn on a page, as the move guard sees it.
@@ -15995,7 +15987,7 @@ impl PdfiumDocument {
         let mut page_changed = false;
         // The page's stream, spliced where a drawing is given a name of its
         // own; written back only if something was.
-        let (page_stream, page_streams) = self.page_content(&file, &Object::Dict(page_dict.clone()))?;
+        let (page_stream, _page_streams) = self.page_content(&file, &Object::Dict(page_dict.clone()))?;
         let page_ops = content::parse(&page_stream)?;
         let mut page_edits: Vec<(std::ops::Range<usize>, Vec<u8>)> = Vec::new();
         // Forms edited in place above a copy: their dictionaries change (a
@@ -16157,23 +16149,19 @@ impl PdfiumDocument {
             dict.remove(b"DecodeParms");
             replacements.push((number, write_stream(&dict, &packed)));
         }
-        if page_changed {
+        if !page_edits.is_empty() {
+            // As the page path writes it: one new stream holding the edited
+            // content, and this page pointed at it alone.
+            let edited = content::splice(&page_stream, &page_edits);
+            let stream_number = next;
+            let (page_number, body, added) =
+                self.own_content_stream(&file, request.page_index, page_dict, stream_number, &edited)?;
+            replacements.push((page_number, body));
+            extras.push(added);
+        } else if page_changed {
             let mut body = Vec::new();
             write_object(&mut body, &Object::Dict(page_dict));
             replacements.push((page_number, body));
-        }
-        if !page_edits.is_empty() {
-            // As the page path writes it: everything into the first stream,
-            // the others emptied, the dictionary untouched.
-            let edited = content::splice(&page_stream, &page_edits);
-            for (index, (number, dict)) in page_streams.iter().enumerate() {
-                let data = if index == 0 { edited.clone() } else { Vec::new() };
-                let packed = content::encode(&data)?;
-                let mut dict = dict.clone();
-                dict.set(b"Filter", Object::Name(b"FlateDecode".to_vec()));
-                dict.remove(b"DecodeParms");
-                replacements.push((*number, write_stream(&dict, &packed)));
-            }
         }
 
         let rewritten = file.rewrite_adding(&replacements, &extras, &crate::pdf::Dict(Vec::new()))?;
@@ -17272,6 +17260,18 @@ impl PdfiumDocument {
         let annot = unsafe { bindings.FPDFPage_CreateAnnot(page.handle, subtype) };
         if annot.is_null() {
             return Err(PdfError::Pdfium("could not create annotation".into()));
+        }
+
+        // **Every mark Pagify writes prints.** A mark with no `/F` flags is one
+        // a print job and a preview that renders as for print may leave out —
+        // the missing pictures of the 2026-11-16 report. A link is invisible
+        // ink and keeps no flag, as before.
+        if !matches!(annotation, Annotation::Link { .. }) {
+            let flagged = unsafe { bindings.FPDFAnnot_SetFlags(annot, ANNOT_FLAG_PRINT) };
+            if flagged == 0 {
+                unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+                return Err(PdfError::Pdfium("could not make the annotation print".into()));
+            }
         }
 
         let outcome = self.fill_annotation(annot, annotation, &space);

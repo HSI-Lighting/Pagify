@@ -235,6 +235,21 @@ fn collect_pages(
 
 /// Flatten every page's visible markup annotations into its content.
 pub fn flatten_annotations(bytes: &[u8]) -> Result<Flattened> {
+    flatten(bytes, false)
+}
+
+/// Bake only the annotations whose appearance is one picture, and leave every
+/// other annotation exactly as it is.
+///
+/// What the desktop's ordinary **Save** and **Save As** write: a placed picture
+/// or signature is a `/Stamp` annotation, and a preview or a print job that
+/// draws only the page leaves it out. A stamp drawn as a form, a highlight, a
+/// note, a link and a form field are not pictures, and stay annotations.
+pub fn flatten_pictures(bytes: &[u8]) -> Result<Flattened> {
+    flatten(bytes, true)
+}
+
+fn flatten(bytes: &[u8], pictures_only: bool) -> Result<Flattened> {
     let file = File::parse(bytes)?;
     let root = dict_of(&file, file.trailer().get(b"Root"))
         .ok_or_else(|| PdfError::InvalidArgument("the file has no catalogue".into()))?;
@@ -252,8 +267,6 @@ pub fn flatten_annotations(bytes: &[u8]) -> Result<Flattened> {
     let mut replacements: Vec<(u32, Vec<u8>)> = Vec::new();
     let mut extra: Vec<(u32, Vec<u8>)> = Vec::new();
     let (mut pictures, mut forms, mut bare, mut left) = (0, 0, 0, 0);
-    // `q` and `Q`, one object each for the whole file, made when first wanted.
-    let mut brackets: Option<(u32, u32)> = None;
 
     for page in pages {
         let Some(annots) = page.dict.get(b"Annots") else { continue };
@@ -275,6 +288,13 @@ pub fn flatten_annotations(bytes: &[u8]) -> Result<Flattened> {
         for item in items {
             let planned = dict_of(&file, Some(&item)).map_or(Err(Skip::Other), |annot| plan(&file, &annot));
             let plan = match planned {
+                // In picture mode a stamp drawn as a form stays an annotation:
+                // only an appearance that is one image is baked.
+                Ok(plan) if pictures_only && !plan.picture => {
+                    left += 1;
+                    kept.push(item);
+                    continue;
+                }
                 Ok(plan) => plan,
                 Err(skip) => {
                     match skip {
@@ -304,12 +324,13 @@ pub fn flatten_annotations(bytes: &[u8]) -> Result<Flattened> {
             continue;
         }
 
-        let (open, close) = *brackets.get_or_insert_with(|| {
-            let (open, close) = (fresh(&mut next), fresh(&mut next));
-            extra.push((open, write_stream(&Dict::default(), b"q\n")));
-            extra.push((close, write_stream(&Dict::default(), b"Q\n")));
-            (open, close)
-        });
+        // **One `q` and one `Q` per page.** These used to be one object each for
+        // the whole file, shared by every flattened page; a later byte-level
+        // edit then wrote the edited page into its first stream, which was that
+        // shared `q`, and the page's words appeared on every other page.
+        let (open, close) = (fresh(&mut next), fresh(&mut next));
+        extra.push((open, write_stream(&Dict::default(), b"q\n")));
+        extra.push((close, write_stream(&Dict::default(), b"Q\n")));
         let added = fresh(&mut next);
         extra.push((added, write_stream(&Dict::default(), drawn.as_bytes())));
 
@@ -610,6 +631,75 @@ mod tests {
         let x = xobjects(&page(&file));
         assert_eq!(x.get(b"Old"), Some(&Object::Reference(8, 0)), "what the page inherited was lost");
         assert_eq!(x.0.len(), 2, "the picture was not added: {x:?}");
+    }
+
+    /// Two pages, each with a picture placed on it, sharing one appearance and
+    /// one image.
+    fn two_picture_pages() -> Vec<u8> {
+        build(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R /Annots [7 0 R] /Resources << >> >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 6 0 R /Annots [8 0 R] /Resources << >> >>".to_vec(),
+            stream("", b"0.9 g 0 0 612 792 re f"),
+            stream("", b"0.9 g 0 0 612 792 re f"),
+            b"<< /Type /Annot /Subtype /Stamp /Rect [100 600 200 700] /AP << /N 9 0 R >> >>".to_vec(),
+            b"<< /Type /Annot /Subtype /Stamp /Rect [100 600 200 700] /AP << /N 9 0 R >> >>".to_vec(),
+            stream("/Type /XObject /Subtype /Form /BBox [0 0 50 50] /Resources << /XObject << /Im 10 0 R >> >>", b"q 50 0 0 50 0 0 cm /Im Do Q"),
+            image(),
+        ])
+    }
+
+    /// **The break:** the two `q`/`Q` brackets shared by every flattened page.
+    /// A later byte-level edit then wrote the edited page into the first
+    /// stream — the shared `q` — and that page's words appeared on every other
+    /// page (the 2026-11-16 WhatsApp report).
+    #[test]
+    fn two_flattened_pages_share_no_content_object() {
+        let out = flatten_annotations(&two_picture_pages()).expect("flattens");
+        assert_eq!(out.pictures, 2);
+
+        let file = File::parse(&out.bytes).expect("a readable file");
+        let content_objects = |page_number: u32| -> BTreeSet<u32> {
+            let page = file.object(page_number).expect("page").as_dict().expect("a dict").clone();
+            let Some(Object::Array(items)) = page.get(b"Contents") else { panic!("Contents is not an array") };
+            items
+                .iter()
+                .map(|item| match item {
+                    Object::Reference(number, _) => *number,
+                    other => panic!("not a reference: {other:?}"),
+                })
+                .collect()
+        };
+        let first = content_objects(3);
+        let second = content_objects(4);
+        assert_eq!(first.len(), 4, "page 1's four streams: {first:?}");
+        assert!(first.is_disjoint(&second), "the pages share content objects: {first:?} {second:?}");
+    }
+
+    /// **The break:** a stamp drawn as a form baked by the ordinary save. Only
+    /// an appearance that is one image is a placed picture; everything else
+    /// stays an annotation, as the owner approved.
+    #[test]
+    fn picture_mode_bakes_a_picture_and_leaves_every_other_annotation() {
+        let input = one_page(
+            "/Resources << >>",
+            "5 0 R 6 0 R",
+            &[
+                b"<< /Type /Annot /Subtype /Stamp /Rect [100 600 200 700] /AP << /N 7 0 R >> >>".to_vec(),
+                b"<< /Type /Annot /Subtype /Stamp /Rect [10 10 30 30] /AP << /N 8 0 R >> >>".to_vec(),
+                stream("/Type /XObject /Subtype /Form /BBox [0 0 50 50] /Resources << /XObject << /Im 9 0 R >> >>", b"q 50 0 0 50 0 0 cm /Im Do Q"),
+                stream("/Type /XObject /Subtype /Form /BBox [0 0 10 10]", b"1 0 0 rg 0 0 10 10 re f"),
+                image(),
+            ],
+        );
+        let out = flatten_pictures(&input).expect("flattens");
+        assert_eq!((out.pictures, out.forms, out.left), (1, 0, 1));
+        let file = File::parse(&out.bytes).expect("a readable file");
+        let Some(Object::Array(annots)) = page(&file).get(b"Annots").cloned() else {
+            panic!("the stamp drawn as a form was lost")
+        };
+        assert_eq!(annots.len(), 1, "{annots:?}");
     }
 
     /// **The break:** a name that is already taken. The page already has the

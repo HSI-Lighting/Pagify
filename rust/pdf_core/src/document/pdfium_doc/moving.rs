@@ -110,7 +110,7 @@ impl PdfiumDocument {
         let base = self.edit_base()?;
         let file = crate::pdf::File::parse(&base.bytes)?;
         let page = self.page_object(&file, page_index)?;
-        let (stream, streams) = self.page_content(&file, &page)?;
+        let (stream, _streams) = self.page_content(&file, &page)?;
         let operations = content::parse(&stream)?;
         let states = content::states(&operations);
         let placed = content::placed(&operations);
@@ -201,7 +201,8 @@ impl PdfiumDocument {
             })?);
         }
         let edited = content::splice(&stream, &in_stream_order(members)?);
-        let rewritten = Self::write_edit(&base, &file, &stream_replacements(&streams, &edited)?, &[])?;
+        let (replacements, extra) = self.own_content_replacements(&file, page_index, &page, &edited)?;
+        let rewritten = Self::write_edit(&base, &file, &replacements, &extra)?;
 
         let after = Self::open_bytes(rewritten.clone(), None)?;
         let now = after.object_census(page_index)?;

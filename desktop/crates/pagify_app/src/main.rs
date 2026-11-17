@@ -2966,6 +2966,22 @@ const BUNDLED_OUTLINED_FONTS: &[&[u8]] = &[
     include_bytes!("../../../third_party/fonts/Montserrat-Bold.ttf"),
 ];
 
+/// The faces Pagify carries for the save-time font embedding: the outline
+/// matcher's two, plus the datasheet weights it must be able to store when a
+/// page names them without carrying them.
+///
+/// **Not the matcher's pool.** Adding the three heavier/lighter weights to
+/// `BUNDLED_OUTLINED_FONTS` was measured to make a page of plain rectangles
+/// read as words (`g4_edit_error_tests::a_click_on_the_drawn_letters...`), so
+/// the save finder has its own list and recognition keeps what it had.
+const BUNDLED_SAVE_FONTS: &[&[u8]] = &[
+    include_bytes!("../../../third_party/fonts/Montserrat-Light.ttf"),
+    include_bytes!("../../../third_party/fonts/Montserrat-Regular.ttf"),
+    include_bytes!("../../../third_party/fonts/Montserrat-Bold.ttf"),
+    include_bytes!("../../../third_party/fonts/Montserrat-ExtraBold.ttf"),
+    include_bytes!("../../../third_party/fonts/Montserrat-Black.ttf"),
+];
+
 /// The family a document's own face is bound to while a run is being edited.
 const RUN_FAMILY: &str = "pagify-run-face";
 
@@ -5846,10 +5862,12 @@ impl PagifyApp {
         if placed > 0 {
             lines.push(format!(
                 "{placed} drawn signature{} placed on page{} {} — still an annotation \
-                 anyone can delete; `applysignatures` makes {} part of the page",
+                 anyone can delete; `applysignatures` makes {} part of the page, and Save \
+                 writes {} into the saved file",
                 if placed == 1 { "" } else { "s" },
                 if on_pages.len() == 1 { "" } else { "s" },
                 on_pages.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", "),
+                if placed == 1 { "it" } else { "them" },
                 if placed == 1 { "it" } else { "them" },
             ));
         }
@@ -12039,14 +12057,34 @@ impl PagifyApp {
         let signatures_lost = if signed && !incremental { session.signature_count() } else { 0 };
         // Worth saying only where a rewrite is not the ordinary save.
         let rewritten_note = session.must_save_full_copy();
-        match session.save_to(&path, incremental) {
-            Ok(()) => {
+        // The faces this save may embed. Found once, then read only for the
+        // fonts the file actually names.
+        self.ensure_system_fonts();
+        let find_face = |name: &str| self.find_face_for_save(name);
+        match session.save_to_with_fixups(&path, incremental, &find_face) {
+            Ok(report) => {
                 self.tab_mut().view_state.saved_revision = self.tab_mut().markup.revision();
                 self.say_info(format!(
                     "saved {} ({stored} marks){}.",
                     path.display(),
                     if rewritten_note { " — the file was rewritten" } else { "" }
                 ));
+                // One content-free line: how many pictures were baked, which
+                // faces were stored or not found, and what the step cost.
+                self.recording_state.session_log.record(
+                    "save",
+                    &format!(
+                        "pictures_baked={} fonts_stored={} fonts_missing={} widths_differ={} ms={}",
+                        report.pictures,
+                        report.fonts_stored.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(","),
+                        report.fonts_missing.join(","),
+                        report.width_mismatches.len(),
+                        report.elapsed.as_millis()
+                    ),
+                );
+                if !report.fonts_missing.is_empty() {
+                    self.say_info(missing_face_message(&report.fonts_missing));
+                }
                 if signatures_lost > 0 {
                     self.say_error(format!(
                         "the rewrite broke {signatures_lost} signature{} — sign after redacting \
@@ -14182,6 +14220,43 @@ impl PagifyApp {
         names
     }
 
+    /// The PC's fonts, found once. `system_fonts::list` reads and parses every
+    /// installed file — seconds — so it is never run per save or per frame.
+    fn ensure_system_fonts(&mut self) {
+        // **No test reads this PC's fonts.** The scan is slow and not
+        // hermetic; tests use the bundled faces, which is the same path and
+        // the same code with a different finder.
+        if cfg!(test) {
+            return;
+        }
+        if self.faces_state.system_fonts.is_none() {
+            self.faces_state.system_fonts = Some(system_fonts::list());
+        }
+    }
+
+    /// A face's program for the save step, by PostScript name: this PC's
+    /// installed faces first, then Pagify's bundled ones.
+    ///
+    /// The engine never reads an OS font — it asks this, so its tests stay
+    /// hermetic and a face Pagify does not carry is simply reported as missing.
+    fn find_face_for_save(&self, name: &str) -> Option<Vec<u8>> {
+        if let Some(font) = self
+            .faces_state
+            .system_fonts
+            .iter()
+            .flatten()
+            .find(|font| font.name == name)
+        {
+            if let Ok(bytes) = std::fs::read(&font.path) {
+                return Some(bytes);
+            }
+        }
+        BUNDLED_SAVE_FONTS
+            .iter()
+            .map(|bytes| bytes.to_vec())
+            .chain(self.faces_state.outlined_fonts.bytes())
+            .find(|bytes| pdf_core::pdf::embed::face_name(bytes).as_deref() == Some(name))
+    }
 
     /// Write words onto the page, where the next click lands.
     ///
@@ -18657,6 +18732,27 @@ mod join_paragraph_lines_tests;
 
 #[cfg(test)]
 mod fix_extracted_text_tests;
+
+/// The info line after a save whose file names faces this PC could not supply.
+///
+/// An info line, not an error: the save did what it could, and the person is
+/// told exactly what another device will have to substitute.
+fn missing_face_message(names: &[String]) -> String {
+    let list = match names {
+        [one] => one.clone(),
+        [first, second] => format!("{first} and {second}"),
+        _ => {
+            let (last, rest) = names.split_last().expect("a non-empty list");
+            format!("{} and {last}", rest.join(", "))
+        }
+    };
+    let (verb, tail) =
+        if names.len() == 1 { ("is", "it is") } else { ("are", "they are") };
+    format!(
+        "Saved. {list} {verb} not on this PC, so {tail} not stored in the file — other devices \
+         will draw those words in a font of their own."
+    )
+}
 
 /// A line-end hyphen the page's text carries as a control code, before a line
 /// the page draws as shapes — the one place [`fix_extracted_text`] cannot see the

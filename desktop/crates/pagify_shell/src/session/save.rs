@@ -44,6 +44,31 @@ impl Session {
         })
     }
 
+    /// Write the document out with the desktop's already-approved fix-ups on a
+    /// full copy: placed pictures and signature pictures baked into the page,
+    /// and fonts the file names but does not carry embedded from `find_face`.
+    ///
+    /// The finder is the app's, so the engine reads no OS font. An incremental
+    /// save is unchanged, and so is the document in hand — only the bytes
+    /// written are baked, so the picture keeps its handles and undo and redo
+    /// work as before.
+    pub fn save_to_with_fixups(
+        &self,
+        path: &Path,
+        incremental: bool,
+        find_face: &dyn Fn(&str) -> Option<Vec<u8>>,
+    ) -> Result<pdf_core::document::SaveFixupReport> {
+        let mut report = pdf_core::document::SaveFixupReport::default();
+        write_then_rename(path, |file| {
+            let outcome = registry::with_session(self.handle, |s| {
+                pdf_core::engine::save_with_fixups(s, file, incremental, find_face)
+            })?;
+            report = outcome;
+            Ok(())
+        })?;
+        Ok(report)
+    }
+
     /// Write a copy of the document to send to somebody, its placed pictures
     /// baked into the pages — see [`pdf_core::pdf::flatten`].
     ///

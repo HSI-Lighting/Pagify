@@ -474,6 +474,26 @@ pub fn save(
     }
 }
 
+/// [`save`], with the desktop's fix-ups on a full copy: placed pictures baked
+/// into their pages, and fonts the file does not carry embedded from the app's
+/// own faces. An incremental save is exactly [`save`], and reports nothing.
+pub fn save_with_fixups(
+    session: &mut DocumentSession,
+    dest: &mut dyn std::io::Write,
+    incremental: bool,
+    find_face: &dyn Fn(&str) -> Option<Vec<u8>>,
+) -> Result<crate::document::SaveFixupReport> {
+    if incremental {
+        save(session, dest, true)?;
+        return Ok(crate::document::SaveFixupReport::default());
+    }
+    let doc = session
+        .document
+        .as_document_mut()
+        .ok_or(PdfError::Unsupported("saving this document"))?;
+    doc.save_full_copy_with_fixups(dest, &crate::document::SaveFixups { find_face })
+}
+
 /// A copy of the document to send to somebody, its marks baked into its pages.
 /// Reads the document; the session is left exactly as it was. See
 /// [`crate::document::Document::flattened_copy`].

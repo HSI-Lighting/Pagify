@@ -90,6 +90,30 @@ pub fn metrics(bytes: &[u8]) -> Option<Metrics> {
     })
 }
 
+/// The advance for every code `/WinAnsiEncoding` can carry, 32..=255, in
+/// 1000ths of an em; zero where the face has no glyph for a code.
+///
+/// What a simple font written or checked against a face needs, and what
+/// `truetype` builds its own `/Widths` from. `None` for a face this cannot read.
+pub fn win_ansi_widths(bytes: &[u8]) -> Option<Vec<i32>> {
+    let face = ttf_parser::Face::parse(bytes, 0).ok()?;
+    let per_em = f32::from(face.units_per_em());
+    if per_em <= 0.0 {
+        return None;
+    }
+    Some(
+        (32u8..=255)
+            .map(|code| {
+                win_ansi_char(code)
+                    .and_then(|c| face.glyph_index(c))
+                    .and_then(|glyph| face.glyph_hor_advance(glyph))
+                    .map(|units| (f32::from(units) * 1000.0 / per_em).round() as i32)
+                    .unwrap_or(0)
+            })
+            .collect(),
+    )
+}
+
 /// What this face calls itself, if it says.
 pub fn face_name(bytes: &[u8]) -> Option<String> {
     let face = ttf_parser::Face::parse(bytes, 0).ok()?;

@@ -1,10 +1,23 @@
-# Montserrat-{Regular,Bold}.ttf
+# Montserrat-{Light,Regular,Bold,ExtraBold,Black}.ttf
 
 Candidate faces for matching type converted to outlines — see
 `crates/pagify_app`'s use of `pdf_core::document::glyphs::Catalogue` and the
 engine's own `document/outlined.rs`. Bundled because it is the specific face
 HSI's own catalogue was set in, named directly rather than guessed at from a
 generic system-font list.
+
+**Light, ExtraBold and Black were added on 2026-11-16** for the save-time
+font embedding (`pdf_core::pdf::fonts`): a datasheet edited elsewhere names
+`Montserrat-Light`, `-ExtraBold` and `-Black` without carrying their programs,
+and a PC that cannot supply the face leaves every reader to substitute. They
+are instanced from the same variable file, at `wght=300`, `800` and `900`,
+with the same `--update-name-table` step described below — so they are static
+faces, not the variable file, whose default instance is Thin.
+
+They are **not** in the outline matcher's candidate pool
+(`BUNDLED_OUTLINED_FONTS`). Measured: adding them made a page of plain
+rectangles read as words, which is the wrong answer for a page with no text at
+all. They are in `BUNDLED_SAVE_FONTS`, which the save finder uses.
 
 **SIL Open Font License 1.1** (see `LICENSE.txt`), which permits bundling and
 redistribution — it may not be sold on its own, which embedding it in this

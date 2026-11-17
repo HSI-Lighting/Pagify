@@ -38,6 +38,7 @@ pub mod content;
 pub mod embed;
 pub mod encrypt;
 pub mod flatten;
+pub mod fonts;
 pub mod hidden;
 pub mod lift;
 pub mod secure_plus;

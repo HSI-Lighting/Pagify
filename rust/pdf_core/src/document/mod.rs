@@ -1216,6 +1216,31 @@ impl RemovedPage {
     }
 }
 
+/// What the desktop asks a full copy to fix before it is written.
+///
+/// The defaults are Android's: `save_full_copy` writes exactly what it did. A
+/// caller that wants the desktop's own fix-ups asks for them, and supplies the
+/// finder — the engine reads no OS font, so its tests stay hermetic.
+pub struct SaveFixups<'a> {
+    /// The font program for a PostScript name, when the app has it.
+    pub find_face: &'a dyn Fn(&str) -> Option<Vec<u8>>,
+}
+
+/// What a fixed-up full copy did.
+#[derive(Debug, Default, Clone)]
+pub struct SaveFixupReport {
+    /// Placed pictures baked into their pages.
+    pub pictures: usize,
+    /// Fonts stored, by the program's own PostScript name, with its size.
+    pub fonts_stored: Vec<(String, usize)>,
+    /// Fonts the finder could not supply, or supplied only as a variable font.
+    pub fonts_missing: Vec<String>,
+    /// Simple fonts whose own `/Widths` disagree with the face's by over 2%.
+    pub width_mismatches: Vec<String>,
+    /// The milliseconds this step took.
+    pub elapsed: std::time::Duration,
+}
+
 /// Mutation of a document's structure.
 ///
 /// Named for what it does, and deliberately free of annotation vocabulary: marks
@@ -1804,6 +1829,21 @@ pub trait DocumentMut {
     /// A rewritten, compacted copy. Offered as an explicit user action — never as
     /// the default save, because it is the path that destroys signatures.
     fn save_full_copy(&mut self, dest: &mut dyn Write) -> Result<()>;
+
+    /// A rewritten copy with the desktop's own fix-ups before the password:
+    /// placed pictures baked into their pages, and fonts the file does not
+    /// carry embedded when the app can supply them.
+    ///
+    /// The default is exactly [`Self::save_full_copy`]. Android shares this
+    /// crate and must not change; the desktop asks for these explicitly.
+    fn save_full_copy_with_fixups(
+        &mut self,
+        dest: &mut dyn Write,
+        _fixups: &SaveFixups<'_>,
+    ) -> Result<SaveFixupReport> {
+        self.save_full_copy(dest)?;
+        Ok(SaveFixupReport::default())
+    }
 
     /// Put a password on the document — one another reader will ask for.
     ///

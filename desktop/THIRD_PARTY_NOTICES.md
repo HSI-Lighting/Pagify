@@ -32,3 +32,17 @@ SOFTWARE.
 ```
 
 The ArtCraft name, wordmark and logos are trademarks of the ArtCraft Team and are not used here.
+
+## Montserrat
+
+`third_party/fonts/Montserrat-{Light,Regular,Bold,ExtraBold,Black}.ttf` are static
+instances of Montserrat, the typeface by Julieta Ulanovsky and the Montserrat
+Project Authors (https://github.com/JulietaUla/Montserrat), taken from Google
+Fonts (https://github.com/google/fonts/tree/main/ofl/montserrat). They are used
+for outlined-text recognition and are embedded into saved documents when a page
+names a Montserrat face the file does not carry.
+
+Montserrat is licensed under the SIL Open Font License, Version 1.1. The licence
+text is `third_party/fonts/LICENSE.txt`. The fonts may be bundled and
+redistributed with this application; they may not be sold on their own, and a
+modified version may not use the reserved font name.
