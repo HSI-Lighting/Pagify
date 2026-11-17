@@ -5620,14 +5620,46 @@ impl DocumentMut for PdfiumDocument {
 
         // Moving or resizing must not silently un-rotate a picture that was
         // already turned — the angle lives only in `ROTATION_KEY`, so it has
-        // to be read back here and carried into the rebuilt appearance, not
+        // to be read back here and carried into the new appearance, not
         // assumed to be zero. The unturned frame is the new rect: the
         // annotation's own `/Rect` becomes the box around the turned picture.
         let rotation = read_rotation(annot);
-        let frame = to_pdf_rect(&space, &rect);
+        let new = to_pdf_rect(&space, &rect);
+        let current = match read_frame(annot) {
+            Some(frame) => frame,
+            None => {
+                let mut frame = FS_RECTF { left: 0.0, bottom: 0.0, right: 0.0, top: 0.0 };
+                if unsafe { bindings.FPDFAnnot_GetRect(annot, &mut frame) } == 0 {
+                    unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+                    return Err(PdfError::Pdfium(
+                        "the signature's own position could not be read".into(),
+                    ));
+                }
+                frame
+            }
+        };
+
+        // **A same-size move is a shift of `/Rect`, not a rebuild.** Every rebuild makes a new image
+        // object, and a full save writes every object made in the session, so rebuilding on a move
+        // copied the whole picture into the file each time. The appearance maps its `/BBox` onto
+        // `/Rect`, so both renderers and Save follow a pure shift with nothing else to write.
+        let same_size = ((current.right - current.left) - (new.right - new.left)).abs() < 0.01
+            && ((current.top - current.bottom) - (new.top - new.bottom)).abs() < 0.01;
+        if same_size {
+            let set_rect = unsafe { bindings.FPDFAnnot_SetRect(annot, &turned_bounds(&new, rotation)) };
+            let wrote_frame = set_annotation_string(annot, FRAME_KEY, &format_frame(&new));
+            unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+            if set_rect == 0 || !wrote_frame {
+                return Err(PdfError::Pdfium("the signature could not be moved".into()));
+            }
+
+            self.touch_annotation();
+            return Ok(());
+        }
+
         unsafe { bindings.FPDFPage_CloseAnnot(annot) };
 
-        self.redraw_picture(&page, annot_index, &frame, rotation)?;
+        self.redraw_picture(&page, annot_index, &new, rotation)?;
 
         self.touch_annotation();
         Ok(())

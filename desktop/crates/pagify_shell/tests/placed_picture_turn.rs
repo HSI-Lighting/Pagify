@@ -86,3 +86,47 @@ fn a_moved_picture_turns_in_both_renderers_and_undo_puts_it_back() {
     let back = session.render_page(0, 1.0).expect("render");
     assert!(sample(&back, 400.0, 530.0) > 200, "the un-turned picture is still drawn where the turn put it");
 }
+
+#[test]
+fn a_turned_picture_moved_after_is_drawn_turned_in_both_renderers() {
+    let session = Session::open(fixture("two-column.pdf")).expect("open");
+    let frame = Rect { left: 300.0, top: 300.0, right: 500.0, bottom: 400.0 };
+    let moved = Rect { left: 300.0, top: 400.0, right: 500.0, bottom: 500.0 };
+
+    session
+        .execute(Command::AddAnnotation {
+            page_index: 0,
+            annotation: Annotation::Image { rect: frame, rgba: black(), width: 8, height: 4 },
+        })
+        .expect("place");
+    let idx = session.placed_image_marks(0).expect("marks")[0].index;
+
+    session.rotate_image_signature(0, idx, 90.0, 0.0).expect("turn");
+    session.set_image_signature_rect(0, idx, moved, frame).expect("move");
+
+    let pdfium = session.render_page(0, 1.0).expect("render");
+    let bytes = session.current_bytes().expect("bytes");
+    let preview = pagify_shell::preview::Preview::new(bytes).expect("preview");
+    let hayro = preview.render_scaled(0, 1.0).expect("preview render");
+
+    for (name, raster) in [("PDFium", &pdfium), ("hayro", &hayro)] {
+        for (x, y) in [(400.0, 370.0), (400.0, 450.0), (400.0, 530.0)] {
+            assert!(
+                sample(raster, x, y) < 60,
+                "{name}: the turned, moved picture is missing at ({x}, {y}): {}",
+                sample(raster, x, y)
+            );
+        }
+        for (x, y) in [(310.0, 450.0), (490.0, 450.0)] {
+            assert!(
+                sample(raster, x, y) > 200,
+                "{name}: there is ink outside the turned picture at ({x}, {y}): {}",
+                sample(raster, x, y)
+            );
+        }
+    }
+
+    let mark = &session.placed_image_marks(0).expect("marks")[0];
+    assert_eq!(mark.rect, moved, "the read-back rect should be where it was moved");
+    assert!((mark.rotation - 90.0).abs() < 0.01, "rotation was not read back: {}", mark.rotation);
+}

@@ -32,7 +32,7 @@ use harness::{serial, skip_without_pdfium};
 
 use pdf_core::document::pdfium_doc::PdfiumDocument;
 use pdf_core::document::{
-    Annotation, Color, Document, DocumentMut, DrawnKind, Rect, Redaction, RenderRequest,
+    Annotation, Color, Document, DocumentMut, DrawnKind, Rect, Redaction, RenderRequest, SaveFixups,
 };
 
 fn open(name: &str) -> PdfiumDocument {
@@ -805,4 +805,60 @@ fn a_wide_picture_turned_a_quarter_is_not_cut_to_its_old_frame() {
     let mark = &doc.image_signature_marks(0).expect("marks")[0];
     assert_eq!(mark.rect, r, "the read-back rect should still be the frame that was placed");
     assert!((mark.rotation - 90.0).abs() < 0.01, "rotation was not read back: {}", mark.rotation);
+}
+
+/// **A move must not copy the picture into the file.** `redraw_picture` creates a new image object on
+/// every call and PDFium's full save writes every object made in the session, so each move used to add
+/// a whole copy: 170 KB for this picture, 507 KB after one move and a turn, 3.5 MB after ten. A
+/// same-size move is a pure shift of `/Rect`, which both renderers and Save honour without a rebuild.
+#[test]
+fn moving_a_picture_ten_times_does_not_grow_the_saved_file() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let (w, h) = (300u32, 200u32);
+    let mut rgba = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let i = ((y * w + x) * 4) as usize;
+            rgba[i..i + 4].copy_from_slice(&[
+                (x * 7 % 251) as u8,
+                (y * 13 % 241) as u8,
+                ((x ^ y) % 239) as u8,
+                255,
+            ]);
+        }
+    }
+    let rect = Rect { left: 100.0, top: 100.0, right: 250.0, bottom: 200.0 };
+    let finder = |_: &str| None;
+
+    let saved_size = |moves: usize| -> usize {
+        let mut doc = open("two-column.pdf");
+        let index = doc
+            .add_annotation(0, &Annotation::Image { rect, rgba: rgba.clone(), width: w, height: h })
+            .expect("place the picture");
+        doc.rotate_image_signature(0, index, 30.0).expect("turn");
+        let moved = Rect { left: 120.0, right: 270.0, ..rect };
+        for step in 0..moves {
+            // **A move, not a resize**: both edges shift together. The plan's "alternating `left`"
+            // alone changes the width and is a resize, which is meant to rebuild.
+            let to = if step % 2 == 0 { moved } else { rect };
+            doc.set_image_signature_rect(0, index, to).expect("move");
+        }
+        let mut saved = Vec::new();
+        let report = doc
+            .save_full_copy_with_fixups(&mut saved, &SaveFixups { find_face: &finder })
+            .expect("the full save");
+        assert_eq!(report.pictures, 1, "the picture was not baked");
+        saved.len()
+    };
+
+    let one = saved_size(1);
+    let ten = saved_size(10);
+    eprintln!("one move {one} bytes, ten moves {ten} bytes");
+    assert!(
+        ten <= one + 4096,
+        "ten moves grew the saved file from {one} to {ten} bytes (+{}): every move made another copy",
+        ten - one
+    );
 }

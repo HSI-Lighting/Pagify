@@ -366,3 +366,35 @@ fn a_turned_picture_is_baked_turned_by_a_full_save() {
         "the saved page still draws the picture in the un-turned part of its old frame"
     );
 }
+
+/// **A picture turned and then moved is baked where it was moved to.** The move is a shift of `/Rect`
+/// now, not a rebuild, so this guards that the shifted appearance still bakes the turn in the right
+/// place.
+#[test]
+fn a_turned_then_moved_picture_is_baked_where_it_was_moved_to() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("two-column.pdf");
+    place_picture(&mut doc, Rect { left: 300.0, top: 300.0, right: 500.0, bottom: 400.0 });
+    doc.rotate_image_signature(0, 0, 90.0).expect("rotate");
+    doc.set_image_signature_rect(0, 0, Rect { left: 300.0, top: 400.0, right: 500.0, bottom: 500.0 })
+        .expect("move");
+
+    let finder = no_face;
+    let mut saved = Vec::new();
+    let report = doc
+        .save_full_copy_with_fixups(&mut saved, &SaveFixups { find_face: &finder })
+        .expect("the full save");
+    assert_eq!(report.pictures, 1, "the turned, moved picture was not baked");
+
+    let baked = PdfiumDocument::open_bytes(saved, None).expect("the saved file opens");
+    assert!(
+        middle_is_red(&baked, Rect { left: 395.0, top: 365.0, right: 405.0, bottom: 375.0 }, false),
+        "the saved page does not draw the picture where the turn and the move put it"
+    );
+    assert!(
+        !middle_is_red(&baked, Rect { left: 305.0, top: 445.0, right: 315.0, bottom: 455.0 }, false),
+        "the saved page still draws the picture in the un-turned part of its old frame"
+    );
+}

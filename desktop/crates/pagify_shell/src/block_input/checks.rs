@@ -460,7 +460,7 @@ pub fn cells_of_line(pb: &PageBlocks, objects: &[usize]) -> Vec<Vec<usize>> {
         };
         if let Some(&previous) = current.last() {
             if let Some(a) = pb.runs.get(&previous) {
-                let marker = current.len() == 1 && is_list_marker(&a.text);
+                let marker = cells.is_empty() && current.len() == 1 && is_list_marker(&a.text);
                 let gap = left_of(run) - right;
                 if !marker && gap >= CELL_GAP_EM * a.size.max(run.size) {
                     cells.push(std::mem::take(&mut current));
