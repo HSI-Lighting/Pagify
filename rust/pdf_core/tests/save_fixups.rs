@@ -335,3 +335,34 @@ fn font_and_descriptor(file: &File<'_>) -> (pdf_core::pdf::Dict, pdf_core::pdf::
     let descriptor = file.resolve(descriptor).expect("descriptor");
     (font, descriptor.as_dict().expect("a descriptor").clone())
 }
+
+/// **A turned picture is baked turned by a full save.** The annotation is
+/// gone from the saved file and the page itself draws the turn — checked by
+/// where the red is, not by reading a key back.
+#[test]
+fn a_turned_picture_is_baked_turned_by_a_full_save() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("two-column.pdf");
+    let frame = Rect { left: 300.0, top: 400.0, right: 500.0, bottom: 500.0 };
+    place_picture(&mut doc, frame);
+    doc.rotate_image_signature(0, 0, 90.0).expect("rotate");
+
+    let finder = no_face;
+    let mut saved = Vec::new();
+    let report = doc
+        .save_full_copy_with_fixups(&mut saved, &SaveFixups { find_face: &finder })
+        .expect("the full save");
+    assert_eq!(report.pictures, 1, "the turned picture was not baked");
+
+    let baked = PdfiumDocument::open_bytes(saved, None).expect("the saved file opens");
+    assert!(
+        middle_is_red(&baked, Rect { left: 395.0, top: 365.0, right: 405.0, bottom: 375.0 }, false),
+        "the saved page does not draw the picture where the turn puts it"
+    );
+    assert!(
+        !middle_is_red(&baked, Rect { left: 305.0, top: 445.0, right: 315.0, bottom: 455.0 }, false),
+        "the saved page still draws the picture in the un-turned part of its old frame"
+    );
+}

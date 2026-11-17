@@ -703,3 +703,106 @@ fn rotation_survives_a_save_and_reopen() {
     );
     assert_eq!(marks[0].rect, rect, "the rect should also be exactly what it was");
 }
+
+/// **Move then turn.** After a move the appearance's `/BBox` used to stay at
+/// the old place, so the turn was shifted twice and the picture vanished.
+/// Placed at `a`, moved to `b`, turned clockwise: the mark must be at the
+/// turned position inside `b`, and neither at `b`'s un-turned corner nor back
+/// at `a`.
+#[test]
+fn a_picture_moved_then_turned_is_drawn_turned_where_it_was_moved_to() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("two-column.pdf");
+    let a = Rect { left: 100.0, top: 100.0, right: 200.0, bottom: 200.0 };
+    let b = Rect { left: 300.0, top: 400.0, right: 400.0, bottom: 500.0 };
+    let size = 12;
+    let index = place(&mut doc, 0, a, square_with_marked_corner(size), size, size, "Moved Then Turned");
+
+    doc.set_image_signature_rect(0, index, b).expect("move");
+    doc.rotate_image_signature(0, index, 90.0).expect("rotate");
+
+    let scale = 2.0;
+    let bitmap = doc
+        .render_page_to_bitmap(0, &RenderRequest { scale, ..Default::default() })
+        .expect("render");
+    let sample = |x_pt: f32, y_pt: f32| {
+        let at = (y_pt * scale) as usize * bitmap.stride + (x_pt * scale) as usize * 4;
+        (bitmap.data[at], bitmap.data[at + 1], bitmap.data[at + 2])
+    };
+    let is_dark = |s: (u8, u8, u8)| s.0 < 60 && s.1 < 60 && s.2 < 60;
+
+    assert!(
+        is_dark(sample(b.right - 15.0, b.top + 15.0)),
+        "a 90-degree clockwise turn should carry the mark to the top-right of where it was moved"
+    );
+    assert!(!is_dark(sample(b.left + 15.0, b.top + 15.0)), "the un-turned corner should not be dark");
+    assert!(!is_dark(sample(a.left + 15.0, a.top + 15.0)), "the picture is still drawn where it used to be");
+}
+
+/// **Turn then move** — the other order, which used to lose the angle when
+/// the move set the matrix without rebuilding the appearance. Same three
+/// fixed points, reached from the other side.
+#[test]
+fn a_picture_turned_then_moved_stays_turned() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("two-column.pdf");
+    let a = Rect { left: 100.0, top: 100.0, right: 200.0, bottom: 200.0 };
+    let b = Rect { left: 300.0, top: 400.0, right: 400.0, bottom: 500.0 };
+    let size = 12;
+    let index = place(&mut doc, 0, a, square_with_marked_corner(size), size, size, "Turned Then Moved");
+
+    doc.rotate_image_signature(0, index, 90.0).expect("rotate");
+    doc.set_image_signature_rect(0, index, b).expect("move");
+
+    let scale = 2.0;
+    let bitmap = doc
+        .render_page_to_bitmap(0, &RenderRequest { scale, ..Default::default() })
+        .expect("render");
+    let sample = |x_pt: f32, y_pt: f32| {
+        let at = (y_pt * scale) as usize * bitmap.stride + (x_pt * scale) as usize * 4;
+        (bitmap.data[at], bitmap.data[at + 1], bitmap.data[at + 2])
+    };
+    let is_dark = |s: (u8, u8, u8)| s.0 < 60 && s.1 < 60 && s.2 < 60;
+
+    assert!(is_dark(sample(b.right - 15.0, b.top + 15.0)), "the turn did not survive the move");
+    assert!(!is_dark(sample(b.left + 15.0, b.top + 15.0)), "the un-turned corner should not be dark");
+    assert!(!is_dark(sample(a.left + 15.0, a.top + 15.0)), "the picture is still drawn where it used to be");
+}
+
+/// **A wide picture turned a quarter is not cut to its old frame.** 200 x 100
+/// turned 90 needs a box 100 wide and 200 tall: the pixels above and below the
+/// old frame must be there, and the old left and right margins must be empty.
+#[test]
+fn a_wide_picture_turned_a_quarter_is_not_cut_to_its_old_frame() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("two-column.pdf");
+    let r = Rect { left: 300.0, top: 400.0, right: 500.0, bottom: 500.0 };
+    let index = place(&mut doc, 0, r, solid(8, 4, [0, 0, 0]), 8, 4, "Wide Turned");
+    doc.rotate_image_signature(0, index, 90.0).expect("rotate");
+
+    let scale = 2.0;
+    let bitmap = doc
+        .render_page_to_bitmap(0, &RenderRequest { scale, ..Default::default() })
+        .expect("render");
+    let sample = |x_pt: f32, y_pt: f32| {
+        let at = (y_pt * scale) as usize * bitmap.stride + (x_pt * scale) as usize * 4;
+        (bitmap.data[at], bitmap.data[at + 1], bitmap.data[at + 2])
+    };
+
+    for (x, y) in [(400.0, 450.0), (400.0, 370.0), (400.0, 530.0)] {
+        assert!(sample(x, y).0 < 60, "the turned picture is cut at ({x}, {y}): {:?}", sample(x, y));
+    }
+    for (x, y) in [(310.0, 450.0), (490.0, 450.0)] {
+        assert!(sample(x, y).0 > 200, "there is ink outside the turned picture at ({x}, {y}): {:?}", sample(x, y));
+    }
+
+    let mark = &doc.image_signature_marks(0).expect("marks")[0];
+    assert_eq!(mark.rect, r, "the read-back rect should still be the frame that was placed");
+    assert!((mark.rotation - 90.0).abs() < 0.01, "rotation was not read back: {}", mark.rotation);
+}

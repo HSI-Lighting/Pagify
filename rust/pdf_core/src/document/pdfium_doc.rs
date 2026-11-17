@@ -5620,26 +5620,14 @@ impl DocumentMut for PdfiumDocument {
 
         // Moving or resizing must not silently un-rotate a picture that was
         // already turned — the angle lives only in `ROTATION_KEY`, so it has
-        // to be read back here and carried into the new matrix, not assumed
-        // to be zero.
+        // to be read back here and carried into the rebuilt appearance, not
+        // assumed to be zero. The unturned frame is the new rect: the
+        // annotation's own `/Rect` becomes the box around the turned picture.
         let rotation = read_rotation(annot);
-        let pdf_rect = to_pdf_rect(&space, &rect);
-        let set_rect = unsafe { bindings.FPDFAnnot_SetRect(annot, &pdf_rect) };
-        // The annotation's own `/Rect` is what a click hits and what any
-        // other reader shows the picture at; the image object's matrix,
-        // fetched separately, is what actually draws the pixels — both have
-        // to move together or the two disagree about where the picture is.
-        let object = unsafe { bindings.FPDFAnnot_GetObject(annot, 0) };
-        let set_matrix = if object.is_null() {
-            0
-        } else {
-            let matrix = image_placement_matrix(&pdf_rect, rotation);
-            unsafe { bindings.FPDFPageObj_SetMatrix(object, &matrix) }
-        };
+        let frame = to_pdf_rect(&space, &rect);
         unsafe { bindings.FPDFPage_CloseAnnot(annot) };
-        if set_rect == 0 || set_matrix == 0 {
-            return Err(PdfError::Pdfium("the signature could not be moved".into()));
-        }
+
+        self.redraw_picture(&page, annot_index, &frame, rotation)?;
 
         self.touch_annotation();
         Ok(())
@@ -5668,29 +5656,16 @@ impl DocumentMut for PdfiumDocument {
         // is drawn at within it, about its own centre. Read back rather
         // than assumed, for the same reason `set_image_signature_rect`
         // reads the rotation back: rotating must not silently undo a move
-        // or a resize that happened first.
-        let mut pdf_rect = FS_RECTF { left: 0.0, bottom: 0.0, right: 0.0, top: 0.0 };
-        let got_rect = unsafe { bindings.FPDFAnnot_GetRect(annot, &mut pdf_rect) };
-        if got_rect == 0 {
-            unsafe { bindings.FPDFPage_CloseAnnot(annot) };
-            return Err(PdfError::Pdfium("the signature's own position could not be read".into()));
-        }
-
-        let mut value: Vec<u16> = degrees.to_string().encode_utf16().collect();
-        value.push(0);
-        let set_key = unsafe { bindings.FPDFAnnot_SetStringValue(annot, ROTATION_KEY, value.as_ptr()) };
-
-        let object = unsafe { bindings.FPDFAnnot_GetObject(annot, 0) };
-        let set_matrix = if object.is_null() {
-            0
-        } else {
-            let matrix = image_placement_matrix(&pdf_rect, degrees);
-            unsafe { bindings.FPDFPageObj_SetMatrix(object, &matrix) }
-        };
+        // or a resize that happened first. `FRAME_KEY` is the unturned
+        // frame, which `/Rect` stops being once the picture is turned.
+        let frame = read_frame(annot).unwrap_or_else(|| {
+            let mut rect = FS_RECTF { left: 0.0, bottom: 0.0, right: 0.0, top: 0.0 };
+            unsafe { bindings.FPDFAnnot_GetRect(annot, &mut rect) };
+            rect
+        });
         unsafe { bindings.FPDFPage_CloseAnnot(annot) };
-        if set_key == 0 || set_matrix == 0 {
-            return Err(PdfError::Pdfium("the signature could not be rotated".into()));
-        }
+
+        self.redraw_picture(&page, annot_index, &frame, degrees)?;
 
         self.touch_annotation();
         Ok(())
@@ -16872,6 +16847,40 @@ fn image_placement_matrix(rect: &FS_RECTF, rotation_degrees: f32) -> FS_MATRIX {
     }
 }
 
+/// The smallest PDF-space rect that contains `frame` turned `degrees`
+/// clockwise about its own centre — the box a turned picture's annotation has
+/// to carry so the picture is not cut to its old, un-turned frame.
+///
+/// Same direction as [`image_placement_matrix`], which is what actually puts
+/// the pixels there: the four corners are turned by the negated angle and the
+/// min/max of the results is the box. 0° is the frame itself, exactly, not a
+/// floating-point near miss.
+fn turned_bounds(frame: &FS_RECTF, degrees: f32) -> FS_RECTF {
+    if degrees == 0.0 {
+        return *frame;
+    }
+    let (cx, cy) = ((frame.left + frame.right) / 2.0, (frame.bottom + frame.top) / 2.0);
+    let theta = -degrees.to_radians();
+    let (s, c) = theta.sin_cos();
+    let (mut left, mut bottom, mut right, mut top) =
+        (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for (x, y) in [
+        (frame.left, frame.bottom),
+        (frame.right, frame.bottom),
+        (frame.left, frame.top),
+        (frame.right, frame.top),
+    ] {
+        let (dx, dy) = (x - cx, y - cy);
+        let turned_x = cx + dx * c - dy * s;
+        let turned_y = cy + dx * s + dy * c;
+        left = left.min(turned_x);
+        right = right.max(turned_x);
+        bottom = bottom.min(turned_y);
+        top = top.max(turned_y);
+    }
+    FS_RECTF { left, bottom, right, top }
+}
+
 /// The smallest rect containing every part of a mark.
 ///
 /// Every annotation needs a `/Rect`, and PDFium will not compute one: a highlight
@@ -17317,7 +17326,7 @@ impl PdfiumDocument {
         // to the (Stamp) annotation PDFium just created, rather than anything
         // `FPDFAnnot_SetColor` or the ink/text-markup calls below know about.
         if let Annotation::Image { rgba, width, height, .. } = annotation {
-            return self.fill_image_annotation(annot, &rect, rgba, *width, *height);
+            return self.fill_image_annotation(annot, &rect, rgba, *width, *height, 0.0);
         }
 
         // No colour, no border — a link is invisible ink, clickable without
@@ -17517,6 +17526,7 @@ impl PdfiumDocument {
         rgba: &[u8],
         width: u32,
         height: u32,
+        degrees: f32,
     ) -> Result<()> {
         let bindings = pdfium()?.bindings();
         if width == 0 || height == 0 {
@@ -17568,9 +17578,10 @@ impl PdfiumDocument {
             return Err(PdfError::Pdfium("the picture could not be placed".into()));
         }
 
-        // A freshly placed picture is never rotated — turning it is
-        // something a person does afterward, through `rotate_image_signature`.
-        let matrix = image_placement_matrix(rect, 0.0);
+        // `degrees` is 0.0 for a freshly placed picture, and the angle a
+        // rebuild keeps when a whole appearance is being redrawn — see
+        // `redraw_picture`.
+        let matrix = image_placement_matrix(rect, degrees);
         if unsafe { bindings.FPDFPageObj_SetMatrix(object, &matrix) } == 0 {
             return Err(PdfError::Pdfium("the picture could not be positioned".into()));
         }
@@ -17580,6 +17591,83 @@ impl PdfiumDocument {
         }
 
         Ok(())
+    }
+
+    /// **Rebuild a placed picture's appearance around its frame and angle.**
+    ///
+    /// Setting the image object's matrix alone changes nothing on screen: the
+    /// pixels a reader draws come from the annotation's own appearance stream,
+    /// which PDFium builds once, when the object is first appended, and does
+    /// not revisit when the matrix moves underneath it. Moving then turning
+    /// therefore vanished the picture (the old `/BBox` was shifted twice), and
+    /// a wide picture turned a quarter was cut to its old, un-turned frame.
+    ///
+    /// The way out, measured: `/Rect` becomes the box around the turned
+    /// picture, the appearance is removed with a **NULL** value — never an
+    /// empty string, which leaves a stream with no `/Resources` and is then
+    /// refused by the full save — and the image is appended again on a
+    /// *fresh* annotation handle, because the old one still holds the removed
+    /// form. PDFium then builds an appearance whose `/BBox` is the new
+    /// `/Rect`, so the turn shows, survives a move, is not cut, and Save
+    /// bakes it into the page.
+    ///
+    /// `frame` is the picture's unturned footprint, in PDF space; it is
+    /// written to [`FRAME_KEY`] so a read back still reports the rect the
+    /// person placed, not the larger box the turn needed.
+    fn redraw_picture(
+        &self,
+        page: &RawPage,
+        annot_index: i32,
+        frame: &FS_RECTF,
+        degrees: f32,
+    ) -> Result<()> {
+        let bindings = pdfium()?.bindings();
+        let annot = unsafe { bindings.FPDFPage_GetAnnot(page.handle, annot_index) };
+        if annot.is_null() {
+            return Err(PdfError::Pdfium(format!(
+                "no annotation at index {annot_index}"
+            )));
+        }
+
+        // Read the pixels first: once the appearance is gone there is nothing
+        // left to read, and a stamp that is not exactly one image cannot be
+        // rebuilt at all.
+        let (rgba, width, height) = match picture_pixels(annot) {
+            Some(pixels) => pixels,
+            None => {
+                unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+                return Err(PdfError::Pdfium(
+                    "that picture is not one image, so it cannot be turned".into(),
+                ));
+            }
+        };
+
+        let turned = turned_bounds(frame, degrees);
+        if unsafe { bindings.FPDFAnnot_SetRect(annot, &turned) } == 0 {
+            unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+            return Err(PdfError::Pdfium("the signature could not be moved".into()));
+        }
+
+        // NULL, never an empty string — see this method's own doc.
+        let cleared = unsafe { bindings.FPDFAnnot_SetAP(annot, 0, std::ptr::null()) };
+        let wrote_rotation = set_annotation_string(annot, ROTATION_KEY, &degrees.to_string());
+        let wrote_frame = set_annotation_string(annot, FRAME_KEY, &format_frame(frame));
+        unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+        if cleared == 0 || !wrote_rotation || !wrote_frame {
+            return Err(PdfError::Pdfium("the signature could not be rotated".into()));
+        }
+
+        // A fresh handle: the old one held the appearance that was just
+        // removed, and appending through it would bake that form back.
+        let fresh = unsafe { bindings.FPDFPage_GetAnnot(page.handle, annot_index) };
+        if fresh.is_null() {
+            return Err(PdfError::Pdfium(format!(
+                "no annotation at index {annot_index}"
+            )));
+        }
+        let filled = self.fill_image_annotation(fresh, frame, &rgba, width, height, degrees);
+        unsafe { bindings.FPDFPage_CloseAnnot(fresh) };
+        filled
     }
 }
 
@@ -17958,38 +18046,21 @@ impl PdfiumDocument {
     /// not exactly one image object, which is not one this engine placed.
     fn read_image_annotation(&self, annot: FPDF_ANNOTATION, space: &PageSpace) -> Option<Annotation> {
         let bindings = pdfium().ok()?.bindings();
-        if unsafe { bindings.FPDFAnnot_GetObjectCount(annot) } != 1 {
-            return None;
-        }
-        let object = unsafe { bindings.FPDFAnnot_GetObject(annot, 0) };
-        if object.is_null()
-            || unsafe { bindings.FPDFPageObj_GetType(object) }
-                != pdfium_render::prelude::FPDF_PAGEOBJ_IMAGE as i32
-        {
-            return None;
-        }
+        let (rgba, width, height) = picture_pixels(annot)?;
 
-        let bitmap = unsafe { bindings.FPDFImageObj_GetBitmap(object) };
-        if bitmap.is_null() {
-            return None;
-        }
-        let width = unsafe { bindings.FPDFBitmap_GetWidth(bitmap) };
-        let height = unsafe { bindings.FPDFBitmap_GetHeight(bitmap) };
-        let stride = unsafe { bindings.FPDFBitmap_GetStride(bitmap) };
-        let format = unsafe { bindings.FPDFBitmap_GetFormat(bitmap) };
-        let rgba = if width > 0 && height > 0 && stride > 0 {
-            let buffer = unsafe { bindings.FPDFBitmap_GetBuffer_as_vec(bitmap) };
-            straight_rgba(&buffer, width as usize, height as usize, stride as usize, format)
-        } else {
-            None
+        // A turned picture's `/Rect` is the box around the turn, not the
+        // frame the person placed or moved — `FRAME_KEY` keeps the latter so
+        // a read back reports the same rect throughout.
+        let rect = match read_frame(annot) {
+            Some(frame) => frame,
+            None => {
+                let mut rect = FS_RECTF { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 };
+                if unsafe { bindings.FPDFAnnot_GetRect(annot, &mut rect) } == 0 {
+                    return None;
+                }
+                rect
+            }
         };
-        unsafe { bindings.FPDFBitmap_Destroy(bitmap) };
-        let rgba = rgba?;
-
-        let mut rect = FS_RECTF { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 };
-        if unsafe { bindings.FPDFAnnot_GetRect(annot, &mut rect) } == 0 {
-            return None;
-        }
         let (left, top) = space.to_top_left(rect.left, rect.top);
         let (right, bottom) = space.to_top_left(rect.right, rect.bottom);
 
@@ -18001,8 +18072,8 @@ impl PdfiumDocument {
                 bottom: top.max(bottom),
             },
             rgba,
-            width: width as u32,
-            height: height as u32,
+            width,
+            height,
         })
     }
 
@@ -18188,9 +18259,81 @@ const ALPHA_ID_KEY: &str = "PagifyAlphaId";
 /// placed before rotation existed, and for every one never rotated since.
 const ROTATION_KEY: &str = "PagifyRotation";
 
+/// The picture's own unturned footprint, `left bottom right top` in PDF space,
+/// written whenever a turn changes `/Rect` into the box around the turned
+/// picture — see [`PdfiumDocument::redraw_picture`]. Absent for a picture that
+/// was never turned, whose `/Rect` is the frame itself.
+const FRAME_KEY: &str = "PagifyFrame";
+
+/// Write a UTF-16LE string value onto an annotation, news whether it took.
+fn set_annotation_string(annot: FPDF_ANNOTATION, key: &str, value: &str) -> bool {
+    let Some(bindings) = pdfium().ok().map(|pdfium| pdfium.bindings()) else {
+        return false;
+    };
+    let mut wide: Vec<u16> = value.encode_utf16().collect();
+    wide.push(0);
+    unsafe { bindings.FPDFAnnot_SetStringValue(annot, key, wide.as_ptr()) != 0 }
+}
+
+/// [`FRAME_KEY`]'s four numbers, one space apart and in PDF space.
+fn format_frame(frame: &FS_RECTF) -> String {
+    format!("{} {} {} {}", frame.left, frame.bottom, frame.right, frame.top)
+}
+
+/// Read [`FRAME_KEY`] back — `None` when it is absent or not four numbers.
+fn read_frame(annot: FPDF_ANNOTATION) -> Option<FS_RECTF> {
+    let text = read_annotation_string(annot, FRAME_KEY)?;
+    let numbers: Vec<f32> = text
+        .split_whitespace()
+        .map(|piece| piece.parse::<f32>())
+        .collect::<std::result::Result<_, _>>()
+        .ok()?;
+    match numbers[..] {
+        [left, bottom, right, top] => Some(FS_RECTF { left, bottom, right, top }),
+        _ => None,
+    }
+}
+
 /// Read [`ROTATION_KEY`] off an annotation, or 0.0 if it was never set.
 fn read_rotation(annot: FPDF_ANNOTATION) -> f32 {
     read_annotation_string(annot, ROTATION_KEY).and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0)
+}
+
+/// The straight RGBA pixels of a stamp's one image object, with their width
+/// and height — `None` when the annotation is not exactly that.
+///
+/// Shared by the read path and [`PdfiumDocument::redraw_picture`]: a rebuild
+/// takes the pixels it already has and hands them back, so both have to agree
+/// on what "one image object" means.
+fn picture_pixels(annot: FPDF_ANNOTATION) -> Option<(Vec<u8>, u32, u32)> {
+    let bindings = pdfium().ok()?.bindings();
+    if unsafe { bindings.FPDFAnnot_GetObjectCount(annot) } != 1 {
+        return None;
+    }
+    let object = unsafe { bindings.FPDFAnnot_GetObject(annot, 0) };
+    if object.is_null()
+        || unsafe { bindings.FPDFPageObj_GetType(object) }
+            != pdfium_render::prelude::FPDF_PAGEOBJ_IMAGE as i32
+    {
+        return None;
+    }
+
+    let bitmap = unsafe { bindings.FPDFImageObj_GetBitmap(object) };
+    if bitmap.is_null() {
+        return None;
+    }
+    let width = unsafe { bindings.FPDFBitmap_GetWidth(bitmap) };
+    let height = unsafe { bindings.FPDFBitmap_GetHeight(bitmap) };
+    let stride = unsafe { bindings.FPDFBitmap_GetStride(bitmap) };
+    let format = unsafe { bindings.FPDFBitmap_GetFormat(bitmap) };
+    let rgba = if width > 0 && height > 0 && stride > 0 {
+        let buffer = unsafe { bindings.FPDFBitmap_GetBuffer_as_vec(bitmap) };
+        straight_rgba(&buffer, width as usize, height as usize, stride as usize, format)
+    } else {
+        None
+    };
+    unsafe { bindings.FPDFBitmap_Destroy(bitmap) };
+    Some((rgba?, width as u32, height as u32))
 }
 
 /// Read a UTF-16LE string value off an annotation.
