@@ -108,3 +108,13 @@ letters sit measurably wider apart than Arial's at the same nominal size, and
 some of those gaps cross the quarter-em threshold `layout::assemble_line`
 already uses to recover word breaks — a font-specific interaction with a fixed
 threshold, named here rather than quietly accepted.
+
+## PTSans-Regular.ttf
+
+**Added on 2026-11-17** for the save-time font embedding, like the three
+Montserrat weights above: the HSI datasheets name `PTSans-Regular` without
+carrying it, and this PC does not have it. PT Sans Regular 2.003W from Google
+Fonts (`ofl/ptsans/PT_Sans-Web-Regular.ttf`), unmodified, renamed only on disk;
+its PostScript name is `PTSans-Regular`. In `BUNDLED_SAVE_FONTS` only.
+**SIL Open Font License 1.1** with Reserved Font Names "PT Sans" and
+"ParaType" — see `PTSans-OFL.txt`; bundling it unmodified is permitted.

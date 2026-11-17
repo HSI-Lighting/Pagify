@@ -1,12 +1,15 @@
-//! Baking a page's visible annotations into its content, for a copy that is
-//! sent to somebody rather than edited.
+//! Baking a page's visible annotations into its content, and drawing the
+//! appearance of a mark that has none.
 //!
 //! # Why
 //!
 //! A picture placed in Pagify is a Stamp *annotation*: a separate object laid
 //! over the page. Readers draw annotations; thumbnail and preview renderers —
 //! WhatsApp's among them — often draw only the page, so the picture shows as the
-//! grey box under it. This puts the annotation's appearance into the page itself.
+//! grey box under it. This puts the annotation's appearance into the page itself:
+//! a placed picture on every Save ([`flatten_pictures`]), every mark on Flatten
+//! ([`flatten_annotations`], after [`draw_appearances`]). Save keeps every other
+//! mark a mark, with an appearance of its own, as Foxit and Acrobat do.
 //!
 //! # How a picture is written
 //!
@@ -369,6 +372,239 @@ fn flatten(bytes: &[u8], pictures_only: bool) -> Result<Flattened> {
     Ok(Flattened { bytes, pictures, forms, bare, left })
 }
 
+// ------------------------------------------------------------- appearances --
+
+/// The marks PDFium writes with no appearance of their own — a colour and some
+/// coordinates — and that [`draw_appearances`] draws one for.
+const DRAWN_HERE: &[&[u8]] = &[b"Highlight", b"Underline", b"StrikeOut", b"Squiggly", b"Ink"];
+
+/// What [`draw_appearances`] did, and the file it produced.
+#[derive(Debug)]
+pub struct Drawn {
+    /// The whole file. Byte for byte the input when nothing was drawn.
+    pub bytes: Vec<u8>,
+    /// Marks given an appearance.
+    pub drawn: usize,
+}
+
+/// Give every highlight, underline, strike-out, squiggly and ink mark that has
+/// no appearance one of its own, and leave it a mark.
+///
+/// **Foxit's and Acrobat's way.** Both write each mark with its appearance
+/// (every Foxit highlight in this PC's files has one), so every reader that
+/// draws marks draws it the same. PDFium writes these with none, and each
+/// reader then invents its own. Drawn as PDFium draws them on screen, so the
+/// mark looks the same in Pagify before and after a save. A mark that has an
+/// appearance, is hidden, or is transparent (`/C []`) is left exactly as it is.
+pub fn draw_appearances(bytes: &[u8]) -> Result<Drawn> {
+    let file = File::parse(bytes)?;
+    let root = dict_of(&file, file.trailer().get(b"Root"))
+        .ok_or_else(|| PdfError::InvalidArgument("the file has no catalogue".into()))?;
+    let mut pages = Vec::new();
+    if let Some(tree) = root.get(b"Pages") {
+        collect_pages(&file, tree, None, 0, &mut BTreeSet::new(), &mut pages)?;
+    }
+
+    let mut next = file.next_object_number()?;
+    let mut replacements: Vec<(u32, Vec<u8>)> = Vec::new();
+    let mut extra: Vec<(u32, Vec<u8>)> = Vec::new();
+    let mut done: BTreeSet<u32> = BTreeSet::new();
+    let mut drawn = 0;
+
+    for page in pages {
+        let Some(annots) = page.dict.get(b"Annots") else { continue };
+        if annots.as_reference().is_some_and(|(n, _)| done.contains(&n)) {
+            continue;
+        }
+        let Object::Array(mut items) = file.resolve(annots)? else { continue };
+        let mut inline_changed = false;
+        for item in items.iter_mut() {
+            if item.as_reference().is_some_and(|(n, _)| done.contains(&n)) {
+                continue;
+            }
+            let Some(mut annot) = dict_of(&file, Some(item)) else { continue };
+            let Some((form, rect)) = mark_appearance(&file, &annot) else { continue };
+            let form_number = next;
+            next += 1;
+            extra.push((form_number, form));
+            let mut ap = Dict::default();
+            ap.set(b"N", Object::Reference(form_number, 0));
+            annot.set(b"AP", Object::Dict(ap));
+            // Print, as Foxit and Acrobat write a mark — only where it has no
+            // flags at all (PDFium's before Pagify set them); a producer's
+            // own flags stay.
+            if annot.get(b"F").is_none() {
+                annot.set(b"F", Object::Number(b"4".to_vec()));
+            }
+            if let Some(rect) = rect {
+                annot.set(b"Rect", Object::Array(rect.iter().map(|v| Object::Number(number(*v).into_bytes())).collect()));
+            }
+            drawn += 1;
+            match item.as_reference() {
+                Some((n, _)) => {
+                    done.insert(n);
+                    let mut body = Vec::new();
+                    write_object(&mut body, &Object::Dict(annot));
+                    replacements.push((n, body));
+                }
+                None => {
+                    *item = Object::Dict(annot);
+                    inline_changed = true;
+                }
+            }
+        }
+        if inline_changed {
+            let mut body = Vec::new();
+            match annots.as_reference() {
+                Some((n, _)) => {
+                    done.insert(n);
+                    write_object(&mut body, &Object::Array(items));
+                    replacements.push((n, body));
+                }
+                None => {
+                    let mut dict = page.dict.clone();
+                    dict.set(b"Annots", Object::Array(items));
+                    write_object(&mut body, &Object::Dict(dict));
+                    replacements.push((page.number, body));
+                }
+            }
+        }
+    }
+
+    if replacements.is_empty() {
+        return Ok(Drawn { bytes: bytes.to_vec(), drawn });
+    }
+    Ok(Drawn { bytes: file.rewrite_adding(&replacements, &extra, &Dict::default())?, drawn })
+}
+
+/// `annot`'s appearance stream, and its new `/Rect` where a stroke needs more
+/// room than the rectangle gives — `None` when it is not a mark this draws.
+fn mark_appearance(file: &File<'_>, annot: &Dict) -> Option<(Vec<u8>, Option<[f64; 4]>)> {
+    let Some(Object::Name(kind)) = annot.get(b"Subtype") else { return None };
+    if !DRAWN_HERE.contains(&kind.as_slice()) || annot.get(b"AP").is_some() {
+        return None;
+    }
+    if annot.get(b"F").and_then(Object::as_i64).unwrap_or(0) & (HIDDEN | NO_VIEW) != 0 {
+        return None;
+    }
+    let resolved = |key: &[u8]| annot.get(key).and_then(|o| file.resolve(o).ok());
+    let (mut left, mut bottom, mut right, mut top) = corners(&numbers(resolved(b"Rect").as_ref(), 4)?);
+    let highlight = kind.as_slice() == b"Highlight";
+
+    let colour: Vec<f64> = match resolved(b"C") {
+        Some(Object::Array(items)) => items.iter().map(Object::as_f64).collect::<Option<_>>()?,
+        _ if highlight => vec![1.0, 1.0, 0.0],
+        _ => vec![0.0, 0.0, 0.0],
+    };
+    let operator = match (colour.len(), highlight) {
+        (1, true) => "g",
+        (1, false) => "G",
+        (3, true) => "rg",
+        (3, false) => "RG",
+        (4, true) => "k",
+        (4, false) => "K",
+        _ => return None, // `/C []`: transparent, nothing to draw
+    };
+    let mut drawing = format!(
+        "/GS gs {} {operator}\n",
+        colour.iter().map(|v| number(*v)).collect::<Vec<_>>().join(" ")
+    );
+
+    let mut grown = None;
+    if kind.as_slice() == b"Ink" {
+        let width = dict_of(file, annot.get(b"BS"))
+            .and_then(|bs| bs.get(b"W").and_then(Object::as_f64))
+            .or_else(|| match resolved(b"Border") {
+                Some(Object::Array(border)) => border.get(2).and_then(Object::as_f64),
+                _ => None,
+            })
+            .unwrap_or(1.0);
+        // As PDFium does: the box grows by half the width, or the stroke's
+        // outer edge is clipped where a line runs along it.
+        (left, bottom, right, top) = (left - width / 2.0, bottom - width / 2.0, right + width / 2.0, top + width / 2.0);
+        grown = Some([left, bottom, right, top]);
+        drawing += &format!("{} w 1 J 1 j\n", number(width));
+        let Some(Object::Array(paths)) = resolved(b"InkList") else { return None };
+        for path in paths {
+            let Ok(Object::Array(points)) = file.resolve(&path) else { continue };
+            let points: Vec<f64> = points.iter().filter_map(Object::as_f64).collect();
+            let Some(first) = points.get(..2) else { continue };
+            drawing += &format!("{} {} m ", number(first[0]), number(first[1]));
+            // A single point: a dot, drawn by the round cap.
+            let rest = if points.len() >= 4 { &points[2..] } else { first };
+            for point in rest.chunks_exact(2) {
+                drawing += &format!("{} {} l ", number(point[0]), number(point[1]));
+            }
+            drawing += "S\n";
+        }
+    } else {
+        // Each quad's bounding box; a mark without quads covers its rectangle.
+        let mut quads: Vec<(f64, f64, f64, f64)> = match resolved(b"QuadPoints") {
+            Some(Object::Array(items)) => items
+                .iter()
+                .filter_map(Object::as_f64)
+                .collect::<Vec<_>>()
+                .chunks_exact(8)
+                .map(|q| {
+                    let xs = [q[0], q[2], q[4], q[6]];
+                    let ys = [q[1], q[3], q[5], q[7]];
+                    let low = |v: [f64; 4]| v.iter().copied().fold(f64::MAX, f64::min);
+                    let high = |v: [f64; 4]| v.iter().copied().fold(f64::MIN, f64::max);
+                    (low(xs), low(ys), high(xs), high(ys))
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        if quads.is_empty() {
+            quads.push((left, bottom, right, top));
+        }
+        if !highlight {
+            drawing += "1 w\n";
+        }
+        for (l, b, r, t) in quads {
+            let (n, h) = (number, t - b);
+            drawing += &match kind.as_slice() {
+                b"Highlight" => format!("{} {} {} {} re f\n", n(l), n(b), n(r - l), n(h)),
+                b"Underline" => format!("{} {} m {} {} l S\n", n(l), n(b + 1.0), n(r), n(b + 1.0)),
+                b"StrikeOut" => format!("{} {} m {} {} l S\n", n(l), n(b + h / 2.0), n(r), n(b + h / 2.0)),
+                _ => {
+                    // Squiggly: a zigzag along the foot of the line.
+                    let step = (h / 8.0).max(1.0);
+                    let (mut x, mut up) = (l, false);
+                    let mut wave = format!("{} {} m ", n(l), n(b));
+                    while x < r {
+                        x = (x + step).min(r);
+                        up = !up;
+                        wave += &format!("{} {} l ", n(x), n(if up { b + step } else { b }));
+                    }
+                    wave + "S\n"
+                }
+            };
+        }
+    }
+
+    let opacity = annot.get(b"CA").and_then(Object::as_f64).unwrap_or(1.0);
+    let mut state = Dict::default();
+    state.set(b"Type", Object::Name(b"ExtGState".to_vec()));
+    state.set(b"CA", Object::Number(number(opacity).into_bytes()));
+    state.set(b"ca", Object::Number(number(opacity).into_bytes()));
+    state.set(b"BM", Object::Name(if highlight { b"Multiply".to_vec() } else { b"Normal".to_vec() }));
+    let mut states = Dict::default();
+    states.set(b"GS", Object::Dict(state));
+    let mut resources = Dict::default();
+    resources.set(b"ExtGState", Object::Dict(states));
+    let mut form = Dict::default();
+    form.set(b"Type", Object::Name(b"XObject".to_vec()));
+    form.set(b"Subtype", Object::Name(b"Form".to_vec()));
+    // Drawn in page space: the box is the rectangle, so it maps onto it as is.
+    form.set(
+        b"BBox",
+        Object::Array([left, bottom, right, top].iter().map(|v| Object::Number(number(*v).into_bytes())).collect()),
+    );
+    form.set(b"Resources", Object::Dict(resources));
+    Some((write_stream(&form, drawing.as_bytes()), grown))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -570,6 +806,138 @@ mod tests {
         let out = flatten_annotations(&input).expect("flattens");
         assert_eq!((out.pictures, out.forms, out.bare, out.left), (0, 0, 1, 0));
         assert_eq!(out.bytes, input);
+    }
+
+    /// The first annotation on the page, resolved.
+    fn first_annot(file: &File<'_>) -> Dict {
+        let Some(Object::Array(annots)) = page(file).get(b"Annots").cloned() else { panic!("no Annots") };
+        dict_of(file, annots.first()).expect("an annotation")
+    }
+
+    /// A mark's normal appearance: its form dictionary, its drawing, and the
+    /// graphics state it names `/GS`.
+    fn appearance_of(file: &File<'_>, annot: &Dict) -> (Dict, String, Dict) {
+        let ap = dict_of(file, annot.get(b"AP")).expect("an appearance");
+        let Object::Stream(form, range) = file.resolve(ap.get(b"N").expect("a normal appearance")).expect("resolves")
+        else {
+            panic!("not a stream")
+        };
+        let drawing = String::from_utf8(content::decode(&form, &file.bytes()[range]).expect("decodes")).expect("text");
+        let state = dict_of(file, form.get(b"Resources"))
+            .and_then(|r| dict_of(file, r.get(b"ExtGState")))
+            .and_then(|g| dict_of(file, g.get(b"GS")))
+            .expect("a graphics state /GS");
+        (form, drawing, state)
+    }
+
+    /// **The break:** a highlight PDFium wrote — a colour and quad points, no
+    /// appearance — left for every reader to draw its own way, or not at all.
+    /// Foxit and Acrobat write every mark with its appearance; so does Save.
+    /// It stays a highlight, drawn in its own box as a multiplied fill.
+    #[test]
+    fn a_highlight_with_no_appearance_is_given_one_and_stays_a_highlight() {
+        let input = one_page(
+            "/Resources << >>",
+            "<< /Type /Annot /Subtype /Highlight /Rect [10 10 30 30] /QuadPoints [10 30 30 30 10 10 30 10] /C [1 1 0] /CA 0.5 >>",
+            &[],
+        );
+        let out = draw_appearances(&input).expect("draws");
+        assert_eq!(out.drawn, 1);
+        let file = File::parse(&out.bytes).expect("a readable file");
+        let annot = first_annot(&file);
+        assert_eq!(annot.get(b"Subtype"), Some(&Object::Name(b"Highlight".to_vec())), "it is still a mark");
+        assert_eq!(annot.get(b"F").and_then(Object::as_i64), Some(4), "it does not print");
+        let (form, drawing, state) = appearance_of(&file, &annot);
+        assert_eq!(numbers(form.get(b"BBox"), 4), Some(vec![10.0, 10.0, 30.0, 30.0]), "drawn in its own box");
+        assert!(drawing.contains("1 1 0 rg") && drawing.contains("10 10 20 20 re f"), "{drawing}");
+        assert_eq!(state.get(b"BM"), Some(&Object::Name(b"Multiply".to_vec())));
+        assert_eq!(state.get(b"ca").and_then(Object::as_f64), Some(0.5));
+    }
+
+    /// Ink is stroked along its own points in its own width and colour, and
+    /// its box grows by half the width so the stroke's edge is not cut off.
+    #[test]
+    fn ink_is_drawn_along_its_strokes_in_its_width() {
+        let input = one_page(
+            "/Resources << >>",
+            "<< /Type /Annot /Subtype /Ink /Rect [10 10 30 20] /InkList [[10 10 20 20 30 10]] /BS << /W 4 >> /C [0 0 1] >>",
+            &[],
+        );
+        let out = draw_appearances(&input).expect("draws");
+        assert_eq!(out.drawn, 1);
+        let file = File::parse(&out.bytes).expect("a readable file");
+        let annot = first_annot(&file);
+        assert_eq!(numbers(annot.get(b"Rect"), 4), Some(vec![8.0, 8.0, 32.0, 22.0]));
+        let (form, drawing, _) = appearance_of(&file, &annot);
+        assert_eq!(numbers(form.get(b"BBox"), 4), Some(vec![8.0, 8.0, 32.0, 22.0]));
+        assert!(drawing.contains("0 0 1 RG") && drawing.contains("4 w"), "{drawing}");
+        assert!(drawing.contains("10 10 m 20 20 l 30 10 l S"), "{drawing}");
+    }
+
+    /// A mark that has its own appearance, a hidden one, and a link are left
+    /// exactly as they were.
+    #[test]
+    fn marks_with_an_appearance_hidden_ones_and_links_are_left_alone() {
+        let input = one_page(
+            "/Resources << >>",
+            "<< /Type /Annot /Subtype /Highlight /Rect [10 10 30 30] /QuadPoints [10 30 30 30 10 10 30 10] /AP << /N 5 0 R >> >> \
+             << /Type /Annot /Subtype /Ink /F 2 /Rect [0 0 10 10] /InkList [[0 0 10 10]] >> \
+             << /Type /Annot /Subtype /Link /Rect [0 0 10 10] >>",
+            &[stream("/Type /XObject /Subtype /Form /BBox [10 10 30 30]", b"10 10 20 20 re f")],
+        );
+        let out = draw_appearances(&input).expect("draws");
+        assert_eq!(out.drawn, 0);
+        assert_eq!(out.bytes, input);
+    }
+
+    /// Flags a mark already has are its producer's, and stay: only a mark with
+    /// none (what PDFium wrote before Pagify set Print) is given Print.
+    #[test]
+    fn a_mark_keeps_the_flags_it_has() {
+        let input = one_page(
+            "/Resources << >>",
+            "<< /Type /Annot /Subtype /Underline /F 128 /Rect [10 10 30 30] /QuadPoints [10 30 30 30 10 10 30 10] >>",
+            &[],
+        );
+        let out = draw_appearances(&input).expect("draws");
+        assert_eq!(out.drawn, 1);
+        let file = File::parse(&out.bytes).expect("a readable file");
+        assert_eq!(first_annot(&file).get(b"F").and_then(Object::as_i64), Some(128));
+    }
+
+    /// A mark written as an object of its own is given its appearance there;
+    /// the page itself is not rewritten.
+    #[test]
+    fn a_mark_in_its_own_object_is_changed_there() {
+        let input = one_page(
+            "/Resources << >>",
+            "5 0 R",
+            &[b"<< /Type /Annot /Subtype /StrikeOut /Rect [10 10 30 30] /QuadPoints [10 30 30 30 10 10 30 10] /C [1 0 0] >>"
+                .to_vec()],
+        );
+        let out = draw_appearances(&input).expect("draws");
+        assert_eq!(out.drawn, 1);
+        let before = File::parse(&input).expect("input");
+        let file = File::parse(&out.bytes).expect("a readable file");
+        assert_eq!(page(&file), page(&before), "the page was rewritten");
+        let annot = file.object(5).expect("the mark").as_dict().expect("a dict").clone();
+        let (_, drawing, _) = appearance_of(&file, &annot);
+        assert!(drawing.contains("1 0 0 RG") && drawing.contains("10 20 m 30 20 l S"), "{drawing}");
+    }
+
+    /// Once drawn, a highlight is no longer bare: Flatten puts it in the page.
+    #[test]
+    fn a_highlight_given_an_appearance_is_baked_by_flatten() {
+        let input = one_page(
+            "/Resources << >>",
+            "<< /Type /Annot /Subtype /Highlight /Rect [10 10 30 30] /QuadPoints [10 30 30 30 10 10 30 10] /C [1 1 0] >>",
+            &[],
+        );
+        let drawn = draw_appearances(&input).expect("draws");
+        let out = flatten_annotations(&drawn.bytes).expect("flattens");
+        assert_eq!((out.pictures, out.forms, out.bare, out.left), (0, 1, 0, 0));
+        let file = File::parse(&out.bytes).expect("a readable file");
+        assert!(page(&file).get(b"Annots").is_none(), "the highlight is still a mark");
     }
 
     /// **The break:** a highlight lost from a page that is rewritten because a

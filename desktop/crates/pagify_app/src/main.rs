@@ -2980,6 +2980,8 @@ const BUNDLED_SAVE_FONTS: &[&[u8]] = &[
     include_bytes!("../../../third_party/fonts/Montserrat-Bold.ttf"),
     include_bytes!("../../../third_party/fonts/Montserrat-ExtraBold.ttf"),
     include_bytes!("../../../third_party/fonts/Montserrat-Black.ttf"),
+    // The datasheets' spec tables name it; not a Windows font.
+    include_bytes!("../../../third_party/fonts/PTSans-Regular.ttf"),
 ];
 
 /// The family a document's own face is bound to while a run is being edited.
@@ -10364,27 +10366,6 @@ impl PagifyApp {
         outcome
     }
 
-    /// Ask where to write a copy for sending, offering `<name> (for sharing).pdf`
-    /// beside the document so that the first thing it suggests is not the file
-    /// being edited.
-    fn share_copy_dialog(&mut self) {
-        let Some(doc) = &self.tab_mut().doc else {
-            self.say_error("nothing open.");
-            return;
-        };
-        let current = doc.session.path().to_path_buf();
-        let stem = current.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "document".into());
-
-        let mut dialog = rfd::FileDialog::new().set_title("Save a copy for sharing").add_filter("PDF", &["pdf"]);
-        if let Some(dir) = current.parent() {
-            dialog = dialog.set_directory(dir);
-        }
-        match dialog.set_file_name(format!("{stem} (for sharing).pdf")).save_file() {
-            Some(path) => self.save_share_copy(path),
-            None => self.say_info("nothing chosen."),
-        }
-    }
-
     /// A paper chosen and no path: a new document is a file before it is
     /// anything, so ask where it goes — beside the open document, if there is one.
     pub(crate) fn new_blank_dialog(&mut self, size: (f32, f32)) {
@@ -10411,60 +10392,6 @@ impl PagifyApp {
         match Session::write_blank(dest, size) {
             Ok(()) => self.open(&dest.to_string_lossy()),
             Err(e) => self.say_error(format!("blankdoc: {e}")),
-        }
-    }
-
-    /// `sharecopy`: write a copy of the document to send to somebody, its placed
-    /// pictures baked into the pages — see [`pagify_shell::Session::save_flattened_to`].
-    /// The document open is left as it is, still editable.
-    fn save_share_copy(&mut self, dest: PathBuf) {
-        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
-            self.say_error("nothing open.");
-            return;
-        };
-        // **Never the document's own file.** The one way to flatten the original,
-        // whose pictures could then no longer be dragged by their handles.
-        let own = std::fs::canonicalize(session.path()).ok();
-        if own.is_some() && own == std::fs::canonicalize(&dest).ok() {
-            self.say_error("that is the open document itself — choose another name for the copy.");
-            return;
-        }
-        // Drawn ink goes in too: the copy is what the document would save.
-        if self.commit_markup_for_writing(&session).is_none() {
-            return;
-        }
-        let signatures = session.signature_count();
-        match session.save_flattened_to(&dest) {
-            Ok(report) => {
-                let plural = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
-                let baked = match (report.pictures, report.forms) {
-                    (0, 0) => "nothing needed baking in".to_string(),
-                    (p, 0) => format!("{} baked into the page", plural(p, "picture", "pictures")),
-                    (0, f) => format!("{} baked into the page", plural(f, "mark", "marks")),
-                    (p, f) => format!(
-                        "{} and {} baked into the page",
-                        plural(p, "picture", "pictures"),
-                        plural(f, "other mark", "other marks")
-                    ),
-                };
-                self.say_info(format!("saved a copy for sharing to {} — {baked}. Your open document is unchanged.", dest.display()));
-                if report.bare > 0 {
-                    self.say_info(format!(
-                        "{} (highlights, underlines or ink) {} no appearance to bake in, so a preview will not show {}.",
-                        plural(report.bare, "mark", "marks"),
-                        if report.bare == 1 { "has" } else { "have" },
-                        if report.bare == 1 { "it" } else { "them" },
-                    ));
-                }
-                if signatures > 0 {
-                    self.say_error(format!(
-                        "the copy was rewritten, which breaks the {} in it — your open document keeps {}.",
-                        plural(signatures, "signature", "signatures"),
-                        if signatures == 1 { "its" } else { "them" },
-                    ));
-                }
-            }
-            Err(e) => self.say_error(format!("could not write the copy: {e}")),
         }
     }
 
@@ -12074,8 +12001,9 @@ impl PagifyApp {
                 self.recording_state.session_log.record(
                     "save",
                     &format!(
-                        "pictures_baked={} fonts_stored={} fonts_missing={} widths_differ={} ms={}",
+                        "pictures_baked={} marks_drawn={} fonts_stored={} fonts_missing={} widths_differ={} ms={}",
                         report.pictures,
+                        report.marks_drawn,
                         report.fonts_stored.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(","),
                         report.fonts_missing.join(","),
                         report.width_mismatches.len(),
@@ -18633,7 +18561,7 @@ mod raster_scale_tests;
 mod g4_edit_error_tests;
 
 #[cfg(test)]
-mod share_copy_tests;
+mod flatten_tests;
 
 #[cfg(test)]
 mod run_editor_font_size_tests;

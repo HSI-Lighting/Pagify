@@ -112,6 +112,8 @@ pub enum Effect {
     ReportDocumentStatus,
     /// Run the saved-signature confirmation pass over every page.
     RunApplySignatures,
+    /// Make every visible mark part of its page — see [`crate::Verb::Flatten`].
+    RunFlatten,
     /// Run the signature-management actions.
     RunManageSignatures(crate::verbs::Signatures),
     /// Report where the session log is, if it could be written.
@@ -165,10 +167,6 @@ pub enum Effect {
     SaveFileAs(std::path::PathBuf),
     /// Ask the platform where to save.
     SaveAsDialog,
-    /// Write a copy for sending to this path — see [`crate::Verb::ShareCopy`].
-    SaveShareCopy(std::path::PathBuf),
-    /// Ask the platform where to write that copy.
-    ShareCopyDialog,
     /// Write a new blank document of one `size` sheet (points) to this path,
     /// then open it.
     NewBlank { size: (f32, f32), path: std::path::PathBuf },
@@ -316,6 +314,7 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         // computed here from the library count.
         Verb::SessionLog => vec![Effect::ReportSessionLog],
         Verb::ApplySignatures => vec![Effect::RunApplySignatures],
+        Verb::Flatten => vec![Effect::RunFlatten],
         Verb::ManageSignatures(what) => vec![Effect::RunManageSignatures(what.clone())],
         Verb::Signature(SignatureAction::Draw) => {
             let name = if env.signature_count == 0 {
@@ -369,8 +368,6 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::Save => vec![Effect::SaveFile],
         Verb::SaveAs(path) => vec![Effect::SaveFileAs(path.clone())],
         Verb::SaveAsDialog => vec![Effect::SaveAsDialog],
-        Verb::ShareCopy(path) => vec![Effect::SaveShareCopy(path.clone())],
-        Verb::ShareCopyDialog => vec![Effect::ShareCopyDialog],
         Verb::BlankDoc { size, path } => vec![Effect::NewBlank { size: *size, path: path.clone() }],
         Verb::BlankDocDialog(size) => vec![Effect::NewBlankDialog(*size)],
         Verb::BlankDocWindow => vec![Effect::BlankPaperWindow],
@@ -619,8 +616,7 @@ mod tests {
             (Verb::Save, vec![Effect::SaveFile]),
             (Verb::SaveAs("a.pdf".into()), vec![Effect::SaveFileAs("a.pdf".into())]),
             (Verb::SaveAsDialog, vec![Effect::SaveAsDialog]),
-            (Verb::ShareCopy("s.pdf".into()), vec![Effect::SaveShareCopy("s.pdf".into())]),
-            (Verb::ShareCopyDialog, vec![Effect::ShareCopyDialog]),
+            (Verb::Flatten, vec![Effect::RunFlatten]),
             (
                 Verb::BlankDoc { size: (842.0, 1191.0), path: "b.pdf".into() },
                 vec![Effect::NewBlank { size: (842.0, 1191.0), path: "b.pdf".into() }],

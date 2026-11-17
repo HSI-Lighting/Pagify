@@ -29,9 +29,12 @@
 //!   `/Differences`): rewriting it as a WinAnsi TrueType font would change what
 //!   its codes mean. Pagify's own fallback writes WinAnsi.
 //!
-//! **Whole programs, not subsets.** A TrueType subset rebuilds `glyf`, `loca`
-//! and every glyph number; `pdf_core::text` already embeds whole programs for
-//! the same reason. The cost is the face's size once per file, reported.
+//! **Only the glyphs the codes can reach.** A simple font's codes are at most
+//! 256, and in WinAnsi (every such font in the 2026-11-16 report) they reach a
+//! known set of characters; the program is stored with only those outlines,
+//! glyph numbers unchanged (`keep_win_ansi_glyphs`) — about a tenth of a face.
+//! Whole programs cost a one-page quotation 320 KB → 1.2 MB. A font in any
+//! other encoding, a symbolic one, or a CFF face is stored whole.
 //!
 //! **Variable fonts are refused.** Their default instance is not a weight this
 //! code can choose correctly (Google's Montserrat defaults to Thin, not
@@ -92,7 +95,7 @@ pub fn embed_missing(bytes: &[u8], find_face: &dyn Fn(&str) -> Option<Vec<u8>>) 
     // names the same face in a font object on every page, and writing the
     // program once per object multiplied a 6 MB file by four (measured on
     // SUHAIL, 2026-11-16).
-    let mut programs: HashMap<(String, String), u32> = HashMap::new();
+    let mut programs: HashMap<(String, String, bool), u32> = HashMap::new();
 
     for (number, font) in fonts {
         let subtype = font.get(b"Subtype").and_then(Object::as_name).map(|n| n.to_vec());
@@ -104,11 +107,10 @@ pub fn embed_missing(bytes: &[u8], find_face: &dyn Fn(&str) -> Option<Vec<u8>>) 
         let Some(base) = font.get(b"BaseFont").and_then(Object::as_name) else { continue };
         let shown = String::from_utf8_lossy(strip_subset(base)).to_string();
         let Face::Find(wanted) = face_to_find(strip_subset(base)) else { continue };
-        if is_base14(strip_subset(base)) {
-            let encoding = font.get(b"Encoding").map(|e| file.resolve(e)).transpose()?;
-            if encoding != Some(Object::Name(b"WinAnsiEncoding".to_vec())) {
-                continue;
-            }
+        let win_ansi = font.get(b"Encoding").map(|e| file.resolve(e)).transpose()?
+            == Some(Object::Name(b"WinAnsiEncoding".to_vec()));
+        if is_base14(strip_subset(base)) && !win_ansi {
+            continue;
         }
 
         if has_program(&file, &font)? {
@@ -135,15 +137,28 @@ pub fn embed_missing(bytes: &[u8], find_face: &dyn Fn(&str) -> Option<Vec<u8>>) 
         }
 
         let program_name = embed::face_name(&program).unwrap_or_else(|| wanted.clone());
-        let key = (wanted.clone(), embed::program_hash(&program));
+        // Only the glyphs the codes can reach, where that is known: a
+        // nonsymbolic font in WinAnsi. Anything else is stored whole.
+        let symbolic = descriptor_of(&file, &font)?
+            .0
+            .get(b"Flags")
+            .and_then(Object::as_i64)
+            .is_some_and(|flags| flags & 4 != 0);
+        let kept = if win_ansi && !symbolic && program_kind == Program::TrueType {
+            keep_win_ansi_glyphs(&program)
+        } else {
+            None
+        };
+        let key = (wanted.clone(), embed::program_hash(&program), kept.is_some());
         let program_number = match programs.get(&key) {
             Some(number) => *number,
             None => {
-                let (number, body) = font_program(next, &program, program_kind)?;
+                let written = kept.as_deref().unwrap_or(&program);
+                let (number, body) = font_program(next, written, program_kind)?;
                 next += 1;
                 extra.push((number, body));
                 programs.insert(key, number);
-                stored.push((program_name.clone(), program.len()));
+                stored.push((program_name.clone(), written.len()));
                 number
             }
         };
@@ -439,6 +454,179 @@ fn widths_differ(file: &File<'_>, font: &Dict, program: &[u8]) -> bool {
         let now = f64::from(now);
         let scale = was.abs().max(now.abs());
         scale > 0.0 && (was - now).abs() / scale > 0.02
+    })
+}
+
+// ------------------------------------------------------------------ subset --
+
+/// The tables a reader draws a simple TrueType font with. The rest — layout
+/// (`GSUB`, `GPOS`, `kern`), bitmaps, `DSIG` — shapes or positions text the
+/// page has already positioned, and is left out.
+const KEPT_TABLES: [&[u8; 4]; 14] = [
+    b"OS/2", b"cmap", b"cvt ", b"fpgm", b"gasp", b"glyf", b"head", b"hhea", b"hmtx", b"loca", b"maxp",
+    b"name", b"post", b"prep",
+];
+
+/// `program` with only the outlines a WinAnsi font's codes can reach: glyph 0,
+/// the glyph `cmap` gives each WinAnsi character, and the parts of any
+/// composite among them (an accented letter draws its letter and its accent).
+///
+/// **Glyph numbers do not move.** Every other glyph stays, as an empty
+/// outline, so `cmap`, `hmtx` and the composites' references stay exactly
+/// right and nothing is renumbered — the risk a renumbering subsetter carries
+/// for codes already on the page. `post` becomes version 3 (no glyph names):
+/// a simple font's codes reach glyphs through `cmap`.
+///
+/// `None` — store the face whole — when the program is not one this can cut
+/// (no `glyf`, no Unicode `cmap`) or the cut does not read back as the same font.
+fn keep_win_ansi_glyphs(program: &[u8]) -> Option<Vec<u8>> {
+    let face = ttf_parser::Face::parse(program, 0).ok()?;
+    face.glyph_index('A')?;
+    let tables = table_records(program)?;
+    let table = |tag: &[u8; 4]| tables.iter().find(|(t, _)| t == tag).map(|(_, data)| *data);
+    let (head, loca, glyf, maxp) = (table(b"head")?, table(b"loca")?, table(b"glyf")?, table(b"maxp")?);
+    let glyphs = usize::from(u16::from_be_bytes([*maxp.get(4)?, *maxp.get(5)?]));
+    let long = i16::from_be_bytes([*head.get(50)?, *head.get(51)?]) == 1;
+    let offset = |glyph: usize| -> Option<usize> {
+        if long {
+            Some(u32::from_be_bytes(loca.get(glyph * 4..glyph * 4 + 4)?.try_into().ok()?) as usize)
+        } else {
+            Some(usize::from(u16::from_be_bytes(loca.get(glyph * 2..glyph * 2 + 2)?.try_into().ok()?)) * 2)
+        }
+    };
+    let outline = |glyph: usize| -> Option<&[u8]> { glyf.get(offset(glyph)?..offset(glyph + 1)?) };
+
+    let mut keep: std::collections::BTreeSet<usize> = std::iter::once(0)
+        .chain(
+            (32u8..=255)
+                .filter_map(embed::win_ansi_char)
+                .filter_map(|c| face.glyph_index(c))
+                .map(|glyph| usize::from(glyph.0)),
+        )
+        .collect();
+    let mut queue: Vec<usize> = keep.iter().copied().collect();
+    while let Some(glyph) = queue.pop() {
+        for part in components(outline(glyph)?) {
+            if part < glyphs && keep.insert(part) {
+                queue.push(part);
+            }
+        }
+    }
+
+    let mut new_glyf = Vec::new();
+    let mut new_loca = Vec::with_capacity((glyphs + 1) * 4);
+    for glyph in 0..glyphs {
+        new_loca.extend_from_slice(&(new_glyf.len() as u32).to_be_bytes());
+        if keep.contains(&glyph) {
+            new_glyf.extend_from_slice(outline(glyph)?);
+            new_glyf.resize(new_glyf.len().next_multiple_of(4), 0);
+        }
+    }
+    new_loca.extend_from_slice(&(new_glyf.len() as u32).to_be_bytes());
+    let mut new_head = head.to_vec();
+    new_head.get_mut(8..12)?.fill(0); // checkSumAdjustment, set once the whole font is written
+    new_head.get_mut(50..52)?.copy_from_slice(&1i16.to_be_bytes()); // long loca
+
+    let mut kept = Vec::new();
+    for (tag, data) in &tables {
+        let data = match tag {
+            b"glyf" => std::mem::take(&mut new_glyf),
+            b"loca" => std::mem::take(&mut new_loca),
+            b"head" => std::mem::take(&mut new_head),
+            b"post" => {
+                let mut post = data.get(..32)?.to_vec();
+                post[..4].copy_from_slice(&0x0003_0000u32.to_be_bytes());
+                post
+            }
+            tag if KEPT_TABLES.contains(&tag) => data.to_vec(),
+            _ => continue,
+        };
+        kept.push((*tag, data));
+    }
+    let cut = write_sfnt(program.get(..4)?, kept);
+    let check = ttf_parser::Face::parse(&cut, 0).ok()?;
+    (check.number_of_glyphs() == face.number_of_glyphs() && cut.len() < program.len()).then_some(cut)
+}
+
+/// A font file's tables, by tag, as slices of it. `None` for anything that is
+/// not one font's table directory (a collection, a truncated file).
+fn table_records(program: &[u8]) -> Option<Vec<([u8; 4], &[u8])>> {
+    let count = usize::from(u16::from_be_bytes([*program.get(4)?, *program.get(5)?]));
+    (0..count)
+        .map(|i| {
+            let record = program.get(12 + 16 * i..28 + 16 * i)?;
+            let offset = u32::from_be_bytes(record[8..12].try_into().ok()?) as usize;
+            let length = u32::from_be_bytes(record[12..16].try_into().ok()?) as usize;
+            Some((record[..4].try_into().ok()?, program.get(offset..offset.checked_add(length)?)?))
+        })
+        .collect()
+}
+
+/// The glyphs a composite glyph draws; none for a simple glyph.
+fn components(outline: &[u8]) -> Vec<usize> {
+    let mut parts = Vec::new();
+    if outline.len() < 10 || i16::from_be_bytes([outline[0], outline[1]]) >= 0 {
+        return parts;
+    }
+    let mut at = 10;
+    while let Some(record) = outline.get(at..at + 4) {
+        let flags = u16::from_be_bytes([record[0], record[1]]);
+        parts.push(usize::from(u16::from_be_bytes([record[2], record[3]])));
+        at += 4 + if flags & 0x0001 != 0 { 4 } else { 2 }; // ARG_1_AND_2_ARE_WORDS
+        at += if flags & 0x0008 != 0 {
+            2 // WE_HAVE_A_SCALE
+        } else if flags & 0x0040 != 0 {
+            4 // WE_HAVE_AN_X_AND_Y_SCALE
+        } else if flags & 0x0080 != 0 {
+            8 // WE_HAVE_A_TWO_BY_TWO
+        } else {
+            0
+        };
+        if flags & 0x0020 == 0 {
+            break; // no MORE_COMPONENTS
+        }
+    }
+    parts
+}
+
+/// A font file from its tables: directory sorted by tag, every table 4-byte
+/// aligned with its checksum, and `head`'s checksum adjustment set.
+fn write_sfnt(version: &[u8], mut tables: Vec<([u8; 4], Vec<u8>)>) -> Vec<u8> {
+    tables.sort_by(|a, b| a.0.cmp(&b.0));
+    let count = tables.len() as u16;
+    let power = 1u16 << (15 - count.max(1).leading_zeros());
+    let mut out = version.to_vec();
+    for value in [count, power * 16, power.trailing_zeros() as u16, count * 16 - power * 16] {
+        out.extend_from_slice(&value.to_be_bytes());
+    }
+    let start = 12 + 16 * tables.len();
+    let mut body = Vec::new();
+    let mut head_at = None;
+    for (tag, data) in &tables {
+        if tag == b"head" {
+            head_at = Some(start + body.len());
+        }
+        out.extend_from_slice(tag);
+        out.extend_from_slice(&checksum(data).to_be_bytes());
+        out.extend_from_slice(&((start + body.len()) as u32).to_be_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        body.extend_from_slice(data);
+        body.resize(body.len().next_multiple_of(4), 0);
+    }
+    out.extend_from_slice(&body);
+    if let Some(at) = head_at {
+        let adjust = 0xB1B0_AFBAu32.wrapping_sub(checksum(&out));
+        out[at + 8..at + 12].copy_from_slice(&adjust.to_be_bytes());
+    }
+    out
+}
+
+/// The OpenType table checksum: the sum of its big-endian 32-bit words.
+fn checksum(data: &[u8]) -> u32 {
+    data.chunks(4).fold(0u32, |sum, chunk| {
+        let mut word = [0u8; 4];
+        word[..chunk.len()].copy_from_slice(chunk);
+        sum.wrapping_add(u32::from_be_bytes(word))
     })
 }
 
@@ -795,6 +983,60 @@ mod tests {
         let out = embed_missing(&input, &finder(variable)).expect("embeds");
         assert!(out.stored.is_empty(), "a variable font was embedded");
         assert_eq!(out.missing, vec!["Helvetica".to_string()]);
+    }
+
+    /// The program a font's descriptor carries, decoded.
+    fn stored_program(file: &File<'_>, font: u32) -> Vec<u8> {
+        let Object::Dict(font) = file.object(font).expect("font") else { panic!("not a dict") };
+        let descriptor = file.resolve(font.get(b"FontDescriptor").expect("a descriptor")).expect("descriptor");
+        let Object::Dict(descriptor) = descriptor else { panic!("not a dict") };
+        let Some(Object::Reference(number, _)) = descriptor.get(b"FontFile2") else { panic!("no program") };
+        let Object::Stream(dict, range) = file.object(*number).expect("program") else { panic!("not a stream") };
+        content::decode(&dict, &file.bytes()[range]).expect("decodes")
+    }
+
+    /// **The break:** the whole face stored for a font whose codes reach only
+    /// WinAnsi's characters — a one-page quotation grew from 320 KB to 1.2 MB.
+    /// What is stored keeps every glyph those codes reach, at the same glyph
+    /// number with the same outline and width, and no other outline.
+    #[test]
+    fn a_win_ansi_font_is_stored_with_only_the_glyphs_its_codes_reach() {
+        let program = fixture_font();
+        let out = embed_missing(&helvetica_without_program(), &finder(program.clone())).expect("embeds");
+        let stored = stored_program(&File::parse(&out.bytes).expect("a readable file"), 5);
+        assert!(stored.len() * 3 < program.len(), "stored {} bytes of {}", stored.len(), program.len());
+        assert_eq!(out.stored[0].1, stored.len(), "the report gives the size stored");
+
+        let whole = ttf_parser::Face::parse(&program, 0).expect("the face");
+        let cut = ttf_parser::Face::parse(&stored, 0).expect("the stored program is a font");
+        assert_eq!(cut.number_of_glyphs(), whole.number_of_glyphs(), "glyph numbers must not move");
+        for c in "AZaz09 .,é€–’ÿÆ".chars() {
+            let glyph = whole.glyph_index(c).expect("in the face");
+            assert_eq!(cut.glyph_index(c), Some(glyph), "{c} maps elsewhere");
+            assert_eq!(cut.glyph_bounding_box(glyph), whole.glyph_bounding_box(glyph), "{c} lost its outline");
+            assert_eq!(cut.glyph_hor_advance(glyph), whole.glyph_hor_advance(glyph), "{c} changed width");
+        }
+        let beyond = whole.glyph_index('Ж').expect("the fixture draws Cyrillic");
+        assert!(whole.glyph_bounding_box(beyond).is_some());
+        assert_eq!(cut.glyph_bounding_box(beyond), None, "a glyph no code reaches was kept");
+    }
+
+    /// A font in another encoding is stored whole: which glyphs its codes
+    /// reach is not worked out, so nothing is cut that a code might need.
+    #[test]
+    fn a_font_in_another_encoding_is_stored_whole() {
+        let input = build(&[
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>".to_vec(),
+            stream("", b"BT /F1 24 Tf 72 700 Td (A) Tj ET"),
+            b"<< /Type /Font /Subtype /TrueType /BaseFont /Montserrat-Regular /FirstChar 65 /LastChar 65 /Widths [700] /Encoding /MacRomanEncoding /FontDescriptor 6 0 R >>".to_vec(),
+            b"<< /Type /FontDescriptor /FontName /Montserrat-Regular /Flags 32 >>".to_vec(),
+        ]);
+        let program = fixture_font();
+        let out = embed_missing(&input, &|name| (name == "Montserrat-Regular").then(|| program.clone())).expect("embeds");
+        let stored = stored_program(&File::parse(&out.bytes).expect("a readable file"), 5);
+        assert_eq!(stored, program);
     }
 
     fn table_directory(font: &[u8]) -> Option<usize> {

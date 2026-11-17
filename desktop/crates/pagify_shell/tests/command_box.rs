@@ -723,15 +723,12 @@ fn saveas_with_a_path_still_means_that_exact_path() {
     }
 }
 
-/// **A copy for sending, asked for the way `saveas` is**: bare it asks where,
-/// with a path it means exactly that path — spaces and all.
+/// **Flatten replaced Save for sharing** (2026-11-17): `flatten` runs it, and
+/// `sharecopy` is no longer a verb of Pagify's.
 #[test]
-fn sharecopy_with_no_path_asks_where_and_with_a_path_means_that_path() {
-    assert!(matches!(head("sharecopy"), Dispatch::Pagify(Verb::ShareCopyDialog)));
-    match head("sharecopy /tmp/for sending.pdf") {
-        Dispatch::Pagify(Verb::ShareCopy(path)) => assert_eq!(path, std::path::PathBuf::from("/tmp/for sending.pdf")),
-        other => panic!("expected ShareCopy, got {other:?}"),
-    }
+fn flatten_is_a_verb_and_sharecopy_is_not() {
+    assert!(matches!(head("flatten"), Dispatch::Pagify(Verb::Flatten)));
+    assert!(!matches!(head("sharecopy"), Dispatch::Pagify(_)), "sharecopy still runs something");
 }
 
 /// **A new blank document**: bare it asks what paper; a paper alone asks where

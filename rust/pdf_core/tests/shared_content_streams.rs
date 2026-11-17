@@ -4,18 +4,20 @@
 //! CAMINO page showed the TENDENCIA page's words over its own, with letters
 //! missing. Reproduced exactly by drawing the TENDENCIA page's content stream
 //! through the CAMINO page's resources (its fonts are other subsets, hence the
-//! missing letters). How a file gets that way: Save for sharing writes one `q`
-//! stream and one `Q` stream for the whole file and puts them in the content of
-//! *every* page it bakes a picture into, and every byte-level edit then writes
-//! the edited page's whole content into the page's **first** content stream —
-//! the shared `q` — and empties the others, the shared `Q` among them.
+//! missing letters). How a file gets that way: Save for sharing (removed
+//! 2026-11-17) wrote one `q` stream and one `Q` stream for the whole file and
+//! put them in the content of *every* page it baked a picture into, and every
+//! byte-level edit then wrote the edited page's whole content into the page's
+//! **first** content stream — the shared `q` — and emptied the others, the
+//! shared `Q` among them. Such files are still out there; an edit to one of
+//! them must stay on its own page.
 //!
 //! ```text
 //! PAGIFY_PDFIUM_LIB=<pdfium> cargo test --release --test shared_content_streams
 //! ```
 
 mod harness;
-use harness::{hand_built_pdf, serial, skip_without_pdfium, HandPage};
+use harness::{serial, skip_without_pdfium};
 
 use pdf_core::document::pdfium_doc::PdfiumDocument;
 use pdf_core::document::{Annotation, Color, Document, DocumentMut, Glyph, Rect};
@@ -23,40 +25,61 @@ use pdf_core::document::{Annotation, Color, Document, DocumentMut, Glyph, Rect};
 const ONE: &str = "BT /F1 24 Tf 72 700 Td (PAGEONE) Tj ET";
 const TWO: &str = "BT /F1 24 Tf 72 700 Td (PAGETWO) Tj ET";
 
-/// Two pages, each with its own word, both in Helvetica (object 7).
-fn two_pages() -> Vec<u8> {
-    let font = "<< /Font << /F1 7 0 R >> >>";
-    hand_built_pdf(
-        &[
-            HandPage { content: ONE, resources: font, extra: "" },
-            HandPage { content: TWO, resources: font, extra: "" },
-        ],
-        &["<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"],
-    )
-}
-
-fn red_picture() -> Annotation {
-    Annotation::Image {
-        rect: Rect { left: 300.0, top: 300.0, right: 360.0, bottom: 340.0 },
-        rgba: [255u8, 0, 0, 255].repeat(16),
-        width: 4,
-        height: 4,
-    }
-}
-
 /// The words a page shows, joined.
 fn words(doc: &PdfiumDocument, page: usize) -> String {
     doc.text_runs(page).expect("runs").iter().map(|r| r.text.trim().to_string()).collect::<Vec<_>>().join(" ")
 }
 
-/// A copy for sharing of two pages that each had a picture placed on them.
+/// Two pages, each with its own word, whose content is wrapped in the **same**
+/// `q` stream (object 7) and `Q` stream (object 8) — what Save for sharing
+/// wrote before 2026-11-16, and what such files still hold. Pagify no longer
+/// writes one (one pair per page, then Flatten replaced the copy), but it
+/// still opens them.
 fn shared_copy() -> PdfiumDocument {
-    let mut doc = PdfiumDocument::open_bytes(two_pages(), None).expect("open");
-    doc.add_annotation(0, &red_picture()).expect("picture on page 1");
-    doc.add_annotation(1, &red_picture()).expect("picture on page 2");
-    let copy = doc.flattened_copy().expect("a copy for sharing");
-    assert_eq!(copy.pictures, 2, "setup: both pictures are baked in");
-    PdfiumDocument::open_bytes(copy.bytes, None).expect("the copy opens")
+    let stream = |data: &str| format!("<< /Length {} >>
+stream
+{data}
+endstream", data.len());
+    let page = |own: u32| {
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents [7 0 R {own} 0 R 8 0 R] /Resources << /Font << /F1 9 0 R >> >> >>")
+    };
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".to_string(),
+        page(5),
+        page(6),
+        stream(ONE),
+        stream(TWO),
+        stream("q"),
+        stream("Q"),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_string(),
+    ];
+    let mut out = b"%PDF-1.4
+".to_vec();
+    let mut offsets = Vec::new();
+    for (i, body) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj
+{body}
+endobj
+", i + 1).as_bytes());
+    }
+    let xref = out.len();
+    out.extend_from_slice(format!("xref
+0 {}
+0000000000 65535 f 
+", objects.len() + 1).as_bytes());
+    for offset in offsets {
+        out.extend_from_slice(format!("{offset:010} 00000 n 
+").as_bytes());
+    }
+    out.extend_from_slice(format!("trailer
+<< /Size {} /Root 1 0 R >>
+startxref
+{xref}
+%%EOF
+", objects.len() + 1).as_bytes());
+    PdfiumDocument::open_bytes(out, None).expect("the shared file opens")
 }
 
 /// **The reported fault.** Whiting out part of page 1 of a shared copy must

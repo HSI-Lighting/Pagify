@@ -156,12 +156,6 @@ pub enum Verb {
     /// Ask for a destination, rather than being told one. `saveas` with no
     /// path — see [`Verb::OpenDialog`], which is the same idea for opening.
     SaveAsDialog,
-    /// Write a copy to send to somebody to this path: the placed pictures
-    /// baked into the pages, so a preview that draws only the page shows them.
-    /// The open document is left as it is, still editable.
-    ShareCopy(PathBuf),
-    /// Ask where, rather than being told: bare `sharecopy`.
-    ShareCopyDialog,
     /// Write a new blank document of one sheet, `size` in points, to this
     /// path and open it: `blankdoc [paper] <path>`, A4 when no paper is named.
     BlankDoc { size: (f32, f32), path: PathBuf },
@@ -279,6 +273,12 @@ pub enum Verb {
     /// select one and delete it, and nothing here can lift one back out. The
     /// escape is the one that has always been there — close without saving.
     ApplySignatures,
+    /// Make every visible mark part of its page — placed pictures, stamps,
+    /// filled shapes, highlights, underlines and ink — as Foxit's Flatten
+    /// Pages does, for a file that must look the same where marks are not
+    /// drawn (Android's and WhatsApp's previews). Undo puts them back until
+    /// the file is saved.
+    Flatten,
     /// Look after the signatures you have drawn.
     ///
     /// The *drawings*, not the marks already on a page — a signature placed in
@@ -811,7 +811,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("fieldradio", "the forms phase", "the Radio Button tool"),
     ("fieldsignature", "the forms phase", "the Signature Field tool"),
     ("fieldtext", "the forms phase", "the Text Field tool"),
-    ("flatten", "the page phase", "the Flatten tool"),
     ("formdesigner", "the forms phase", "the Designer Assistant tool"),
     ("formexport", "the forms phase", "the Export tool"),
     ("formimport", "the forms phase", "the Import tool"),
@@ -1005,7 +1004,7 @@ fn split_path_and_extra(tail: &str) -> Option<(String, String)> {
 /// Every token this table claims, for the collision test and for help.
 pub fn claimed_tokens() -> Vec<&'static str> {
     let mut tokens = vec![
-        "open", "close", "save", "saveas", "sharecopy", "blankdoc", "page", "p", "next", "zoom", "z", "fit",
+        "open", "close", "save", "saveas", "blankdoc", "page", "p", "next", "zoom", "z", "fit",
         "rotate", "undo", "redo", "pdfium", "version", "checkupdate", "quit", "exit", "help",
         "close!", "quit!", "exit!",
         // Several page operations are spelt out rather than taking the short
@@ -1020,7 +1019,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "articlebox", "weblinks", "jointext", "reflow",
         "pick", "textlayer", "whytext",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
-        "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
+        "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "flatten", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
         "unsecure", "redact", "ortho", "pagesrail", "exact", "print",
     ];
     tokens.extend(PLANNED.iter().map(|(v, _, _)| *v));
@@ -1145,6 +1144,7 @@ fn parse_fill_and_sign(head: &str, rest: &[&str], tail: &str) -> Option<Result<V
         "documentstatus" | "status" => Ok(Verb::DocumentStatus),
         "sessionlog" => Ok(Verb::SessionLog),
         "applysignatures" => Ok(Verb::ApplySignatures),
+        "flatten" => Ok(Verb::Flatten),
         _ => return None,
     })
 }
@@ -1407,14 +1407,6 @@ fn parse_file_and_view(head: &str, rest: &[&str], tail: &str) -> Option<Result<V
                 Ok(Verb::SaveAsDialog)
             } else {
                 Ok(Verb::SaveAs(resolve_path(tail)))
-            }
-        }
-        // The same shape as `saveas`: bare asks where, a path means that path.
-        "sharecopy" => {
-            if tail.is_empty() {
-                Ok(Verb::ShareCopyDialog)
-            } else {
-                Ok(Verb::ShareCopy(resolve_path(tail)))
             }
         }
         // Bare asks what paper; a paper alone asks where; a path means that path.

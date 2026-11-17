@@ -366,7 +366,7 @@ const HIGH: [char; 32] = [
 ];
 
 /// What a code spells, or `None` where the encoding leaves a gap.
-fn win_ansi_char(code: u8) -> Option<char> {
+pub(crate) fn win_ansi_char(code: u8) -> Option<char> {
     match code {
         0x20..=0x7E => Some(code as char),
         0x80..=0x9F => {

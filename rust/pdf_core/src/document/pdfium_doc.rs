@@ -2295,20 +2295,6 @@ impl Document for PdfiumDocument {
         self.lift(page_index, objects)
     }
 
-    /// See [`Document::flattened_copy`].
-    ///
-    /// Starts from `readable_bytes`, PDFium's own account of the document as it
-    /// stands, so an edit not yet saved is in the copy — and never from the file
-    /// on disk, whose signature, if any, the rewrite would void either way.
-    fn flattened_copy(&self) -> Result<crate::pdf::flatten::Flattened> {
-        // Refused, not written without: `readable_bytes` is plain, so a copy of
-        // a document with a password would come out with none.
-        if self.already_secured || self.security.is_some() || self.secure_plus {
-            return Err(PdfError::Unsupported("a copy for sharing of a document with a password"));
-        }
-        crate::pdf::flatten::flatten_annotations(&self.readable_bytes()?)
-    }
-
     fn drawn_objects(&self, page_index: usize) -> Result<Vec<crate::document::DrawnObject>> {
         self.drawn_walk(page_index, false)
     }
@@ -6717,7 +6703,7 @@ impl DocumentMut for PdfiumDocument {
     /// the page), and an edited page can name a font the file does not carry
     /// (and every reader substitutes its own). Both are fixed on the plaintext
     /// bytes here, then the password is applied — so a document with a password
-    /// is fixed up too, rather than refused the way `flattened_copy` is.
+    /// is fixed up too, rather than refused the way the copy for sharing was.
     ///
     /// **Never on the exact-bytes path.** `write_exact_if_unchanged` writes a
     /// signed document's own bytes verbatim; nothing may be added to them.
@@ -6739,8 +6725,11 @@ impl DocumentMut for PdfiumDocument {
                 .map_err(|e| PdfError::Pdfium(e.to_string()))?
         };
 
+        // Highlights, underlines and ink get an appearance of their own, as
+        // Foxit and Acrobat write them, and stay marks.
+        let marks = crate::pdf::flatten::draw_appearances(&bytes)?;
         // Fix 2: placed pictures and signature pictures become page pictures.
-        let pictures = crate::pdf::flatten::flatten_pictures(&bytes)?;
+        let pictures = crate::pdf::flatten::flatten_pictures(&marks.bytes)?;
         // Fix 3: fonts the file names but does not carry.
         let fonts = crate::pdf::fonts::embed_missing(&pictures.bytes, fixups.find_face)?;
 
@@ -6753,11 +6742,41 @@ impl DocumentMut for PdfiumDocument {
         self.written = None;
         Ok(crate::document::SaveFixupReport {
             pictures: pictures.pictures,
+            marks_drawn: marks.drawn,
             fonts_stored: fonts.stored,
             fonts_missing: fonts.missing,
             width_mismatches: fonts.width_mismatches,
             elapsed: started.elapsed(),
         })
+    }
+
+    /// See [`DocumentMut::flatten_marks`].
+    ///
+    /// From `readable_bytes` — PDFium's account of the document as it stands,
+    /// plain — and reopened through `adopt_edit`, which puts a password back,
+    /// so a document with one keeps it.
+    fn flatten_marks(&mut self) -> Result<Vec<u8>> {
+        // A rewrite breaks every signature over the file.
+        if PdfiumDocument::signature_count(self) > 0 {
+            return Err(PdfError::InvalidArgument(
+                "this document is signed — flattening rewrites it, which breaks the signature".into(),
+            ));
+        }
+        let before = self.readable_bytes()?;
+        let drawn = crate::pdf::flatten::draw_appearances(&before)?;
+        let flat = crate::pdf::flatten::flatten_annotations(&drawn.bytes)?;
+        if flat.pictures + flat.forms > 0 {
+            let (was_secured, plus, permissions) = (self.already_secured, self.secure_plus, self.permissions());
+            let base = EditBase { bytes: Vec::new(), exact: false };
+            self.adopt_edit(&base, flat.bytes, was_secured, plus, permissions)?;
+        }
+        Ok(before)
+    }
+
+    fn restore_document(&mut self, bytes: Vec<u8>) -> Result<()> {
+        let (was_secured, plus, permissions) = (self.already_secured, self.secure_plus, self.permissions());
+        let base = EditBase { bytes: Vec::new(), exact: false };
+        self.adopt_edit(&base, bytes, was_secured, plus, permissions)
     }
 
     /// Append a delta rather than rewriting the file.

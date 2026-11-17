@@ -1051,19 +1051,6 @@ pub trait Document: Send + Sync {
         Err(PdfError::Unsupported("copying drawings as lines"))
     }
 
-    /// The whole document as it stands, as a copy to send to somebody: every
-    /// visible mark annotation — a placed picture, a highlight — baked into its
-    /// page, because a thumbnail or preview renderer draws a page and not what
-    /// is laid over it. See [`crate::pdf::flatten`] for what is and is not
-    /// flattened, and why pictures go down as plain images.
-    ///
-    /// **Reads, never changes**: the document in hand keeps its annotations and
-    /// stays editable. Refused for a document with a password, whose copy would
-    /// otherwise come out without one.
-    fn flattened_copy(&self) -> Result<crate::pdf::flatten::Flattened> {
-        Err(PdfError::Unsupported("saving a copy for sharing"))
-    }
-
     /// The paths of a page — exactly the entries of [`Document::drawn_objects`]
     /// whose kind is [`DrawnKind::Shape`], the same ones in the same order — for
     /// a caller that has no use for the rest.
@@ -1231,6 +1218,8 @@ pub struct SaveFixups<'a> {
 pub struct SaveFixupReport {
     /// Placed pictures baked into their pages.
     pub pictures: usize,
+    /// Highlights, underlines and ink given an appearance of their own.
+    pub marks_drawn: usize,
     /// Fonts stored, by the program's own PostScript name, with its size.
     pub fonts_stored: Vec<(String, usize)>,
     /// Fonts the finder could not supply, or supplied only as a variable font.
@@ -1843,6 +1832,25 @@ pub trait DocumentMut {
     ) -> Result<SaveFixupReport> {
         self.save_full_copy(dest)?;
         Ok(SaveFixupReport::default())
+    }
+
+    /// **Flatten**, as Foxit's Flatten Pages: every visible mark becomes part
+    /// of its page — placed pictures, stamps, filled shapes, highlights,
+    /// underlines, strike-outs and ink (given an appearance first where they
+    /// have none, see [`crate::pdf::flatten::draw_appearances`]). Links, form
+    /// fields and notes stay as they are.
+    ///
+    /// For a file that must look the same where marks are not drawn at all —
+    /// Android's and WhatsApp's previews. Returns the document's bytes from
+    /// before, which [`Self::restore_document`] puts back: an undo, until the
+    /// file is saved.
+    fn flatten_marks(&mut self) -> Result<Vec<u8>> {
+        Err(PdfError::Unsupported("flattening this document"))
+    }
+
+    /// Put the document back as `bytes` from [`Self::flatten_marks`] had it.
+    fn restore_document(&mut self, _bytes: Vec<u8>) -> Result<()> {
+        Err(PdfError::Unsupported("restoring this document"))
     }
 
     /// Put a password on the document — one another reader will ask for.

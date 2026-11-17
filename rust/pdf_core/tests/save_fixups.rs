@@ -16,7 +16,7 @@ use harness::{serial, skip_without_pdfium};
 
 use pdf_core::document::pdfium_doc::PdfiumDocument;
 use pdf_core::document::{
-    Annotation, Color, Document, DocumentMut, Rect, RenderRequest, SaveFixups,
+    Annotation, Color, Document, DocumentMut, Point, Rect, RenderRequest, SaveFixups,
 };
 use pdf_core::pdf::encrypt::Permissions;
 use pdf_core::pdf::{File, Object};
@@ -110,7 +110,7 @@ fn an_incremental_save_does_not_bake_the_picture() {
     assert!(!middle_is_red(&opened, rect, false), "an incremental save baked the picture");
 }
 
-/// **The break:** refusing a document with a password, the way `flattened_copy`
+/// **The break:** refusing a document with a password, the way the copy for sharing
 /// does. The fix-ups go on the plaintext bytes and the password on after.
 #[test]
 fn a_document_with_a_password_is_fixed_up_too() {
@@ -179,6 +179,73 @@ fn every_annotation_pagify_writes_prints_and_a_link_does_not() {
     }
     assert!(seen.iter().any(|k| k == "Highlight"), "the highlight was not written: {seen:?}");
     assert!(seen.iter().any(|k| k == "Link"), "the link was not written: {seen:?}");
+}
+
+/// Every pixel of page 1 as RGB, drawn with its marks.
+fn pixels(doc: &PdfiumDocument) -> Vec<[u8; 3]> {
+    let bitmap = doc
+        .render_page_to_bitmap(0, &RenderRequest { scale: 1.0, render_annotations: true, ..Default::default() })
+        .expect("render");
+    let mut out = Vec::new();
+    for y in 0..bitmap.height as usize {
+        for x in 0..bitmap.width as usize {
+            let p = &bitmap.data[y * bitmap.stride + x * 4..y * bitmap.stride + x * 4 + 4];
+            out.push(match bitmap.order {
+                PixelOrder::Bgra => [p[2], p[1], p[0]],
+                PixelOrder::Rgba => [p[0], p[1], p[2]],
+            });
+        }
+    }
+    out
+}
+
+/// **Foxit's way.** A highlight and an ink stroke saved by Pagify stay marks —
+/// still listed, still removable — and now carry an appearance of their own,
+/// which draws them as Pagify drew them before the save.
+#[test]
+fn highlights_and_ink_stay_marks_and_carry_their_appearance() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("two-column.pdf");
+    let yellow = Color { r: 255, g: 230, b: 0, a: 255 };
+    let blue = Color { r: 0, g: 0, b: 255, a: 255 };
+    doc.add_annotation(0, &Annotation::Highlight {
+        rects: vec![Rect { left: 100.0, top: 200.0, right: 300.0, bottom: 220.0 }],
+        color: yellow,
+    })
+    .expect("highlight");
+    doc.add_annotation(0, &Annotation::Ink {
+        strokes: vec![vec![Point { x: 100.0, y: 300.0 }, Point { x: 200.0, y: 350.0 }, Point { x: 300.0, y: 300.0 }]],
+        color: blue,
+        width: 3.0,
+    })
+    .expect("ink");
+
+    let finder = no_face;
+    let mut saved = Vec::new();
+    let report = doc
+        .save_full_copy_with_fixups(&mut saved, &SaveFixups { find_face: &finder })
+        .expect("save");
+    assert_eq!(report.marks_drawn, 2, "the marks were not given an appearance");
+
+    let file = File::parse(&saved).expect("a readable file");
+    let Some(Ok(Object::Array(annots))) = page(&file).get(b"Annots").map(|a| file.resolve(a)) else {
+        panic!("the marks are gone")
+    };
+    for annot in &annots {
+        let annot = file.resolve(annot).expect("a mark");
+        assert!(annot.as_dict().expect("a dict").get(b"AP").is_some(), "a mark has no appearance: {annot:?}");
+    }
+
+    let reopened = PdfiumDocument::open_bytes(saved, None).expect("reopen");
+    let marks = reopened.annotations(0).expect("marks");
+    assert!(marks.iter().any(|m| matches!(m.annotation, Annotation::Highlight { .. })), "no highlight: {marks:?}");
+    assert!(marks.iter().any(|m| matches!(m.annotation, Annotation::Ink { .. })), "no ink: {marks:?}");
+
+    let (before, after) = (pixels(&doc), pixels(&reopened));
+    let differ = before.iter().zip(&after).filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| x.abs_diff(*y) > 48)).count();
+    assert!(differ * 1000 < before.len(), "{differ} of {} pixels look different after the save", before.len());
 }
 
 /// **The reported fault.** A font the file does not carry gets a program from

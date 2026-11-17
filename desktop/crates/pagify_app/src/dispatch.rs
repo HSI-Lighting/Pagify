@@ -251,6 +251,7 @@ impl crate::PagifyApp {
                 ),
             },
             Effect::RunApplySignatures => self.act_apply_signatures(),
+            Effect::RunFlatten => self.act_flatten(),
             Effect::RunManageSignatures(what) => self.act_manage_signatures(what),
             Effect::OpenSignaturePad { name, then_place } => {
                 self.library_state.pad = Some(SignaturePad { name, then_place, ..SignaturePad::default() });
@@ -454,8 +455,6 @@ impl crate::PagifyApp {
                 self.save_as(path);
             }
             Effect::SaveAsDialog => self.save_as_dialog(),
-            Effect::SaveShareCopy(path) => self.save_share_copy(path),
-            Effect::ShareCopyDialog => self.share_copy_dialog(),
             Effect::NewBlank { size, path } => self.new_blank(&path, size),
             Effect::NewBlankDialog(size) => self.new_blank_dialog(size),
             Effect::BlankPaperWindow => self.ui_state.blank_paper = Some(Default::default()),
@@ -711,6 +710,60 @@ impl crate::PagifyApp {
                     if applied == 1 { "is" } else { "are" },
                     if applied == 1 { "it" } else { "them" },
                 ));
+    }
+
+    /// `flatten`: every visible mark becomes part of its page — Foxit's
+    /// Flatten Pages — for a file that must look the same in a preview that
+    /// draws no marks (Android's, WhatsApp's). Replaced Save for sharing: it
+    /// acts on the open document, undo puts the marks back until the file is
+    /// saved, and Save writes it.
+    fn act_flatten(&mut self) {
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            self.say_error("nothing open.");
+            return;
+        };
+        // Drawn ink is a mark like any other: written into the document first.
+        if self.commit_markup_for_writing(&session).is_none() {
+            return;
+        }
+        let pages = session.page_count().unwrap_or(0);
+        let count = || (0..pages).map(|p| session.annotations(p).map_or(0, |m| m.len())).sum::<usize>();
+        let before = count();
+        if before == 0 {
+            self.say_info("nothing to flatten — there are no marks on this document.");
+            return;
+        }
+        match session.execute(pdf_core::command::Command::FlattenMarks) {
+            Ok(_) => {
+                let left = count();
+                let flattened = before.saturating_sub(left);
+                if let Some(doc) = &mut self.tab_mut().doc {
+                    doc.rendered_is_stale();
+                }
+                // The marks are page content now: a selection naming one by
+                // its old index would point at nothing, or at something else.
+                let selection = &mut self.tab_mut().selection;
+                selection.signature_selected = None;
+                selection.signature_grab = None;
+                selection.placed_image_selected = None;
+                selection.placed_image_grab = None;
+                let plural = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+                self.say_info(format!(
+                    "{} made part of the pages — every reader and preview shows {} now. \
+                     Undo puts {} back until you save.",
+                    plural(flattened, "mark", "marks"),
+                    if flattened == 1 { "it" } else { "them" },
+                    if flattened == 1 { "it" } else { "them" },
+                ));
+                if left > 0 {
+                    self.say_info(format!(
+                        "{} (links, notes or form fields) stay as they are.",
+                        plural(left, "other", "others")
+                    ));
+                }
+            }
+            Err(e) => self.say_error(format!("{e}")),
+        }
     }
 
     /// Everything `managesignatures` does, in its several sub-actions. Moved

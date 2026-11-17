@@ -18,13 +18,13 @@ const fn tool(glyph: &'static str, label: &'static str, command: &'static str) -
 }
 
 /// Foxit's list, in its order, less Email (Pagify's is not built yet), plus
-/// Save for sharing (asked for). Each runs a command string, like every ribbon
-/// button.
+/// Flatten (asked for as Save for sharing, which it replaced on 2026-11-17).
+/// Each runs a command string, like every ribbon button.
 pub(crate) const STANDARD: [QuickTool; 10] = [
     tool("\u{E2C8}", "Open", "open"),
     tool("\u{E161}", "Save", "save"),
     tool("\u{EB60}", "Save As", "saveas"),
-    tool("\u{E80D}", "Save for sharing", "sharecopy"),
+    tool("\u{E53C}", "Flatten", "flatten"),
     tool("\u{E8AD}", "Print", "print"),
     tool("\u{E66D}", "Blank", "blankdoc"),
     tool("\u{E166}", "Undo", "undo"),
@@ -54,6 +54,11 @@ pub(crate) fn load_from(path: &Path) -> Vec<String> {
     std::fs::read_to_string(path)
         .ok()
         .and_then(|text| serde_json::from_str::<Vec<String>>(&text).ok())
+        .map(|chosen| {
+            // Save for sharing became Flatten (2026-11-17): whoever had it in
+            // the bar keeps a tool in its place.
+            chosen.into_iter().map(|c| if c == "sharecopy" { "flatten".to_owned() } else { c }).collect()
+        })
         .unwrap_or_else(defaults)
 }
 
@@ -159,12 +164,24 @@ mod tests {
         assert_eq!(labels(&["redo", "highlight", "open"]), ["Open", "Redo", "Highlight"]);
     }
 
-    /// **Asked for: "add save for sharing".** In the menu, after Save As.
+    /// **Asked for: "add save for sharing"**, which became Flatten on
+    /// 2026-11-17. In the menu where it was, after Save As.
     #[test]
-    fn save_for_sharing_is_in_the_menu_after_save_as() {
+    fn flatten_is_in_the_menu_after_save_as() {
         let commands: Vec<&str> = STANDARD.iter().map(|t| t.command).collect();
         let at = commands.iter().position(|c| *c == "saveas").expect("Save As");
-        assert_eq!(commands.get(at + 1), Some(&"sharecopy"), "{commands:?}");
+        assert_eq!(commands.get(at + 1), Some(&"flatten"), "{commands:?}");
+    }
+
+    /// **The break:** a bar saved with Save for sharing in it losing that tool
+    /// without a word, because no ribbon button runs `sharecopy` any more.
+    #[test]
+    fn a_saved_save_for_sharing_comes_back_as_flatten() {
+        let path = std::env::temp_dir().join(format!("pagify-quick-tools-{}.json", std::process::id()));
+        std::fs::write(&path, r#"["open","sharecopy","save"]"#).expect("write");
+        let chosen = load_from(&path);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(chosen, ["open", "flatten", "save"]);
     }
 
     #[test]

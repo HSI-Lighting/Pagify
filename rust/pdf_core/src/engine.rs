@@ -494,12 +494,6 @@ pub fn save_with_fixups(
     doc.save_full_copy_with_fixups(dest, &crate::document::SaveFixups { find_face })
 }
 
-/// A copy of the document to send to somebody, its marks baked into its pages.
-/// Reads the document; the session is left exactly as it was. See
-/// [`crate::document::Document::flattened_copy`].
-pub fn flattened_copy(session: &mut DocumentSession) -> Result<crate::pdf::flatten::Flattened> {
-    session.document.flattened_copy()
-}
 #[cfg(test)]
 mod tests {
     use super::*;

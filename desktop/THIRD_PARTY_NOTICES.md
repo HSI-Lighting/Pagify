@@ -46,3 +46,15 @@ Montserrat is licensed under the SIL Open Font License, Version 1.1. The licence
 text is `third_party/fonts/LICENSE.txt`. The fonts may be bundled and
 redistributed with this application; they may not be sold on their own, and a
 modified version may not use the reserved font name.
+
+## PT Sans
+
+`third_party/fonts/PTSans-Regular.ttf` is PT Sans Regular by ParaType Ltd.
+(version 2.003W), taken unmodified from Google Fonts
+(https://github.com/google/fonts/tree/main/ofl/ptsans). It is embedded into
+saved documents when a page names `PTSans-Regular` without carrying it.
+
+PT Sans is licensed under the SIL Open Font License, Version 1.1, with the
+Reserved Font Names "PT Sans" and "ParaType". The licence text is
+`third_party/fonts/PTSans-OFL.txt`. The font is bundled unmodified; it may not
+be sold on its own, and a modified version may not use the reserved names.

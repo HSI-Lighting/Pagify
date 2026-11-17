@@ -424,6 +424,12 @@ pub enum Command {
         page_index: usize,
     },
 
+    // ------------------------------------------------------------- flatten --
+    /// Make every visible mark part of its page — see
+    /// [`crate::document::DocumentMut::flatten_marks`]. Undone by putting the
+    /// whole document back as it was.
+    FlattenMarks,
+
     // -------------------------------------------------------------- batch --
     /// Several commands, undone together by one `undo`.
     ///
@@ -622,6 +628,10 @@ pub enum UndoRecord {
     /// Takes back an `AddBookmark`, from exactly what adding it returned.
     RemoveBookmark {
         added: crate::document::BookmarkAdded,
+    },
+    /// Takes back a `FlattenMarks`: the whole document as it was before.
+    RestoreDocument {
+        bytes: Vec<u8>,
     },
     /// Reverses a [`Command::Batch`] — every inner record, in the reverse of
     /// the order the commands that produced them ran in.
@@ -962,6 +972,7 @@ impl Command {
                 let added = doc.add_bookmark(title, *page_index)?;
                 Ok(UndoRecord::RemoveBookmark { added })
             }
+            Command::FlattenMarks => Ok(UndoRecord::RestoreDocument { bytes: doc.flatten_marks()? }),
             Command::Batch { commands } => {
                 let mut records: Vec<UndoRecord> = Vec::with_capacity(commands.len());
                 for command in commands {
@@ -1072,6 +1083,7 @@ impl Command {
             Command::Redact { page_index, .. } => format!("Redact on page {}", page_index + 1),
             Command::ReplacePage { index, .. } => format!("Restore page {}", index + 1),
             Command::AddBookmark { title, .. } => format!("Bookmark \"{title}\""),
+            Command::FlattenMarks => "Flatten".into(),
             Command::Batch { commands } => match commands.len() {
                 0 => "Nothing to do".into(),
                 1 => commands[0].description(),
@@ -1133,6 +1145,8 @@ impl Command {
             // costs far less to re-render than all of them for a change
             // that in truth invalidates none.
             Command::AddBookmark { page_index, .. } => vec![*page_index],
+            // Every page with a mark on it changes; empty means "every page".
+            Command::FlattenMarks => Vec::new(),
             // Empty means "everything" (see this method's own doc) — if any
             // inner command invalidates everything, so does the batch; that
             // has to short-circuit rather than fall out of a plain
@@ -1266,6 +1280,7 @@ impl UndoRecord {
                 annotation,
             } => doc.add_annotation(page_index, &annotation).map(|_| ()),
             UndoRecord::RemoveBookmark { added } => doc.remove_bookmark(added),
+            UndoRecord::RestoreDocument { bytes } => doc.restore_document(bytes),
             // Reverse order: the commands that produced these ran forwards,
             // so undoing them has to run backwards — the same reasoning
             // `RemovePages`' own revert above already documents.
