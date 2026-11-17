@@ -539,6 +539,7 @@ impl crate::PagifyApp {
             by_object: std::collections::HashMap::new(),
             twins: std::collections::HashMap::new(),
             excluded: Default::default(),
+            units: Vec::new(),
             build_ms: started.elapsed().as_secs_f32() * 1000.0,
             detect_ms: 0.0,
         });

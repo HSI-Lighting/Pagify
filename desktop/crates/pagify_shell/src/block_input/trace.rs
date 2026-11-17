@@ -12,6 +12,8 @@ pub enum PickPath {
     Block,
     /// One run opened alone (a block of one object, an unreadable or invisible seed, a failed guard).
     Single,
+    /// One cell of a row the checks refused as a paragraph.
+    Cell,
     /// A paragraph the person joined by hand.
     Joined,
     /// A word drawn as outlines.
@@ -30,6 +32,7 @@ impl PickPath {
         match self {
             PickPath::Block => "block",
             PickPath::Single => "single",
+            PickPath::Cell => "cell",
             PickPath::Joined => "joined",
             PickPath::Drawn => "drawn",
             PickPath::RefusedRotated => "refused-rotated",

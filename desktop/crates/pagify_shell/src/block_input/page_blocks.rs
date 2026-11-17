@@ -31,6 +31,9 @@ pub struct PageBlocks {
     /// Only members that have a twin are keys.
     pub twins: HashMap<usize, Vec<usize>>,
     pub excluded: Excluded,
+    /// What a hover boxes and a click opens — see [`EditUnit`]. Worked out once here, so the box and
+    /// the editor cannot disagree.
+    pub units: Vec<EditUnit>,
     /// The whole of [`build_page_blocks_from`]: adapt, detect and index. The caller adds its own PDFium time.
     pub build_ms: f32,
     /// The detector alone.
@@ -73,7 +76,7 @@ pub fn build_page_blocks_from(
     let shapes = shapes.into_iter().filter(|s| s.kind == DrawnKind::Shape).collect();
     let twins = assign_twins(&by_id, &adapted.excluded, &by_object);
 
-    PageBlocks {
+    let mut page_blocks = PageBlocks {
         page,
         epoch,
         generation,
@@ -86,9 +89,13 @@ pub fn build_page_blocks_from(
         by_object,
         twins,
         excluded: adapted.excluded,
-        build_ms: ms(started),
+        units: Vec::new(),
+        build_ms: 0.0,
         detect_ms,
-    }
+    };
+    page_blocks.units = edit_units(&page_blocks);
+    page_blocks.build_ms = ms(started);
+    page_blocks
 }
 
 /// Which member each twin duplicates: member id -> its twins' ids, ascending.

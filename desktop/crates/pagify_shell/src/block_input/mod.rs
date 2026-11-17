@@ -878,16 +878,89 @@ mod tests {
     #[test]
     fn a_page_is_boxed_by_piece_and_the_drawn_one_is_marked() {
         let pb = pb_with_a_drawn_line();
-        let boxes = piece_boxes(&pb);
+        let boxes = edit_units(&pb);
         assert_eq!(boxes.iter().map(|b| b.drawn).collect::<Vec<_>>(), vec![false, true, false]);
         assert_eq!((boxes[1].rect.top, boxes[1].rect.bottom), (38.0, 45.5));
 
         // Text the page turns on its side is not boxed: a click on it is refused.
         let mut pb = good_pb();
         pb.blocks[0].starts_because = "rotated";
-        assert!(piece_boxes(&pb).is_empty());
+        assert!(edit_units(&pb).is_empty());
         // A block with nothing drawn is one box, whatever its size.
-        assert_eq!(piece_boxes(&good_pb()).len(), 1);
+        assert_eq!(edit_units(&good_pb()).len(), 1);
+    }
+
+    #[test]
+    fn edit_units_keep_a_paragraph_that_passes_the_checks_whole() {
+        let units = edit_units(&good_pb());
+        assert_eq!(units.len(), 1, "{units:?}");
+        let unit = &units[0];
+        assert!(!unit.cell && !unit.drawn);
+        assert_eq!(unit.objects, vec![1, 2, 3, 4, 5]);
+        assert_eq!((unit.from, unit.to), (0, 3));
+        assert_eq!(unit.rect, Rect { left: 10.0, top: 14.0, right: 63.0, bottom: 45.5 });
+
+        // The units stored on the page are the same list a later call works out.
+        let runs = vec![
+            tr(1, "Hello ", 10.0, 20.0),
+            tr(2, "world", 40.0, 20.0),
+            tr(3, "second ", 10.0, 32.0),
+            tr(4, "line", 45.0, 32.0),
+            tr(5, "third", 10.0, 44.0),
+        ];
+        let pb = pb_of(runs);
+        assert_eq!(pb.units, edit_units(&pb));
+    }
+
+    #[test]
+    fn edit_units_split_a_row_of_cells_at_its_wide_gaps() {
+        let pb = cell_gap_pb(14.0);
+        let units = edit_units(&pb);
+        let objects: Vec<Vec<usize>> = units.iter().map(|u| u.objects.clone()).collect();
+        assert_eq!(objects, vec![vec![1, 2], vec![3], vec![4], vec![5]], "{units:?}");
+        assert!(units.iter().all(|u| u.cell), "every unit of a refused row is a cell: {units:?}");
+        assert_eq!(units[0].rect, Rect { left: 10.0, top: 14.0, right: 62.5, bottom: 21.5 });
+        assert_eq!(units[2].rect, Rect { left: 55.5, top: 26.0, right: 73.5, bottom: 33.5 });
+
+        assert_eq!(cells_of_line(&cell_gap_pb(14.0), &[3, 4]), vec![vec![3], vec![4]]);
+        assert_eq!(cells_of_line(&cell_gap_pb(6.0), &[3, 4]), vec![vec![3, 4]]);
+
+        // A list item's own number is exempt from the split, so the row is a paragraph again.
+        let mut item = cell_gap_pb(12.0);
+        item.runs.get_mut(&3).unwrap().text = "1.".to_string();
+        let units = edit_units(&item);
+        assert_eq!(units.len(), 1, "{units:?}");
+        assert!(!units[0].cell);
+    }
+
+    #[test]
+    fn a_click_in_a_boxes_blank_space_finds_the_box_and_its_nearest_word() {
+        let pb = good_pb();
+        let units = edit_units(&pb);
+        // Today's answer from the words alone: nothing within 3 pt.
+        assert_eq!(pick_seed(&pb, 55.0, 40.0, 3.0), None);
+        assert_eq!(unit_at(&units, 55.0, 40.0, 3.0), Some(0));
+        assert_eq!(seed_in_unit(&pb, &units[0], 55.0, 40.0), Some(4));
+        assert_eq!(unit_at(&units, 200.0, 200.0, 3.0), None);
+
+        let pb = cell_gap_pb(14.0);
+        let units = edit_units(&pb);
+        assert_eq!(unit_at(&units, 48.0, 30.0, 3.0), None);
+        assert_eq!(unit_at(&units, 43.0, 30.0, 3.0), Some(1));
+    }
+
+    #[test]
+    fn a_cell_opens_as_one_line_over_just_its_words() {
+        let pb = cell_gap_pb(14.0);
+        let units = edit_units(&pb);
+        let block = unit_block(&pb, &units[2]).expect("a cell's block");
+        assert_eq!(block.lines.len(), 1);
+        let line = &block.lines[0];
+        assert_eq!(line.objects, vec![4]);
+        assert!(line.outlined.is_empty());
+        assert_eq!((line.left, line.top, line.right, line.bottom), (55.5, 26.0, 73.5, 33.5));
+        assert_eq!(line.baseline, 32.0);
+        assert_eq!(check_block_invariants(&pb, &block), Ok(()));
     }
 
     #[test]

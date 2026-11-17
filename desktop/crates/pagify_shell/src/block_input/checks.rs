@@ -441,6 +441,41 @@ pub(super) fn is_list_marker(text: &str) -> bool {
     }
 }
 
+/// **Where a line's cells break**, C17's own split rule — shared with the editor so that a row the
+/// checks refuse still opens one cell at a time instead of one letter.
+///
+/// Walk the objects left to right keeping the running max right edge. A new cell starts before object
+/// `b` when the gap from that edge is at least [`CELL_GAP_EM`] times the larger of the two sizes,
+/// except right after the line's first object when that object is a list marker ([`is_list_marker`]):
+/// "1." stands apart from its clause but is still the same item. An object with no run never splits
+/// anything, because it has no size or edge to measure.
+pub fn cells_of_line(pb: &PageBlocks, objects: &[usize]) -> Vec<Vec<usize>> {
+    let mut cells: Vec<Vec<usize>> = Vec::new();
+    let mut current: Vec<usize> = Vec::new();
+    let mut right = f32::MIN;
+    for &object in objects {
+        let Some(run) = pb.runs.get(&object) else {
+            current.push(object);
+            continue;
+        };
+        if let Some(&previous) = current.last() {
+            if let Some(a) = pb.runs.get(&previous) {
+                let marker = current.len() == 1 && is_list_marker(&a.text);
+                let gap = left_of(run) - right;
+                if !marker && gap >= CELL_GAP_EM * a.size.max(run.size) {
+                    cells.push(std::mem::take(&mut current));
+                }
+            }
+        }
+        right = right.max(left_of(run).max(run.rect.right));
+        current.push(object);
+    }
+    if !current.is_empty() {
+        cells.push(current);
+    }
+    cells
+}
+
 /// **A short block with a wide gap inside a line is a row of cells, not a sentence.** Retyping a line
 /// writes all of its words into the first piece and removes the others, so two table cells that the
 /// detector let share a line (an amount and the date beside it, 1.9 em apart and no rule between) would
@@ -460,20 +495,21 @@ pub(super) fn c17_not_a_row_of_cells(cx: &Ctx) -> Result<(), String> {
         if s.frozen {
             continue;
         }
-        let mut right = f32::MIN;
-        for (k, pair) in s.objects.windows(2).enumerate() {
-            let (a, b) = (cx.run(pair[0])?, cx.run(pair[1])?);
-            right = right.max(a.rect.left.max(a.rect.right));
-            let gap = left_of(b) - right;
-            // a list item's own number stands 1.5 em before its words ("1." and the clause, in the terms of every
-            // quotation and order): the item is one block, and it is the number's line that gets retyped whole
-            if k == 0 && is_list_marker(&a.text) {
-                continue;
-            }
-            if gap >= CELL_GAP_EM * a.size.max(b.size) {
-                return Err(format!("C17: line {i} has a {gap:.1} pt gap between objects {} and {}: cells of a row, not one sentence", pair[0], pair[1]));
-            }
+        let cells = cells_of_line(cx.pb, &s.objects);
+        if cells.len() < 2 {
+            continue;
         }
+        let (Some(&a), Some(&b)) = (cells[0].last(), cells[1].first()) else { continue };
+        let Some(second) = cx.pb.runs.get(&b) else { continue };
+        let right = cells[0]
+            .iter()
+            .filter_map(|o| cx.pb.runs.get(o))
+            .map(|r| left_of(r).max(r.rect.right))
+            .fold(f32::MIN, f32::max);
+        let gap = left_of(second) - right;
+        return Err(format!(
+            "C17: line {i} has a {gap:.1} pt gap between objects {a} and {b}: cells of a row, not one sentence"
+        ));
     }
     Ok(())
 }

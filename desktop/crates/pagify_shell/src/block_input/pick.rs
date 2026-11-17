@@ -15,6 +15,9 @@ pub enum SeedRule {
     /// The rule above chose an object that is not a block member (blank, shadowed, ...), and a readable
     /// member whose rect coincides with it within [`TWIN_RECT_PT`] was taken instead.
     Twin,
+    /// The click was inside a box — an [`EditUnit`] — and the nearest word of that box was taken, even
+    /// though no word rect was near the point (a click in the blank space of a box).
+    InBox,
 }
 
 impl SeedRule {
@@ -23,6 +26,7 @@ impl SeedRule {
             SeedRule::Exact => "exact",
             SeedRule::Near => "near",
             SeedRule::Twin => "twin",
+            SeedRule::InBox => "in-box",
         }
     }
 }
@@ -168,17 +172,33 @@ pub fn piece_block(pb: &PageBlocks, block: usize, from: usize, to: usize) -> Opt
     Some(Block { lines, starts_because: b.starts_because, left, top, right, bottom })
 }
 
-/// One box over the page: a paragraph Edit Text can open, or a run of drawn lines it cannot.
+/// One thing a click can open: a paragraph Edit Text accepts, or one cell of a row it refused.
+///
+/// **The one answer the boxes and the click share.** Worked out once per page read, in
+/// [`build_page_blocks_from`], so the box drawn over the page and the editor a click opens cannot
+/// disagree about what is there. A cell lists the same text objects the paragraph would have, cut at
+/// the wide gap C17 refuses.
 #[derive(Clone, Debug, PartialEq)]
-pub struct PieceBox {
+pub struct EditUnit {
+    /// The unit's box, normalised and finite.
     pub rect: Rect,
+    /// A run of drawn lines: boxed dashed, never opened as a paragraph.
     pub drawn: bool,
+    /// The detector block this came from.
+    pub block: usize,
+    /// Lines `from..to` of the block; a cell is always one line, so `to == from + 1`.
+    pub from: usize,
+    pub to: usize,
+    /// Its text objects, line by line, left to right.
+    pub objects: Vec<usize>,
+    /// Part of a line: a cell of a row the checks refused.
+    pub cell: bool,
 }
 
-/// Every box to show over the page, in block order. Rotated and unplaced text is left out: a click on it is
-/// refused, and a box would promise otherwise. A drawn piece with no text of its own is still boxed, so
-/// the gap in the paragraph is something to see rather than a hole.
-pub fn piece_boxes(pb: &PageBlocks) -> Vec<PieceBox> {
+/// Every unit of the page, in block order. Rotated and unplaced text is left out: a click on it is
+/// refused, and a box would promise otherwise. A drawn piece with no text of its own is still a unit,
+/// so the gap in the paragraph is something to see rather than a hole.
+pub fn edit_units(pb: &PageBlocks) -> Vec<EditUnit> {
     let mut out = Vec::new();
     for (index, block) in pb.blocks.iter().enumerate() {
         if matches!(block.starts_because, "rotated" | "unplaced") {
@@ -187,12 +207,150 @@ pub fn piece_boxes(pb: &PageBlocks) -> Vec<PieceBox> {
         for piece in pieces(pb, index) {
             let Some(b) = piece_block(pb, index, piece.from, piece.to) else { continue };
             let rect = Rect { left: b.left, top: b.top, right: b.right, bottom: b.bottom };
-            if finite_rect(&rect) {
-                out.push(PieceBox { rect: normalised(&rect), drawn: piece.drawn });
+            if !finite_rect(&rect) {
+                continue;
+            }
+            let rect = normalised(&rect);
+            let objects: Vec<usize> = b.lines.iter().flat_map(|l| l.objects.iter().copied()).collect();
+            if piece.drawn {
+                out.push(EditUnit { rect, drawn: true, block: index, from: piece.from, to: piece.to, objects, cell: false });
+                continue;
+            }
+            if check_block_invariants(pb, &b).is_ok() {
+                out.push(EditUnit { rect, drawn: false, block: index, from: piece.from, to: piece.to, objects, cell: false });
+                continue;
+            }
+
+            // Refused as a paragraph: each line's cells are units of their own, so a click still opens
+            // everything the box showed rather than one letter of it.
+            for (offset, line) in b.lines.iter().enumerate() {
+                let at = piece.from + offset;
+                for cell in cells_of_line(pb, &line.objects) {
+                    let Some(cell_rect) = union_of_runs(pb, &cell) else { continue };
+                    let mut unit = EditUnit {
+                        rect: cell_rect,
+                        drawn: false,
+                        block: index,
+                        from: at,
+                        to: at + 1,
+                        objects: cell,
+                        cell: true,
+                    };
+                    let refused = unit.objects.len() > 1
+                        && match unit_block(pb, &unit) {
+                            Some(b) => check_block_invariants(pb, &b).is_err(),
+                            None => true,
+                        };
+                    if refused {
+                        // The cell is more than the editor can write safely as one line — open its
+                        // words one by one instead of refusing the click outright.
+                        for object in std::mem::take(&mut unit.objects) {
+                            let Some(one) = union_of_runs(pb, &[object]) else { continue };
+                            out.push(EditUnit { rect: one, objects: vec![object], ..unit.clone() });
+                        }
+                        continue;
+                    }
+                    out.push(unit);
+                }
             }
         }
     }
     out
+}
+
+/// The union of one cell's runs' rects, normalised — `None` when none of its objects has a run.
+fn union_of_runs(pb: &PageBlocks, objects: &[usize]) -> Option<Rect> {
+    let mut union: Option<Rect> = None;
+    for &object in objects {
+        let Some(run) = pb.runs.get(&object) else { continue };
+        let r = normalised(&run.rect);
+        union = Some(match union {
+            None => r,
+            Some(u) => Rect {
+                left: u.left.min(r.left),
+                top: u.top.min(r.top),
+                right: u.right.max(r.right),
+                bottom: u.bottom.max(r.bottom),
+            },
+        });
+    }
+    union.filter(finite_rect)
+}
+
+/// The unit under a click: the smallest-area unit whose rect contains the point; failing that the
+/// nearest one within `tolerance` points. Ties go to the lower index, so the answer never depends on
+/// hash order — [`pick_seed`]'s shape, over boxes rather than words.
+pub fn unit_at(units: &[EditUnit], x: f32, y: f32, tolerance: f32) -> Option<usize> {
+    if !x.is_finite() || !y.is_finite() {
+        return None;
+    }
+    let tol = if tolerance.is_finite() { tolerance } else { 0.0 };
+    let mut exact: Option<(f32, usize)> = None;
+    let mut near: Option<(f32, usize)> = None;
+    for (i, unit) in units.iter().enumerate() {
+        let r = &unit.rect;
+        let dx = (r.left - x).max(x - r.right).max(0.0);
+        let dy = (r.top - y).max(y - r.bottom).max(0.0);
+        if dx == 0.0 && dy == 0.0 {
+            keep_min(&mut exact, ((r.right - r.left) * (r.bottom - r.top), i));
+        } else if dx <= tol && dy <= tol {
+            keep_min(&mut near, (dx.hypot(dy), i));
+        }
+    }
+    match (exact, near) {
+        (Some((_, i)), _) => Some(i),
+        (None, Some((_, i))) => Some(i),
+        (None, None) => None,
+    }
+}
+
+/// The word of `unit` a click at `(x, y)` means: the nearest of its objects' run rects, ties to the
+/// lower object id. No tolerance: a click inside a box always has an answer as long as the box has
+/// words, even in its blank space. `None` only when the unit has no objects with a run.
+pub fn seed_in_unit(pb: &PageBlocks, unit: &EditUnit, x: f32, y: f32) -> Option<usize> {
+    if !x.is_finite() || !y.is_finite() {
+        return None;
+    }
+    let mut best: Option<(f32, usize)> = None;
+    for &object in &unit.objects {
+        let Some(run) = pb.runs.get(&object) else { continue };
+        let r = normalised(&run.rect);
+        let dx = (r.left - x).max(x - r.right).max(0.0);
+        let dy = (r.top - y).max(y - r.bottom).max(0.0);
+        keep_min(&mut best, (dx.hypot(dy), object));
+    }
+    best.map(|(_, object)| object)
+}
+
+/// The block of editor lines `unit` stands for: the piece as the detector made it, or one line over
+/// just a cell's words.
+pub fn unit_block(pb: &PageBlocks, unit: &EditUnit) -> Option<Block> {
+    if !unit.cell {
+        return piece_block(pb, unit.block, unit.from, unit.to);
+    }
+    let block = pb.blocks.get(unit.block)?;
+    let original = block.lines.get(unit.from)?;
+    if unit.to != unit.from + 1 {
+        return None;
+    }
+    let rect = unit.rect;
+    let line = Line {
+        objects: unit.objects.clone(),
+        outlined: Vec::new(),
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        baseline: original.baseline,
+    };
+    Some(Block {
+        lines: vec![line],
+        starts_because: block.starts_because,
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+    })
 }
 
 /// The lines of block `block`, in order, none dropped (an empty list for an unknown block).
