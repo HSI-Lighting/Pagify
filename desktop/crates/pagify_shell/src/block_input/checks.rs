@@ -484,8 +484,8 @@ pub fn cells_of_line(pb: &PageBlocks, objects: &[usize]) -> Vec<Vec<usize>> {
 /// blocks of at most [`CELL_ROW_MAX_LINES`] lines are judged; a frozen line is never written, so it is
 /// not either. Measured on 55 real pages (quotations, purchase orders, invoices, a lux report, datasheets),
 /// against two hand-labelled truths: of the 22 blocks on the quotation, purchase-order and invoice pages
-/// that put cells of one row into one line, 19 were opened by the app and now all 22 are refused (the click
-/// then opens the one word, as it always did); no block that the labelers call one block is lost to it
+/// that put cells of one row into one line, 19 were opened by the app and now all 22 are refused (Edit
+/// Text then boxes and opens each cell of the row on its own: `edit_units`); no block that the labelers call one block is lost to it
 /// (the numbered terms are exempt, see below) and the datasheet loses no paragraph. A list item's own number ([`is_list_marker`]) stands apart from its words and is exempt.
 pub(super) fn c17_not_a_row_of_cells(cx: &Ctx) -> Result<(), String> {
     if cx.specs.len() > CELL_ROW_MAX_LINES {

@@ -12610,6 +12610,33 @@ impl PagifyApp {
         self.pick_paragraph(page, lines, twins, &runs, &pb.faces, &pb.styles, &pb.shapes)
     }
 
+    /// **One cell of a row the checks refused**, as a one-line paragraph over just its words.
+    ///
+    /// The box over the page is that cell ([`block_input::EditUnit`]), so the editor a click opens has
+    /// to be the same thing — the whole paragraph above is exactly what C17 refused to write, because
+    /// retyping it would run the cells together. Everything else is [`Self::open_block`]'s path: the
+    /// same invariants, the same twins, the same editor.
+    fn open_cell(&mut self, page: usize, pb: &PageBlocks, unit: usize) -> Result<String, String> {
+        let cell = pb.units.get(unit).ok_or_else(|| format!("unit {unit} is not on the page"))?;
+        let block = block_input::unit_block(pb, cell)
+            .ok_or_else(|| format!("cell {unit} of block {} is not there", cell.block))?;
+        block_input::check_block_invariants(pb, &block)?;
+        let specs = block_input::editor_lines_of(pb, &block);
+        let twins: Vec<Vec<usize>> = specs.iter().map(|spec| spec.twins.clone()).collect();
+        let lines: Vec<ParagraphLine> = specs
+            .into_iter()
+            .map(|spec| ParagraphLine {
+                objects: spec.objects,
+                rect: spec.rect,
+                frozen: spec.frozen,
+                follows_drawn: false,
+            })
+            .collect();
+        let runs: Vec<pdf_core::document::TextRun> =
+            lines.iter().flat_map(|line| &line.objects).filter_map(|o| pb.runs.get(o).cloned()).collect();
+        self.pick_paragraph(page, lines, twins, &runs, &pb.faces, &pb.styles, &pb.shapes)
+    }
+
     /// Open an editor over `lines` — a paragraph already decided, whether by
     /// the detector ([`Self::open_block`]) or by a person
     /// ([`Self::open_joined_editor`]) — every line's own text joined with

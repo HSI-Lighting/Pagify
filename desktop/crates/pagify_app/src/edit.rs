@@ -20,7 +20,9 @@ use pdf_core::document::Color;
 /// blocks it came from when the paragraph-aware path produced them), or the
 /// "nothing written here" message `no_text_here` already composed.
 enum PickRun {
-    Run(Option<std::rc::Rc<PageBlocks>>, pdf_core::document::TextRun),
+    /// The page blocks it came from (when the paragraph-aware path produced them), the run itself, and
+    /// the [`block_input::EditUnit`] the click landed in, if any.
+    Run(Option<std::rc::Rc<PageBlocks>>, pdf_core::document::TextRun, Option<usize>),
     NoText(String),
 }
 
@@ -53,10 +55,11 @@ impl crate::PagifyApp {
     ///    — step 1 is made on its text objects read once ([`Self::light_page`]),
     ///    steps 3 and 4 are skipped, and the click opens the word alone, without
     ///    the picture or the font the other clicks fetch;
-    /// 1. the text object under the point ([`block_input::pick_seed`], over
-    ///    every text object with area on the page, with a few points of slack
-    ///    because the target is a few pixels tall) — none: a word drawn as
-    ///    outlines, else why there is nothing;
+    /// 1. the **box** under the point first ([`block_input::unit_at`], the same list the hover draws,
+    ///    then the nearest word of that box) — so a click anywhere inside a box opens it, blank space
+    ///    included; failing that the text object under the point ([`block_input::pick_seed`], over
+    ///    every text object with area on the page, with a few points of slack because the target is a
+    ///    few pixels tall) — none: a word drawn as outlines, else why there is nothing;
     /// 2. rotated text is refused;
     /// 3. a paragraph the person **joined by hand** overrides everything
     ///    below — after it has been checked against the page
@@ -68,8 +71,10 @@ impl crate::PagifyApp {
     ///    damage) **and the clicked words are not on a line the page draws part
     ///    of as shapes** (such a line is never written, so a box over it could not
     ///    change what was clicked);
-    /// 5. the one run, as the tool always did — with a sentence at the head of the
-    ///    message saying why, when it is a paragraph that did not open.
+    /// 5. a **cell** of a row the checks refused ([`block_input::EditUnit::cell`]) opens as one line
+    ///    over just its own words — the box the hover showed — and otherwise the one run, as the tool
+    ///    always did — with a sentence at the head of the message saying why, when it is a paragraph
+    ///    that did not open.
     pub(crate) fn pick_text_run_traced(
         &mut self,
         page: usize,
@@ -89,9 +94,9 @@ impl crate::PagifyApp {
         // froze the whole window for seconds (and, at 877 000 shapes, for tens of
         // seconds) with nothing on screen to say why.
         let heavy = self.page_weight(page).filter(page_is_heavy);
-        let (pb, run): (Option<std::rc::Rc<PageBlocks>>, pdf_core::document::TextRun) =
+        let (pb, run, unit): (Option<std::rc::Rc<PageBlocks>>, pdf_core::document::TextRun, Option<usize>) =
             match self.pick_run_under(page, x, y, at, trace)? {
-                PickRun::Run(pb, run) => (pb, run),
+                PickRun::Run(pb, run, unit) => (pb, run, unit),
                 PickRun::NoText(said) => return Ok(said),
             };
         let unreadable = run.text.trim().is_empty();
@@ -181,7 +186,7 @@ impl crate::PagifyApp {
         let mut alone: Option<&str> = heavy.map(|_| "this page is very large, so its paragraphs are not read");
         let mut seed_is_drawn_lettering = false;
         if let Some(pb) = pb.as_ref().filter(|_| !unreadable && run.color.a != 0) {
-            let found = self.try_open_block(page, pb, &run, trace);
+            let found = self.try_open_block(page, pb, &run, unit, trace);
             if let Some(message) = found.opened {
                 return Ok(message);
             }
@@ -366,8 +371,58 @@ impl crate::PagifyApp {
         page: usize,
         pb: &PageBlocks,
         run: &pdf_core::document::TextRun,
+        unit: Option<usize>,
         trace: &mut PickTrace,
     ) -> BlockOpen {
+        // **A cell of a row the checks refused opens on its own.** The box over the page is the cell,
+        // so a click in it must open that cell — not one letter of the paragraph the row was cut out
+        // of. One object is left to the ordinary single-run path, which opens it with its own message.
+        if let Some(index) = unit {
+            if let Some(cell) = pb.units.get(index).filter(|unit| unit.cell) {
+                if cell.objects.len() > 1 {
+                    match self.open_cell(page, pb, index) {
+                        Ok(message) => {
+                            trace.path = PickPath::Cell;
+                            return BlockOpen { opened: Some(message), alone: None, seed_is_drawn_lettering: false };
+                        }
+                        Err(why) => {
+                            self.recording_state.session_log.record(
+                                "pick-note",
+                                &format!(
+                                    "cell {index} of block {} not opened ({why}); picking the run alone",
+                                    cell.block
+                                ),
+                            );
+                            return BlockOpen {
+                                opened: None,
+                                alone: Some("the words could not be read safely"),
+                                seed_is_drawn_lettering: false,
+                            };
+                        }
+                    }
+                }
+                // One object is the word itself, and opens as it always did. A row the checks refused
+                // for C17 needs no explanation — the box showed exactly that cell. Any *other* refusal
+                // still does: the paragraph the person expected did not open, and saying so is the
+                // point of the guard.
+                if let Err(why) = block_input::check_editor_invariants(pb, cell.block) {
+                    if !why.starts_with("C17:") {
+                        trace.block_facts(pb, cell.block);
+                        self.recording_state.session_log.record(
+                            "pick-note",
+                            &format!("block {} not opened ({why}); picking the run alone", cell.block),
+                        );
+                        return BlockOpen {
+                            opened: None,
+                            alone: Some("the block could not be read safely"),
+                            seed_is_drawn_lettering: false,
+                        };
+                    }
+                }
+                return BlockOpen { opened: None, alone: None, seed_is_drawn_lettering: false };
+            }
+        }
+
         let mut alone: Option<&'static str> = None;
         let mut seed_is_drawn_lettering = false;
             if let Some(&(block, line)) = pb.by_object.get(&run.object) {
@@ -434,7 +489,7 @@ impl crate::PagifyApp {
         // **One read of the page for the whole click**, cached — see
         // `page_blocks`. If it cannot be made, the tool still works on the
         // run alone.
-        let (pb, run) =
+        let (pb, run, unit) =
             if let Some(weight) = heavy {
                 self.recording_state.session_log.record(
                     "pick-note",
@@ -449,7 +504,7 @@ impl crate::PagifyApp {
                     Some((run, rule)) => {
                         trace.seed = Some(run.object);
                         trace.rule = Some(rule);
-                        (None, run)
+                        (None, run, None)
                     }
                     None => return self.no_text_here(page, at, trace).map(PickRun::NoText),
                 }
@@ -472,16 +527,30 @@ impl crate::PagifyApp {
                     // the other. Asking somebody to land inside a five-pixel
                     // band is not a reasonable thing to ask, and missing it
                     // looks exactly like the tool being broken.
-                    let Some((seed, rule)) = block_input::pick_seed(&pb, x, y, HIT_TOLERANCE_PT as f32)
-                    else {
-                        return self.no_text_here(page, at, trace).map(PickRun::NoText);
+                    //
+                    // **The box comes first.** What the hover draws is a list of edit units, so a
+                    // click inside one opens that unit — including in its blank space, where no word
+                    // rect is near enough for `pick_seed`. The words are then the nearest of the
+                    // unit's own, so the box that lit and the editor that opens are the same box.
+                    let in_box = block_input::unit_at(&pb.units, x, y, HIT_TOLERANCE_PT as f32)
+                        .and_then(|i| block_input::seed_in_unit(&pb, &pb.units[i], x, y).map(|seed| (i, seed)));
+                    let (seed, unit) = if let Some((i, seed)) = in_box {
+                        trace.seed = Some(seed);
+                        trace.rule = Some(block_input::SeedRule::InBox);
+                        (seed, Some(i))
+                    } else {
+                        let Some((seed, rule)) = block_input::pick_seed(&pb, x, y, HIT_TOLERANCE_PT as f32)
+                        else {
+                            return self.no_text_here(page, at, trace).map(PickRun::NoText);
+                        };
+                        trace.seed = Some(seed);
+                        trace.rule = Some(rule);
+                        (seed, None)
                     };
-                    trace.seed = Some(seed);
-                    trace.rule = Some(rule);
                     let Some(run) = pb.runs.get(&seed).cloned() else {
                         return Err("no text there — click on some words.".into());
                     };
-                    (Some(pb), run)
+                    (Some(pb), run, unit)
                 }
                 Err(why) => {
                     self.recording_state.session_log.record(
@@ -492,14 +561,14 @@ impl crate::PagifyApp {
                         Some((run, rule)) => {
                             trace.seed = Some(run.object);
                             trace.rule = Some(rule);
-                            (None, run)
+                            (None, run, None)
                         }
                         None => return self.no_text_here(page, at, trace).map(PickRun::NoText),
                     }
                 }
             }
             };
-        Ok(PickRun::Run(pb, run))
+        Ok(PickRun::Run(pb, run, unit))
     }
 
 

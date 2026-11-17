@@ -424,7 +424,7 @@ impl crate::PagifyApp {
     /// take is something to see rather than to find out: the paragraph under
     /// the pointer drawn stronger, and a run of lines the page draws as shapes
     /// — which no click can open — dashed and grey, the gap in the paragraph
-    /// it cut. The boxes are [`block_input::piece_boxes`]: the very pieces a
+    /// it cut. The boxes are [`block_input::edit_units`]: the very units a
     /// click opens, so they cannot disagree with it.
     ///
     /// Only with Edit Text in hand, and only on the page the pointer is over:
@@ -493,25 +493,31 @@ impl crate::PagifyApp {
         // the pointer is for the editor.
         let editing = self.tab().edit.editing_run.is_some();
         let under = view.to_page(pointer);
-        let boxes = pagify_shell::block_input::piece_boxes(&blocks);
-        let inside = |b: &pagify_shell::block_input::PieceBox| {
-            let (x, y) = (under.x as f32, under.y as f32);
-            x >= b.rect.left && x <= b.rect.right && y >= b.rect.top && y <= b.rect.bottom
+        let lit = if editing {
+            None
+        } else {
+            pagify_shell::block_input::unit_at(
+                &blocks.units,
+                under.x as f32,
+                under.y as f32,
+                HIT_TOLERANCE_PT as f32,
+            )
+            .filter(|&i| !blocks.units[i].drawn)
         };
-        let lit = if editing { None } else { boxes.iter().position(|b| !b.drawn && inside(b)) };
 
         // A little air, so the box is not struck through by the first and last lines' own ink.
         const AIR_PT: f32 = 2.0;
-        boxes
+        blocks
+            .units
             .iter()
             .enumerate()
-            .map(|(i, piece)| {
+            .map(|(i, unit)| {
                 let corner = |x: f32, y: f32| view.to_screen(AppPoint::new(x as f64, y as f64));
                 let outline = egui::Rect::from_min_max(
-                    corner(piece.rect.left - AIR_PT, piece.rect.top - AIR_PT),
-                    corner(piece.rect.right + AIR_PT, piece.rect.bottom + AIR_PT),
+                    corner(unit.rect.left - AIR_PT, unit.rect.top - AIR_PT),
+                    corner(unit.rect.right + AIR_PT, unit.rect.bottom + AIR_PT),
                 );
-                let style = if piece.drawn {
+                let style = if unit.drawn {
                     BoxStyle::Drawn
                 } else if Some(i) == lit {
                     BoxStyle::Lit

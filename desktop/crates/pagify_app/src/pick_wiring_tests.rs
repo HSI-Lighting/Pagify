@@ -475,7 +475,8 @@ fn every_click_writes_exactly_one_content_free_pick_line_to_the_session_log() {
     assert!(outcome.is_ok(), "{outcome:?}");
     assert_eq!(field(&line, "path"), "block", "{line}");
     assert_eq!(field(&line, "seed"), middle.object.to_string(), "{line}");
-    assert_eq!(field(&line, "rule"), "exact", "{line}");
+    // The box under the point answers first now: the middle of a paragraph's run is inside its unit.
+    assert_eq!(field(&line, "rule"), "in-box", "{line}");
     assert_eq!((field(&line, "lines"), field(&line, "objects"), field(&line, "frozen")), ("8", "8", "[]"), "{line}");
     assert_eq!(field(&line, "cache"), "miss", "the first click on a page reads it: {line}");
     assert!(line.starts_with("page 1 click=("), "{line}");
@@ -1824,4 +1825,83 @@ fn a_new_line_of_letters_the_documents_font_has_stays_in_the_documents_font() {
         .split_whitespace()
         .collect();
     assert_eq!(line, "Chipanddriver", "the new line is not on the page");
+}
+
+const LUX_REPORT: &str = r"C:\Users\hsili\Desktop\Pagify_EditText_Evidence\LUX REPORT -REV.pdf";
+
+fn norm(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// **A row of cells opens the cell under the click, and the lit box is that cell.**
+///
+/// Page 5 of the 2026-11-17 LUX report writes "Luminaire Reference: LT-09" one letter per text object,
+/// in one detector block with "1 " and "13 x " beside it. The checks refuse the block as a paragraph
+/// (an 18.9 pt gap, then 12.7), and the old click fell back to one letter ("L"). Now the box the
+/// hover draws is the cell and the click opens the whole of it.
+#[test]
+fn lux_report_a_row_of_cells_opens_the_cell_under_the_click_and_its_box_says_so() {
+    use crate::canvas::BoxStyle;
+    if !std::path::Path::new(LUX_REPORT).is_file() {
+        eprintln!("skipping: the LUX report is not on this machine");
+        return;
+    }
+    let mut app = PagifyApp::new(Some(LUX_REPORT));
+    app.submit("edittext");
+    let view = crate::overlay::PageView { origin: egui::Pos2::new(0.0, 0.0), scale: 1.0 };
+    let screen = |at: (f64, f64)| view.to_screen(AppPoint { x: at.0, y: at.1 });
+
+    let boxes = app.paragraph_boxes(4, view, screen((117.0, 270.7)));
+    let lit: Vec<_> = boxes.iter().filter(|(_, s)| *s == BoxStyle::Lit).collect();
+    assert_eq!(lit.len(), 1, "exactly one box is under the pointer: {lit:?}");
+    assert!(lit[0].0.contains(screen((193.9, 268.9))), "the lit box stops short of the cell's last letter: {:?}", lit[0].0);
+    assert!(!lit[0].0.contains(screen((94.9, 269.2))), "the lit box runs back over the previous cell: {:?}", lit[0].0);
+
+    app.pick_text_run(4, AppPoint { x: 117.0, y: 270.7 }).expect("the cell was not picked");
+    {
+        let edit = app.tab().edit.editing_run.as_ref().expect("an editor is open");
+        assert_eq!(edit.lines.len(), 1, "a cell is one line: {:?}", edit.lines);
+        let objects = &edit.lines[0].0;
+        assert_eq!(objects.first().copied(), Some(50), "{objects:?}");
+        assert_eq!(objects.last().copied(), Some(75), "{objects:?}");
+        assert!(!objects.contains(&48) && !objects.contains(&49), "the previous cells came along: {objects:?}");
+        assert_eq!(norm(&edit.buffer), "Luminaire Reference: LT-09");
+    }
+
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = "Luminaire Reference: LT-10".to_string();
+    assert!(!app.apply_editing_page(), "the edit was refused: {}", said(&app));
+
+    let mut line: Vec<TextRun> = text_runs(&app, 4)
+        .into_iter()
+        .filter(|r| r.rect.top >= 265.0 && r.rect.top <= 275.0)
+        .collect();
+    line.sort_by(|a, b| a.rect.left.total_cmp(&b.rect.left));
+    assert_eq!(
+        norm(&line.iter().map(|r| r.text.as_str()).collect::<String>()),
+        "1 13 x Luminaire Reference: LT-10",
+        "the row did not come out as it went in, with only the cell changed"
+    );
+
+    // A fresh app, a different row of the same shape: the cell under the click, whole.
+    let mut fresh = PagifyApp::new(Some(LUX_REPORT));
+    fresh.submit("edittext");
+    let run_112 = text_runs(&fresh, 4).into_iter().find(|r| r.object == 112).expect("object 112 is on page 5");
+    fresh.pick_text_run(4, centre(&run_112.rect)).expect("the second row's cell was not picked");
+    assert_eq!(norm(&fresh.tab().edit.editing_run.as_ref().expect("editing").buffer), "Luminaire Reference: LT-02");
+}
+
+/// **A click in a box's blank space opens that box.** 9 pt right of "Equipment" is inside the box the
+/// hover draws for those two lines, and no word rect is within `HIT_TOLERANCE_PT` of it.
+#[test]
+fn lux_report_a_click_in_a_boxes_blank_space_opens_that_box() {
+    if !std::path::Path::new(LUX_REPORT).is_file() {
+        eprintln!("skipping: the LUX report is not on this machine");
+        return;
+    }
+    let mut app = PagifyApp::new(Some(LUX_REPORT));
+    app.submit("edittext");
+    app.pick_text_run(4, AppPoint { x: 170.0, y: 293.0 }).expect("a click in the box's blank space said there is no text");
+    let edit = app.tab().edit.editing_run.as_ref().expect("an editor is open");
+    let objects: Vec<Vec<usize>> = edit.lines.iter().map(|(objects, _)| objects.clone()).collect();
+    assert_eq!(objects, vec![vec![78], vec![87]], "the box is not the two lines the hover showed: {objects:?}");
 }
