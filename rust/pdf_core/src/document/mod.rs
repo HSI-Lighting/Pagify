@@ -1218,6 +1218,9 @@ pub struct SaveFixups<'a> {
 pub struct SaveFixupReport {
     /// Placed pictures baked into their pages.
     pub pictures: usize,
+    /// Pagify's own ink and filled shapes baked into their pages, under a
+    /// `/PagifyMarks` tag — the marks a preview and every other viewer now shows.
+    pub marks_baked: usize,
     /// Highlights, underlines and ink given an appearance of their own.
     pub marks_drawn: usize,
     /// `/XObject` and `/Font` names taken off pages' resource lists because their drawing no longer

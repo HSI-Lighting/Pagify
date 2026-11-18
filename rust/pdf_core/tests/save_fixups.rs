@@ -199,39 +199,36 @@ fn pixels(doc: &PdfiumDocument) -> Vec<[u8; 3]> {
     out
 }
 
-/// **Foxit's way.** A highlight and an ink stroke saved by Pagify stay marks —
-/// still listed, still removable — and now carry an appearance of their own,
-/// which draws them as Pagify drew them before the save.
+/// **Foxit's way, for the marks that stay marks.** A highlight saved by Pagify
+/// stays a highlight — still listed, still removable — and now carries an
+/// appearance of its own, which draws it as Pagify drew it before the save.
+///
+/// **Ink is not checked here any more.** The owner's decision of 2026-11-18 is
+/// that Pagify's own ink goes into the page at Save, which
+/// `a_rectangle_drawn_in_pagify_is_part_of_the_page_after_save` proves.
 #[test]
-fn highlights_and_ink_stay_marks_and_carry_their_appearance() {
+fn a_highlight_stays_a_mark_and_carries_its_appearance() {
     let Some(_) = skip_without_pdfium() else { return };
     let _lock = serial();
 
     let mut doc = open("two-column.pdf");
     let yellow = Color { r: 255, g: 230, b: 0, a: 255 };
-    let blue = Color { r: 0, g: 0, b: 255, a: 255 };
     doc.add_annotation(0, &Annotation::Highlight {
         rects: vec![Rect { left: 100.0, top: 200.0, right: 300.0, bottom: 220.0 }],
         color: yellow,
     })
     .expect("highlight");
-    doc.add_annotation(0, &Annotation::Ink {
-        strokes: vec![vec![Point { x: 100.0, y: 300.0 }, Point { x: 200.0, y: 350.0 }, Point { x: 300.0, y: 300.0 }]],
-        color: blue,
-        width: 3.0,
-    })
-    .expect("ink");
 
     let finder = no_face;
     let mut saved = Vec::new();
     let report = doc
         .save_full_copy_with_fixups(&mut saved, &SaveFixups { find_face: &finder })
         .expect("save");
-    assert_eq!(report.marks_drawn, 2, "the marks were not given an appearance");
+    assert_eq!(report.marks_drawn, 1, "the highlight was not given an appearance");
 
     let file = File::parse(&saved).expect("a readable file");
     let Some(Ok(Object::Array(annots))) = page(&file).get(b"Annots").map(|a| file.resolve(a)) else {
-        panic!("the marks are gone")
+        panic!("the mark is gone")
     };
     for annot in &annots {
         let annot = file.resolve(annot).expect("a mark");
@@ -241,7 +238,6 @@ fn highlights_and_ink_stay_marks_and_carry_their_appearance() {
     let reopened = PdfiumDocument::open_bytes(saved, None).expect("reopen");
     let marks = reopened.annotations(0).expect("marks");
     assert!(marks.iter().any(|m| matches!(m.annotation, Annotation::Highlight { .. })), "no highlight: {marks:?}");
-    assert!(marks.iter().any(|m| matches!(m.annotation, Annotation::Ink { .. })), "no ink: {marks:?}");
 
     let (before, after) = (pixels(&doc), pixels(&reopened));
     let differ = before.iter().zip(&after).filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| x.abs_diff(*y) > 48)).count();
@@ -939,6 +935,314 @@ fn a_looping_appearance_does_not_stop_the_save() {
     let mut saved = Vec::new();
     doc.save_full_copy_with_fixups(&mut saved, &SaveFixups { find_face: &finder })
         .expect("a looping appearance must not stop the save");
+}
+
+// -- Task 9: Pagify's own marks go into the page ------------------------------
+
+/// The drawing a page's content streams hold, decoded, one after another.
+fn page_drawing(file: &File<'_>, page: &pdf_core::pdf::Dict) -> String {
+    let Some(contents) = page.get(b"Contents") else { return String::new() };
+    let items = match file.resolve(contents).expect("contents") {
+        Object::Array(items) => items,
+        Object::Stream(..) => vec![contents.clone()],
+        _ => return String::new(),
+    };
+    let mut out = String::new();
+    for item in items {
+        if let Object::Stream(dict, range) = file.resolve(&item).expect("a content stream") {
+            out.push_str(&String::from_utf8_lossy(&pdf_core::pdf::content::decode(&dict, &file.bytes()[range]).expect("decodes")));
+        }
+    }
+    out
+}
+
+/// The `/Subtype` of every annotation the page still lists.
+fn annotation_subtypes(file: &File<'_>, page: &pdf_core::pdf::Dict) -> Vec<String> {
+    let Some(annots) = page.get(b"Annots") else { return Vec::new() };
+    let Object::Array(items) = file.resolve(annots).expect("annots") else { return Vec::new() };
+    items
+        .iter()
+        .filter_map(|item| file.resolve(item).ok())
+        .filter_map(|object| object.as_dict().cloned())
+        .filter_map(|annot| annot.get(b"Subtype").and_then(Object::as_name).map(|name| String::from_utf8_lossy(name).to_string()))
+        .collect()
+}
+
+/// Every page's dict, in page order.
+fn all_pages(file: &File<'_>) -> Vec<pdf_core::pdf::Dict> {
+    fn walk(file: &File<'_>, node: &Object, out: &mut Vec<pdf_core::pdf::Dict>) {
+        let Some(dict) = node.as_dict() else { return };
+        if dict.get(b"Type").and_then(Object::as_name) == Some(b"Page") {
+            out.push(dict.clone());
+            return;
+        }
+        if let Some(Ok(Object::Array(kids))) = dict.get(b"Kids").map(|k| file.resolve(k)) {
+            for kid in kids {
+                if let Ok(kid) = file.resolve(&kid) {
+                    walk(file, &kid, out);
+                }
+            }
+        }
+    }
+    let root = file.resolve(file.trailer().get(b"Root").expect("root")).expect("catalogue");
+    let pages = file.resolve(root.as_dict().and_then(|d| d.get(b"Pages")).expect("pages")).expect("tree");
+    let mut all = Vec::new();
+    walk(file, &pages, &mut all);
+    all
+}
+
+/// Every page's annotations of one subtype, across the file.
+fn annotations_of(file: &File<'_>, wanted: &[u8]) -> usize {
+    all_pages(file)
+        .iter()
+        .map(|page| annotation_subtypes(file, page).iter().filter(|kind| kind.as_bytes() == wanted).count())
+        .sum()
+}
+
+/// The pink Pagify writes a markup rectangle in.
+fn pink() -> Color {
+    Color { r: 255, g: 92, b: 138, a: 255 }
+}
+
+/// The closed five-point stroke `commit_page` writes for a rectangle: pink, 1 pt.
+fn ink_rectangle(left: f32, top: f32, right: f32, bottom: f32) -> Annotation {
+    Annotation::Ink {
+        strokes: vec![vec![
+            Point { x: left, y: top },
+            Point { x: right, y: top },
+            Point { x: right, y: bottom },
+            Point { x: left, y: bottom },
+            Point { x: left, y: top },
+        ]],
+        color: pink(),
+        width: 1.0,
+    }
+}
+
+/// How many pixels are the rectangle's pink — the stroke itself, within a
+/// rendering's own antialiasing.
+fn pink_pixels(bitmap: &pdf_core::render::bitmap::Bitmap) -> usize {
+    let mut count = 0;
+    for y in 0..bitmap.height as usize {
+        for x in 0..bitmap.width as usize {
+            let p = &bitmap.data[y * bitmap.stride + x * 4..y * bitmap.stride + x * 4 + 4];
+            let (r, g, b) = match bitmap.order {
+                PixelOrder::Bgra => (p[2], p[1], p[0]),
+                PixelOrder::Rgba => (p[0], p[1], p[2]),
+            };
+            if r > 200 && (60..140).contains(&g) && (100..180).contains(&b) {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+fn render(doc: &PdfiumDocument, scale: f32, annotations: bool) -> pdf_core::render::bitmap::Bitmap {
+    doc.render_page_to_bitmap(0, &RenderRequest { scale, render_annotations: annotations, ..Default::default() })
+        .expect("render")
+}
+
+/// The largest difference on any channel between two renders of the same page,
+/// and how many pixels differ at all.
+fn render_difference(a: &pdf_core::render::bitmap::Bitmap, b: &pdf_core::render::bitmap::Bitmap) -> (usize, u8) {
+    assert_eq!((a.width, a.height, a.stride), (b.width, b.height, b.stride), "the page changed size");
+    let mut differing = 0;
+    let mut largest = 0u8;
+    for y in 0..a.height as usize {
+        for x in 0..a.width as usize {
+            let pa = &a.data[y * a.stride + x * 4..y * a.stride + x * 4 + 4];
+            let pb = &b.data[y * b.stride + x * 4..y * b.stride + x * 4 + 4];
+            let worst = (0..4).map(|c| pa[c].abs_diff(pb[c])).max().unwrap_or(0);
+            if worst > 0 {
+                differing += 1;
+                largest = largest.max(worst);
+            }
+        }
+    }
+    (differing, largest)
+}
+
+/// **The owner's decision, 2026-11-18.** A rectangle drawn in Pagify looks the
+/// same in every viewer after Save: it is drawn into the page, under a
+/// `/PagifyMarks` tag, and leaves the page's `/Annots`.
+#[test]
+fn a_rectangle_drawn_in_pagify_is_part_of_the_page_after_save() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("two-column.pdf");
+    doc.add_annotation(0, &ink_rectangle(100.0, 200.0, 300.0, 400.0)).expect("the rectangle");
+    let annotations = doc.annotation_count(0).expect("count");
+    let before = render(&doc, 1.0, true);
+    assert!(pink_pixels(&before) > 0, "setup: the rectangle is not drawn at all");
+
+    let finder = no_face;
+    let mut saved = Vec::new();
+    let report = doc
+        .save_full_copy_with_fixups(&mut saved, &SaveFixups { find_face: &finder })
+        .expect("the full save");
+    assert_eq!(report.marks_baked, 1, "the rectangle was not baked into the page");
+    assert_eq!(doc.annotation_count(0).expect("count"), annotations, "the open document changed");
+
+    let file = File::parse(&saved).expect("a readable file");
+    let page = page_dict(&file, 0);
+    assert!(annotation_subtypes(&file, &page).iter().all(|kind| kind != "Ink"), "the rectangle is still an annotation");
+    let drawing = page_drawing(&file, &page);
+    assert!(drawing.contains("/PagifyMarks BMC"), "the drawing is not tagged:\n{drawing}");
+
+    let baked = PdfiumDocument::open_bytes(saved, None).expect("the saved file opens");
+    let as_page_content = render(&baked, 1.0, false);
+    assert!(pink_pixels(&as_page_content) > 0, "a renderer that draws only the page does not show the rectangle");
+    let after = render(&baked, 1.0, true);
+    let (differing, largest) = render_difference(&before, &after);
+    eprintln!("Task 9 rectangle: {differing} of {} pixels differ, largest channel difference {largest}", before.data.len() / 4);
+    assert_eq!((differing, largest), (0, 0), "the drawing looks different after the save");
+}
+
+/// A filled shape and its arrowheads are `Annotation::Fill`: a Stamp whose
+/// appearance is a form, not a picture. They go into the page with the ink.
+#[test]
+fn a_filled_shape_and_its_arrowheads_go_into_the_page_too() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("two-column.pdf");
+    let ring = vec![
+        Point { x: 100.0, y: 500.0 },
+        Point { x: 200.0, y: 500.0 },
+        Point { x: 200.0, y: 560.0 },
+        Point { x: 100.0, y: 560.0 },
+        Point { x: 100.0, y: 500.0 },
+    ];
+    doc.add_annotation(0, &Annotation::Fill { outline: ring, fill_color: pink(), stroke_color: pink(), width: 1.0 })
+        .expect("the filled shape");
+    let annotations = doc.annotation_count(0).expect("count");
+    let before = render(&doc, 1.0, true);
+
+    let finder = no_face;
+    let mut saved = Vec::new();
+    let report = doc
+        .save_full_copy_with_fixups(&mut saved, &SaveFixups { find_face: &finder })
+        .expect("the full save");
+    assert_eq!(report.marks_baked, 1, "the filled shape was not baked into the page");
+    assert_eq!(doc.annotation_count(0).expect("count"), annotations, "the open document changed");
+
+    let file = File::parse(&saved).expect("a readable file");
+    let page = page_dict(&file, 0);
+    assert!(annotation_subtypes(&file, &page).iter().all(|kind| kind != "Stamp"), "the fill is still an annotation");
+    assert!(page_drawing(&file, &page).contains("/PagifyMarks BMC"), "the drawing is not tagged");
+
+    let baked = PdfiumDocument::open_bytes(saved, None).expect("the saved file opens");
+    assert!(pink_pixels(&render(&baked, 1.0, false)) > 0, "a renderer that draws only the page does not show the fill");
+    let (differing, largest) = render_difference(&before, &render(&baked, 1.0, true));
+    eprintln!("Task 9 fill: {differing} of {} pixels differ, largest channel difference {largest}", before.data.len() / 4);
+    assert_eq!((differing, largest), (0, 0), "the filled shape looks different after the save");
+}
+
+/// **Not ours to fix in place.** Highlights, notes and links stay annotations,
+/// and so does another app's ink — `/PagifyColor` is what says a mark is
+/// Pagify's own.
+#[test]
+fn highlights_notes_links_and_other_apps_ink_stay_marks() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let foreign = "<< /Type /Annot /Subtype /Ink /Rect [400 100 500 150] /InkList [[420 110 480 140]] /C [0 0 1] /F 4 >>";
+    let input = harness::hand_built_pdf(
+        &[harness::HandPage { content: "", resources: "<< >>", extra: "/Annots [5 0 R]" }],
+        &[foreign],
+    );
+    let mut doc = PdfiumDocument::open_bytes(input, None).expect("open");
+    doc.add_annotation(0, &Annotation::Highlight {
+        rects: vec![Rect { left: 60.0, top: 100.0, right: 200.0, bottom: 120.0 }],
+        color: Color { r: 255, g: 235, b: 59, a: 255 },
+    })
+    .expect("highlight");
+    doc.add_annotation(0, &Annotation::Note {
+        rect: Rect { left: 60.0, top: 140.0, right: 80.0, bottom: 160.0 },
+        contents: "look here".into(),
+        color: Color { r: 255, g: 200, b: 0, a: 255 },
+    })
+    .expect("note");
+    doc.add_annotation(0, &Annotation::Link {
+        rect: Rect { left: 60.0, top: 180.0, right: 200.0, bottom: 200.0 },
+        uri: "https://example.com".into(),
+    })
+    .expect("link");
+    let annotations = doc.annotation_count(0).expect("count");
+
+    let finder = no_face;
+    let mut saved = Vec::new();
+    let report = doc
+        .save_full_copy_with_fixups(&mut saved, &SaveFixups { find_face: &finder })
+        .expect("the full save");
+    assert_eq!(report.marks_baked, 0, "a mark that is not ours was baked into the page");
+
+    let file = File::parse(&saved).expect("a readable file");
+    let page = page_dict(&file, 0);
+    let kinds = annotation_subtypes(&file, &page);
+    assert_eq!(doc.annotation_count(0).expect("count"), annotations, "the open document changed");
+    for wanted in ["Highlight", "Text", "Link", "Ink"] {
+        assert!(kinds.iter().any(|kind| kind == wanted), "the {wanted} is gone: {kinds:?}");
+    }
+    assert!(annotations_of(&file, b"Ink") == 1, "another app's ink was baked in");
+    assert!(!String::from_utf8_lossy(&saved).contains("/PagifyMarks"), "something was tagged");
+}
+
+/// A placed picture is baked as it was, and **not tagged**: it is a page
+/// picture on purpose.
+#[test]
+fn a_placed_picture_is_baked_as_before_and_untagged() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("two-column.pdf");
+    place_picture(&mut doc, Rect { left: 100.0, top: 200.0, right: 180.0, bottom: 240.0 });
+
+    let finder = no_face;
+    let mut saved = Vec::new();
+    let report = doc
+        .save_full_copy_with_fixups(&mut saved, &SaveFixups { find_face: &finder })
+        .expect("the full save");
+    assert_eq!(report.pictures, 1, "the picture was not baked");
+    assert_eq!(report.marks_baked, 0, "a picture was counted as a mark");
+    assert!(!String::from_utf8_lossy(&saved).contains("/PagifyMarks"), "a picture was tagged as a mark");
+}
+
+/// **The owner's own three rectangles, through the save path itself.** Every
+/// viewer sees them once they are part of the page; a reader that draws only
+/// the page draws them as the file does with its marks.
+#[test]
+fn on_the_owners_rectangles_every_viewer_sees_them() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let path = r"C:\Users\hsili\Desktop\Pagify_EditText_Evidence\PRISMA-3-rectangles.pdf";
+    if !std::path::Path::new(path).is_file() {
+        eprintln!("skipping: {path} is not on this machine");
+        return;
+    }
+    let input = std::fs::read(path).expect("read the owner's file");
+    let out = pdf_core::pdf::flatten::flatten_for_save(&input).expect("bake the marks");
+    assert_eq!(out.marks, 3, "the three rectangles were not all baked");
+    assert_eq!(annotations_of(&File::parse(&out.bytes).expect("a readable file"), b"Ink"), 0, "an Ink annotation is left");
+
+    harness::check_with_qpdf(&out.bytes, "prisma-marks");
+
+    let before = PdfiumDocument::open_bytes(input, None).expect("open the input");
+    let after = PdfiumDocument::open_bytes(out.bytes, None).expect("open the baked file");
+    for page in 0..before.page_count() {
+        let drawn_with_marks = before
+            .render_page_to_bitmap(page, &RenderRequest { scale: 0.3, render_annotations: true, ..Default::default() })
+            .expect("render before");
+        let drawn_as_page = after
+            .render_page_to_bitmap(page, &RenderRequest { scale: 0.3, render_annotations: false, ..Default::default() })
+            .expect("render after");
+        let (differing, largest) = render_difference(&drawn_with_marks, &drawn_as_page);
+        eprintln!("PRISMA page {}: {differing} of {} pixels differ, largest channel difference {largest}", page + 1, drawn_with_marks.data.len() / 4);
+        assert!(largest <= 8, "page {} draws differently after baking: {differing} pixels, largest {largest}", page + 1);
+    }
 }
 
 /// **A still-encrypted copy is not pruned.** The save can reach the fix-ups before a rewrite, with

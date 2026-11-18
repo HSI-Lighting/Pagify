@@ -7,9 +7,16 @@
 //! over the page. Readers draw annotations; thumbnail and preview renderers —
 //! WhatsApp's among them — often draw only the page, so the picture shows as the
 //! grey box under it. This puts the annotation's appearance into the page itself:
-//! a placed picture on every Save ([`flatten_pictures`]), every mark on Flatten
-//! ([`flatten_annotations`], after [`draw_appearances`]). Save keeps every other
-//! mark a mark, with an appearance of its own, as Foxit and Acrobat do.
+//! a placed picture and Pagify's own marks on every Save ([`flatten_for_save`]),
+//! every mark on Flatten ([`flatten_annotations`], after [`draw_appearances`]).
+//! Save keeps every other mark a mark, with an appearance of its own, as Foxit
+//! and Acrobat do.
+//!
+//! **Pagify's own marks are tagged `/PagifyMarks`.** A rectangle, line or ink
+//! stroke drawn in Pagify is one everywhere only when it is part of the page;
+//! the tag is what lets a later commit take the drawing out again, since the
+//! geometry that draws it is stored separately. A placed picture is not tagged:
+//! it becomes a page picture on purpose.
 //!
 //! # How a picture is written
 //!
@@ -40,6 +47,10 @@ pub struct Flattened {
     pub pictures: usize,
     /// Annotations put down as forms.
     pub forms: usize,
+    /// Pagify's own marks put down inside a `/PagifyMarks` tag: the ink and
+    /// filled shapes a commit wrote, which the next commit must be able to
+    /// take back out.
+    pub marks: usize,
     /// Marks left as annotations because they carry **no appearance to bake**:
     /// the highlights, underlines and ink PDFium writes are a colour and some
     /// coordinates, and every reader draws them from those. Counted apart from
@@ -52,6 +63,17 @@ pub struct Flattened {
 /// What a flattened annotation's XObject is called on the page: this and the
 /// first number not already taken.
 const NAME_PREFIX: &str = "PgFlat";
+
+/// The tag a Pagify mark's drawing is written under. See [`flatten_for_save`].
+pub(crate) const MARKS_TAG: &str = "PagifyMarks";
+
+/// The key [`set_annotation_colour_key`] records a mark's colour under — and so
+/// the one thing in the file that says a mark is **Pagify's own**. Another
+/// app's ink does not carry it, and is not ours to draw into the page.
+///
+/// `set_annotation_colour_key` and the constant it writes live in
+/// `document::pdfium_doc`, on the writing side; this is the reading side.
+const OWN_MARK: &[u8] = b"PagifyColor";
 
 /// The kinds of annotation that are marks on the page. Everything else — links,
 /// fields, notes, popups, attachments — is something a reader does, not draws.
@@ -134,6 +156,20 @@ fn plan(file: &File<'_>, annot: &Dict) -> std::result::Result<Plan, Skip> {
         return Err(Skip::Other);
     }
     appearance(file, annot).ok_or(Skip::Bare)
+}
+
+/// Whether this annotation is one of Pagify's own marks that Save draws into the
+/// page: its ink, and the filled shapes and arrowheads it writes as a Stamp
+/// drawn as a form. A highlight, a note, a link and another app's ink are not.
+fn pagify_mark(annot: &Dict, plan: &Plan) -> bool {
+    if annot.get(OWN_MARK).is_none() {
+        return false;
+    }
+    match annot.get(b"Subtype") {
+        Some(Object::Name(kind)) if kind.as_slice() == b"Ink" => true,
+        Some(Object::Name(kind)) if kind.as_slice() == b"Stamp" => !plan.picture,
+        _ => false,
+    }
 }
 
 /// The placement of `annot`'s own appearance, when it has one that can be read.
@@ -238,7 +274,7 @@ pub(crate) fn collect_pages(
 
 /// Flatten every page's visible markup annotations into its content.
 pub fn flatten_annotations(bytes: &[u8]) -> Result<Flattened> {
-    flatten(bytes, false)
+    flatten(bytes, What::Everything)
 }
 
 /// Bake only the annotations whose appearance is one picture, and leave every
@@ -249,10 +285,38 @@ pub fn flatten_annotations(bytes: &[u8]) -> Result<Flattened> {
 /// draws only the page leaves it out. A stamp drawn as a form, a highlight, a
 /// note, a link and a form field are not pictures, and stay annotations.
 pub fn flatten_pictures(bytes: &[u8]) -> Result<Flattened> {
-    flatten(bytes, true)
+    flatten(bytes, What::Pictures)
 }
 
-fn flatten(bytes: &[u8], pictures_only: bool) -> Result<Flattened> {
+/// Bake a placed picture **and Pagify's own marks** into their pages.
+///
+/// The owner's decision, 2026-11-18: a rectangle, line, arrow or ink stroke
+/// drawn in Pagify must look the same in every viewer after Save, and only
+/// drawing that is part of the page does. Pictures go down untagged, as
+/// [`flatten_pictures`] writes them; Pagify's own ink and filled shapes are
+/// written inside `/PagifyMarks`, so [`crate::document::DocumentMut::remove_marked_drawing`]
+/// can take the drawing back out when the page's marks are next committed.
+///
+/// Everything else stays an annotation, as it is: highlights, notes, links, form
+/// fields, hidden marks, and any mark without `/PagifyColor`.
+pub fn flatten_for_save(bytes: &[u8]) -> Result<Flattened> {
+    flatten(bytes, What::PicturesAndMarks)
+}
+
+/// What [`flatten`] bakes. Three-way rather than a `pictures_only` flag because
+/// Save now bakes two different sets, and the marks it bakes have to be told
+/// apart from the pictures it bakes.
+#[derive(Clone, Copy, PartialEq)]
+enum What {
+    /// Every visible mark with an appearance — what Flatten does.
+    Everything,
+    /// Only an appearance that is one picture — the ordinary save before marks.
+    Pictures,
+    /// Pictures, and Pagify's own ink and filled shapes, tagged — Save now.
+    PicturesAndMarks,
+}
+
+fn flatten(bytes: &[u8], what: What) -> Result<Flattened> {
     let file = File::parse(bytes)?;
     let root = dict_of(&file, file.trailer().get(b"Root"))
         .ok_or_else(|| PdfError::InvalidArgument("the file has no catalogue".into()))?;
@@ -269,7 +333,7 @@ fn flatten(bytes: &[u8], pictures_only: bool) -> Result<Flattened> {
     };
     let mut replacements: Vec<(u32, Vec<u8>)> = Vec::new();
     let mut extra: Vec<(u32, Vec<u8>)> = Vec::new();
-    let (mut pictures, mut forms, mut bare, mut left) = (0, 0, 0, 0);
+    let (mut pictures, mut forms, mut bare, mut left, mut marks) = (0, 0, 0, 0, 0);
 
     for page in pages {
         let Some(annots) = page.dict.get(b"Annots") else { continue };
@@ -289,16 +353,22 @@ fn flatten(bytes: &[u8], pictures_only: bool) -> Result<Flattened> {
         let mut counter = 0u32;
 
         for item in items {
-            let planned = dict_of(&file, Some(&item)).map_or(Err(Skip::Other), |annot| plan(&file, &annot));
-            let plan = match planned {
-                // In picture mode a stamp drawn as a form stays an annotation:
-                // only an appearance that is one image is baked.
-                Ok(plan) if pictures_only && !plan.picture => {
-                    left += 1;
-                    kept.push(item);
-                    continue;
+            let annot = dict_of(&file, Some(&item));
+            let planned = annot.as_ref().map_or(Err(Skip::Other), |annot| plan(&file, annot));
+            let (plan, tagged) = match planned {
+                Ok(plan) => {
+                    // In picture mode a stamp drawn as a form stays an
+                    // annotation: only an appearance that is one image is baked.
+                    // Save's own mode also takes Pagify's ink and filled shapes.
+                    let tagged = what == What::PicturesAndMarks
+                        && annot.as_ref().is_some_and(|annot| pagify_mark(annot, &plan));
+                    if !plan.picture && !tagged && what != What::Everything {
+                        left += 1;
+                        kept.push(item);
+                        continue;
+                    }
+                    (plan, tagged)
                 }
-                Ok(plan) => plan,
                 Err(skip) => {
                     match skip {
                         Skip::Bare => bare += 1,
@@ -317,11 +387,17 @@ fn flatten(bytes: &[u8], pictures_only: bool) -> Result<Flattened> {
             };
             xobjects.set(name.as_bytes(), plan.target);
             let m = plan.matrix;
-            drawn += &format!(
+            let placed = format!(
                 "q {} {} {} {} {} {} cm /{name} Do Q\n",
                 number(m[0]), number(m[1]), number(m[2]), number(m[3]), number(m[4]), number(m[5])
             );
-            if plan.picture { pictures += 1 } else { forms += 1 }
+            if tagged {
+                drawn += &format!("/{MARKS_TAG} BMC {placed}EMC\n");
+                marks += 1;
+            } else {
+                drawn += &placed;
+                if plan.picture { pictures += 1 } else { forms += 1 }
+            }
         }
         if drawn.is_empty() {
             continue;
@@ -366,10 +442,10 @@ fn flatten(bytes: &[u8], pictures_only: bool) -> Result<Flattened> {
     }
 
     if replacements.is_empty() {
-        return Ok(Flattened { bytes: bytes.to_vec(), pictures, forms, bare, left });
+        return Ok(Flattened { bytes: bytes.to_vec(), pictures, forms, marks, bare, left });
     }
     let bytes = file.rewrite_adding(&replacements, &extra, &Dict::default())?;
-    Ok(Flattened { bytes, pictures, forms, bare, left })
+    Ok(Flattened { bytes, pictures, forms, marks, bare, left })
 }
 
 // ------------------------------------------------------------- appearances --

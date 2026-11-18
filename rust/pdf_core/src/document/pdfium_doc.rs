@@ -6735,8 +6735,10 @@ impl DocumentMut for PdfiumDocument {
         // Highlights, underlines and ink get an appearance of their own, as
         // Foxit and Acrobat write them, and stay marks.
         let marks = crate::pdf::flatten::draw_appearances(&bytes)?;
-        // Fix 2: placed pictures and signature pictures become page pictures.
-        let pictures = crate::pdf::flatten::flatten_pictures(&marks.bytes)?;
+        // Fix 2: placed pictures and signature pictures become page pictures,
+        // and Pagify's own ink and filled shapes go into the page under
+        // `/PagifyMarks` so every viewer shows them the same.
+        let pictures = crate::pdf::flatten::flatten_for_save(&marks.bytes)?;
         // Fix 3: fonts the file names but does not carry.
         let fonts = crate::pdf::fonts::embed_missing(&pictures.bytes, fixups.find_face)?;
 
@@ -6763,6 +6765,7 @@ impl DocumentMut for PdfiumDocument {
         self.written = None;
         Ok(crate::document::SaveFixupReport {
             pictures: pictures.pictures,
+            marks_baked: pictures.marks,
             marks_drawn: marks.drawn,
             resources_dropped,
             objects_dropped,
