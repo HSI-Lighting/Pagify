@@ -609,6 +609,13 @@ fn reachable(
 /// stream with none — old files draw those with the page's names.
 pub fn drop_unused_resources(bytes: &[u8]) -> Result<(Vec<u8>, usize)> {
     let file = File::parse(bytes)?;
+    // **A still-encrypted copy is not pruned.** A save can reach the fix-ups before a rewrite, with
+    // `/Encrypt` in the trailer and ciphertext in the streams; parsing that as drawing could name
+    // nothing — or happen to parse — and take every font and image off its page. Same check
+    // `without_password` makes.
+    if file.trailer().get(b"Encrypt").is_some() {
+        return Ok((bytes.to_vec(), 0));
+    }
     let Some(root) = dict_of(&file, file.trailer().get(b"Root")) else {
         return Ok((bytes.to_vec(), 0));
     };
@@ -787,6 +794,10 @@ fn page_uses(file: &File<'_>, page: &PageAt) -> Option<lift::Used> {
 }
 
 /// Whether an appearance stream (any `/AP` mode or state) has no `/Resources` of its own.
+///
+/// **One level deep, as ISO 32000-1 §12.5.5 defines `/AP`:** each entry is a stream, or a
+/// dictionary whose values are streams. Nothing below that is an appearance, and following a
+/// dictionary that points at itself overflowed the stack — a crash no `unwrap_or_else` can catch.
 fn appearance_without_resources(file: &File<'_>, page: &PageAt) -> bool {
     let Some(annots) = page.dict.get(b"Annots") else { return false };
     let Ok(Object::Array(items)) = file.resolve(annots) else { return false };
@@ -794,17 +805,23 @@ fn appearance_without_resources(file: &File<'_>, page: &PageAt) -> bool {
         let Ok(Object::Dict(annot)) = file.resolve(&item) else { continue };
         let Some(ap) = annot.get(b"AP") else { continue };
         let Ok(Object::Dict(modes)) = file.resolve(ap) else { continue };
-        if modes.0.iter().any(|(_, mode)| appearance_lacks_resources(file, mode)) {
+        if modes.0.iter().any(|(_, mode)| appearance_entry_lacks_resources(file, mode)) {
             return true;
         }
     }
     false
 }
 
-fn appearance_lacks_resources(file: &File<'_>, value: &Object) -> bool {
+/// One `/AP` entry: a stream, or a dictionary of state streams.
+fn appearance_entry_lacks_resources(file: &File<'_>, value: &Object) -> bool {
     match file.resolve(value) {
         Ok(Object::Stream(dict, _)) => dict.get(b"Resources").is_none(),
-        Ok(Object::Dict(states)) => states.0.iter().any(|(_, state)| appearance_lacks_resources(file, state)),
+        Ok(Object::Dict(states)) => states.0.iter().any(|(_, state)| {
+            matches!(
+                file.resolve(state),
+                Ok(Object::Stream(dict, _)) if dict.get(b"Resources").is_none()
+            )
+        }),
         _ => false,
     }
 }

@@ -672,7 +672,10 @@ fn a_form_without_resources_keeps_the_page_names_it_draws_with() {
     let form = "BT /F1 24 Tf 72 700 Td (Kept) Tj ET";
     let objects = [
         stream_object("/Type /XObject /Subtype /Form /BBox [0 0 612 792]", form),
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        // **Courier, not Helvetica.** If the name is taken off the list, PDFium's fallback is
+        // Helvetica, which draws "Kept" at a different width — so the pixels say whether the font
+        // is still named. A Helvetica font here would make the fallback pixel-identical.
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>".to_string(),
     ];
     let refs: Vec<&str> = objects.iter().map(String::as_str).collect();
     let input = harness::hand_built_pdf(
@@ -707,16 +710,20 @@ fn a_form_without_resources_keeps_the_page_names_it_draws_with() {
         resource_keys(&file, &page, b"Font")
     );
 
-    // The word is still drawn: the top of the page, away from the added picture.
+    // **Every pixel**, skipping only the picture that forced the rewrite: the word "Kept" is near the
+    // top of the bitmap (rows 75–96 at scale 1), not the bottom the old check looked at.
     let before = PdfiumDocument::open_bytes(input, None).expect("reopen the input");
     let after = PdfiumDocument::open_bytes(saved, None).expect("reopen the saved");
-    let (a, aw, _, a_stride) = rendered_page(&before, 0, 1.0);
+    let (a, aw, ah, a_stride) = rendered_page(&before, 0, 1.0);
     let (b, bw, bh, bs) = rendered_page(&after, 0, 1.0);
-    assert_eq!(aw, bw, "the page changed width");
-    for y in 650..792.min(bh) {
-        for x in 0..300 {
-            let at = y as usize * bs as usize + x * 4;
-            let old = y as usize * a_stride as usize + x * 4;
+    assert_eq!((aw, ah), (bw, bh), "the page changed size");
+    for y in 0..ah {
+        for x in 0..aw {
+            if (395..425).contains(&x) && (95..125).contains(&y) {
+                continue;
+            }
+            let at = y as usize * bs + x as usize * 4;
+            let old = y as usize * a_stride + x as usize * 4;
             assert_eq!(a[old..old + 4], b[at..at + 4], "the form's text changed at ({x}, {y})");
         }
     }
@@ -784,28 +791,30 @@ fn pages_sharing_resources_keep_what_any_of_them_uses() {
         image(),
         image(),
         image(),
-        "<< /XObject << /Im1 7 0 R /Im2 8 0 R /Im3 9 0 R >> >>".to_string(),
+        "<< /XObject << /Im1 9 0 R /Im2 10 0 R /Im3 11 0 R >> >>".to_string(),
     ];
     let refs: Vec<&str> = objects.iter().map(String::as_str).collect();
     let input = harness::hand_built_pdf(
         &[
             harness::HandPage {
                 content: "q 10 0 0 10 10 10 cm /Im1 Do Q",
-                resources: "10 0 R",
+                resources: "12 0 R",
                 extra: "",
             },
             harness::HandPage {
                 content: "q 10 0 0 10 10 10 cm /Im2 Do Q",
-                resources: "10 0 R",
+                resources: "12 0 R",
                 extra: "",
             },
+            harness::HandPage { content: "", resources: "<< >>", extra: "" },
         ],
         &refs,
     );
 
-    let mut doc = PdfiumDocument::open_bytes(input.clone(), None).expect("open the two pages");
+    let mut doc = PdfiumDocument::open_bytes(input.clone(), None).expect("open the three pages");
+    // **On the third page**, whose resources are its own: the two sharing pages must stay sharing.
     doc.add_annotation(
-        0,
+        2,
         &Annotation::Image {
             rect: Rect { left: 400.0, top: 100.0, right: 420.0, bottom: 120.0 },
             rgba: red(2, 2),
@@ -819,23 +828,33 @@ fn pages_sharing_resources_keep_what_any_of_them_uses() {
     doc.save_full_copy_with_fixups(&mut saved, &SaveFixups { find_face: &finder }).expect("full save");
 
     let file = File::parse(&saved).expect("the saved file parses");
-    let one = resource_keys(&file, &page_dict(&file, 0), b"XObject");
-    let two = resource_keys(&file, &page_dict(&file, 1), b"XObject");
+    let one_page = page_dict(&file, 0);
+    let two_page = page_dict(&file, 1);
+    let one = resource_keys(&file, &one_page, b"XObject");
+    let two = resource_keys(&file, &two_page, b"XObject");
     for (page, kept, names) in [(1, b"Im1".as_slice(), &one), (2, b"Im2".as_slice(), &two)] {
         assert!(names.iter().any(|name| name.as_slice() == kept), "page {page} lost {kept:?}: {names:?}");
         assert!(!names.iter().any(|name| name.as_slice() == b"Im3"), "page {page} kept unused Im3: {names:?}");
     }
+    // **One resources object, still**, or the union was never what was tested.
+    let resources_ref = |page: &pdf_core::pdf::Dict| match page.get(b"Resources") {
+        Some(Object::Reference(number, _)) => Some(*number),
+        _ => None,
+    };
+    let (one_ref, two_ref) = (resources_ref(&one_page), resources_ref(&two_page));
+    assert_eq!(one_ref, two_ref, "pages 1 and 2 no longer share one indirect /Resources");
+    assert!(one_ref.is_some(), "the shared resources are no longer indirect: {one_ref:?}");
 
     let before = PdfiumDocument::open_bytes(input, None).expect("reopen the input");
     let after = PdfiumDocument::open_bytes(saved, None).expect("reopen the saved");
-    for page in 0..2 {
+    for page in 0..3 {
         let a = rendered_page(&before, page, 1.0);
         let b = rendered_page(&after, page, 1.0);
         assert_eq!((a.1, a.2, a.3), (b.1, b.2, b.3), "page {} changed size", page + 1);
         for y in 0..a.2 {
             for x in 0..a.1 {
-                // Page 1 gained the small picture that forced the rewrite; everything else is the same.
-                if page == 0 && (395..425).contains(&x) && (95..125).contains(&y) {
+                // Page 3 gained the small picture that forced the rewrite; everything else is the same.
+                if page == 2 && (395..425).contains(&x) && (95..125).contains(&y) {
                     continue;
                 }
                 let at = y as usize * a.3 + x as usize * 4;
@@ -884,4 +903,67 @@ fn on_the_owners_files_pruning_changes_no_page() {
             assert!(one.0 == two.0, "{path}: page {} draws differently after pruning", page + 1);
         }
     }
+}
+
+/// **A looping appearance must not stop the save.** `/AP`'s states are `<< /On 7 0 R >>` and object 7
+/// is that same dictionary: the old walk followed it forever and overflowed the stack, which no
+/// `unwrap_or_else` can catch. `/AP` is one level deep per ISO 32000-1 §12.5.5.
+#[test]
+fn a_looping_appearance_does_not_stop_the_save() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let objects = [
+        "<< /Type /Annot /Subtype /Stamp /Rect [10 10 50 50] /AP << /N 7 0 R >> >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        "<< /On 7 0 R >>".to_string(),
+    ];
+    let refs: Vec<&str> = objects.iter().map(String::as_str).collect();
+    let input = harness::hand_built_pdf(
+        &[harness::HandPage { content: "", resources: "<< >>", extra: "/Annots [5 0 R]" }],
+        &refs,
+    );
+
+    let mut doc = PdfiumDocument::open_bytes(input, None).expect("open the looping page");
+    doc.add_annotation(
+        0,
+        &Annotation::Image {
+            rect: Rect { left: 400.0, top: 100.0, right: 420.0, bottom: 120.0 },
+            rgba: red(2, 2),
+            width: 2,
+            height: 2,
+        },
+    )
+    .expect("an edit, so the save is a rewrite");
+    let finder = no_face;
+    let mut saved = Vec::new();
+    doc.save_full_copy_with_fixups(&mut saved, &SaveFixups { find_face: &finder })
+        .expect("a looping appearance must not stop the save");
+}
+
+/// **A still-encrypted copy is not pruned.** The save can reach the fix-ups before a rewrite, with
+/// `/Encrypt` in the trailer and ciphertext in the streams; pruning that would read ciphertext and a
+/// stream that happened to parse would take every font and image off its page.
+#[test]
+fn a_file_still_encrypted_is_not_pruned() {
+    let image = stream_object(
+        "/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8",
+        "A",
+    );
+    let refs: Vec<&str> = [image.as_str()].into_iter().collect();
+    let input = harness::hand_built_pdf(
+        &[harness::HandPage {
+            content: "q Q",
+            resources: "<< /XObject << /Im3 5 0 R >> >>",
+            extra: "",
+        }],
+        &refs,
+    );
+    let text = String::from_utf8(input).expect("the hand-built file is text");
+    let marked = text.replacen("trailer\n<< ", "trailer\n<< /Encrypt << /Filter /Standard /V 4 >> ", 1);
+    assert_ne!(marked, text, "the trailer was not found");
+
+    let (out, dropped) = pdf_core::pdf::hidden::drop_unused_resources(marked.as_bytes()).expect("prune");
+    assert_eq!(dropped, 0, "an encrypted file's unused names were pruned");
+    assert_eq!(out, marked.as_bytes(), "the encrypted bytes were changed");
 }
