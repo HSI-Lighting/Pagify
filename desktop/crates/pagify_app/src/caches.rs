@@ -11,7 +11,7 @@
 //! edit could make it stale, every one of them paired with a
 //! `doc.rendered_is_stale()` call a line or two above. Moving them in here
 //! means that pairing is no longer something a new edit path has to remember:
-//! `rendered_is_stale` reaches all thirteen at once, and the ~45 individual
+//! `rendered_is_stale` reaches all fourteen at once, and the ~45 individual
 //! clears that used to shadow it are simply gone.
 //!
 //! `internal_links` and `drawn_words` do not actually need any of this: both
@@ -19,7 +19,7 @@
 //! refuse themselves on a stale stamp, the same way the eight original
 //! fields do. They are kept here anyway, for the same reason `page_blocks`'s
 //! own doc gives for clearing a self-stamped field eagerly too: one place to
-//! look, not thirteen minus two.
+//! look, not fourteen minus two.
 
 use crate::{DetailTile, PageBlocks, PageRaster};
 use pagify_shell::page_space::AppPoint;
@@ -48,6 +48,13 @@ pub(crate) struct DocCaches {
     /// The one page Edit Text last looked at, read and detected into
     /// paragraphs — see [`crate::PagifyApp::page_blocks`].
     pub(super) page_blocks: std::cell::RefCell<Option<std::rc::Rc<PageBlocks>>>,
+    /// **The page's pictures, read once per state of the page** — see
+    /// [`crate::PagifyApp::images_on`]. The Properties panel asks for a page
+    /// picture's angle on every frame one is selected, and each read walks the
+    /// whole page inside PDFium. Stamped `(page, render_epoch, undo_generation)`
+    /// like `page_blocks`, and emptied by `rendered_is_stale` with it.
+    pub(super) page_images:
+        std::cell::RefCell<Option<std::rc::Rc<(usize, u64, u64, Vec<pdf_core::document::PageImage>)>>>,
     /// The page last rendered small to sample the colour behind a paragraph
     /// from — see [`crate::PagifyApp::page_raster_for_sampling`].
     pub(super) sampling: std::cell::RefCell<Option<((usize, u64, u64), std::rc::Rc<PageRaster>)>>,
@@ -148,6 +155,7 @@ impl DocCaches {
         self.detail = None;
         self.locked.get_mut().clear();
         self.page_blocks.get_mut().take();
+        self.page_images.get_mut().take();
         self.sampling.get_mut().take();
         self.weight.set(None);
         self.rect_page.get_mut().take();
@@ -423,6 +431,30 @@ impl crate::PagifyApp {
         let built = std::rc::Rc::new(built);
         *doc.caches.page_blocks.borrow_mut() = Some(built.clone());
         Ok((built, false))
+    }
+
+    /// **A page's pictures, read once per state of the page.**
+    ///
+    /// `rotation_subject` asks on every frame a page picture is selected, and
+    /// Edit Object's hover and click ask too; PDFium re-reads the whole page
+    /// each time (measured: 4.3 ms on PRISMA, 2.8 ms on TECHNICAL DATASHEET,
+    /// 540 ms on DWTC's page 2). The list is good while the page, the render
+    /// epoch and the undo generation are what they were when it was read;
+    /// `rendered_is_stale` empties it with the rest.
+    pub(crate) fn images_on(&self, page: usize) -> Vec<pdf_core::document::PageImage> {
+        let Some(doc) = self.tab().doc.as_ref() else { return Vec::new() };
+        let stamp = (page, doc.render_epoch, doc.session.undo_generation());
+        if let Some(held) = doc.caches.page_images.borrow().as_ref() {
+            if (held.0, held.1, held.2) == stamp {
+                return held.3.clone();
+            }
+        }
+        #[cfg(test)]
+        crate::tests_support::note_image_read();
+        let images = doc.session.images_on(page).unwrap_or_default();
+        *doc.caches.page_images.borrow_mut() =
+            Some(std::rc::Rc::new((stamp.0, stamp.1, stamp.2, images.clone())));
+        images
     }
 
     /// What the page is made of — how many objects, how many of them text —

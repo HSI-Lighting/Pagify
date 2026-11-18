@@ -3,6 +3,28 @@ thread_local! {
     /// PDFium could not read the page's text — to prove Edit Text still
     /// works on the run alone. Per thread, so per test.
     pub static SNAPSHOT_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
+    /// **How many times this thread has asked PDFium for a page's pictures.**
+    /// [`PagifyApp::images_on`] bumps it on every read that reaches the engine,
+    /// so a test can prove the answer was kept rather than asked for again.
+    /// Per thread, so per test, like [`SNAPSHOT_FAILS`].
+    #[cfg(test)]
+    static IMAGES_READS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Start counting the engine reads of a page's pictures from zero.
+pub fn images_reads_reset() {
+    IMAGES_READS.with(|reads| reads.set(0));
+}
+
+/// How many real reads of a page's pictures [`PagifyApp::images_on`] has made on this thread.
+pub fn images_reads() -> u32 {
+    IMAGES_READS.with(std::cell::Cell::get)
+}
+
+/// Called by [`PagifyApp::images_on`] on each read that reaches the engine.
+pub fn note_image_read() {
+    IMAGES_READS.with(|reads| reads.set(reads.get() + 1));
 }
 
 /// **The tests that read a real, large file or run recognition take turns.**

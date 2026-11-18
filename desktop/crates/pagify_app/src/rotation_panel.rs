@@ -40,6 +40,29 @@ pub(crate) enum Turnable {
     },
 }
 
+/// Which picture a typed angle belongs to. Stored with the draft, so a click on another picture
+/// before Enter drops the typing instead of turning the new one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum RotationKey {
+    Placed { page: usize, index: usize },
+    Signature { page: usize, index: usize },
+    PagePicture { page: usize, object: usize },
+}
+
+impl Turnable {
+    fn key(&self) -> RotationKey {
+        match self {
+            Turnable::Placed(selected) => RotationKey::Placed { page: selected.page, index: selected.index },
+            Turnable::Signature(selected) => {
+                RotationKey::Signature { page: selected.page, index: selected.index }
+            }
+            Turnable::PagePicture { page, object, .. } => {
+                RotationKey::PagePicture { page: *page, object: *object }
+            }
+        }
+    }
+}
+
 /// An angle in `[0, 360)`, with `-0.0` coming back as `0.0`.
 pub(crate) fn normalised(degrees: f32) -> f32 {
     if !degrees.is_finite() {
@@ -182,23 +205,48 @@ impl PagifyApp {
         // The typed number, applied only when the edit ends. A DragValue applies on every frame it
         // is dragged; a placed picture's every turn rebuilds its appearance, and a page picture's is
         // a page rewrite, so per-frame would be dozens of undos for one gesture.
+        let key = subject.key();
         let mut typed: Option<f32> = None;
-        let draft = self.tab().panels.rotation_draft.unwrap_or(current);
+        let draft = self
+            .tab()
+            .panels
+            .rotation_draft
+            .filter(|(draft_key, _)| *draft_key == key)
+            .map(|(_, value)| value)
+            .unwrap_or(current);
         ui.horizontal(|ui| {
             ui.label("Angle");
             let mut value = draft;
-            let response = ui.add(
-                egui::DragValue::new(&mut value)
-                    .range(0.0..=359.9)
-                    .speed(1.0)
-                    .max_decimals(1)
-                    .suffix("°"),
-            );
+            // **A fresh widget per picture.** egui keeps a DragValue's half-typed text in memory
+            // by widget id; with one id for every subject, the text typed for one picture would be
+            // shown — and parsed — for the next one after a click. The key in the id makes the old
+            // box disappear when the subject changes, and with it the stale text.
+            let response = ui
+                .push_id(key, |ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut value)
+                            .range(0.0..=359.9)
+                            .speed(1.0)
+                            .max_decimals(1)
+                            .suffix("°"),
+                    )
+                })
+                .inner;
             if response.changed() {
-                self.tab_mut().panels.rotation_draft = Some(value);
+                self.tab_mut().panels.rotation_draft = Some((key, value));
+            }
+            if response.changed() || response.has_focus() {
+                self.tab_mut().panels.rotation_key = Some(key);
             }
             if response.drag_stopped() || response.lost_focus() {
-                typed = Some(self.tab().panels.rotation_draft.unwrap_or(value));
+                typed = Some(
+                    self.tab()
+                        .panels
+                        .rotation_draft
+                        .filter(|(draft_key, _)| *draft_key == key)
+                        .map(|(_, drafted)| drafted)
+                        .unwrap_or(value),
+                );
             }
         });
 
@@ -217,14 +265,23 @@ impl PagifyApp {
         });
 
         if let Some(value) = typed {
+            let owner = self.tab_mut().panels.rotation_key.take();
             self.tab_mut().panels.rotation_draft = None;
-            self.turn_selected_to(value);
+            // **Only the picture it was typed for.** egui reports `lost_focus` on the frame after
+            // the click that took it away, and by then the click may have selected another picture;
+            // a half-typed angle must not land on that one. The box records whose it was while it
+            // held the focus, which is what catches a value typed without a change event.
+            if owner == Some(key) && self.rotation_subject().is_some_and(|subject| subject.key() == key) {
+                self.turn_selected_to(value);
+            }
         }
         if reset {
             self.tab_mut().panels.rotation_draft = None;
+            self.tab_mut().panels.rotation_key = None;
             self.turn_selected_to(0.0);
         } else if let Some(delta) = by {
             self.tab_mut().panels.rotation_draft = None;
+            self.tab_mut().panels.rotation_key = None;
             self.turn_selected_by(delta);
         }
     }

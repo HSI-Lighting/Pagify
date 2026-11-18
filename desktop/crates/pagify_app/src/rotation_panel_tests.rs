@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::rotation_panel::{normalised, shortest_turn, shown_angle, Turnable};
-use crate::ui_tests::{fixture, harness_from};
+use crate::ui_tests::{click, fixture, harness_from};
 use egui_kittest::kittest::Queryable as _;
 use pdf_core::command::Command;
 use pdf_core::document::{Annotation, Rect};
@@ -55,6 +55,51 @@ fn placed_rotation(app: &PagifyApp) -> f32 {
         .placed_image_marks(0)
         .expect("marks")[0]
         .rotation
+}
+
+/// A placed picture's angle by its own annotation index, for a page holding more than one.
+fn rotation_of(app: &PagifyApp, index: usize) -> f32 {
+    app.tab()
+        .doc
+        .as_ref()
+        .expect("open")
+        .session
+        .placed_image_marks(0)
+        .expect("marks")
+        .into_iter()
+        .find(|mark| mark.index == index)
+        .expect("the picture is still on the page")
+        .rotation
+}
+
+/// Two placed pictures on page 1, A then B, with **A** selected: the setup for a click that takes
+/// the focus off A's angle box and lands on another picture.
+fn with_two_placed_pictures() -> PagifyApp {
+    let mut app = open_app("two-column.pdf");
+    for rect in [
+        Rect { left: 100.0, top: 200.0, right: 160.0, bottom: 240.0 },
+        Rect { left: 300.0, top: 400.0, right: 360.0, bottom: 440.0 },
+    ] {
+        app.tab()
+            .doc
+            .as_ref()
+            .expect("open")
+            .session
+            .execute(Command::AddAnnotation {
+                page_index: 0,
+                annotation: Annotation::Image { rect, rgba: [200u8, 30, 30, 255].repeat(4), width: 2, height: 2 },
+            })
+            .expect("place the picture");
+    }
+    let marks = app.tab().doc.as_ref().expect("open").session.placed_image_marks(0).expect("marks");
+    assert_eq!(marks.len(), 2, "the two pictures were not both placed");
+    app.tab_mut().selection.placed_image_selected = Some(PlacedImageSelected {
+        page: 0,
+        index: marks[0].index,
+        rect: marks[0].rect,
+        rotation: marks[0].rotation,
+    });
+    app
 }
 
 fn signature_rotation(app: &PagifyApp) -> f32 {
@@ -213,6 +258,51 @@ fn a_page_picture_shows_its_angle_and_turns_to_a_typed_one() {
     );
 }
 
+/// **A page picture's angle is read once per state of the page, not once every frame.**
+///
+/// `rotation_subject` runs on every frame a page picture is selected, and its angle comes from the
+/// app's `images_on`, a whole-page read inside PDFium (measured: 4.3 ms on PRISMA, 2.8 ms on
+/// TECHNICAL DATASHEET, 540 ms on DWTC's page 2). Three frames must therefore cost one read, and a
+/// turn must cost exactly one more.
+#[test]
+fn the_angle_of_a_page_picture_is_read_once_per_state_of_the_page() {
+    let mut app = open_app("pictures.pdf");
+    app.submit("editobject");
+    let image = app
+        .tab()
+        .doc
+        .as_ref()
+        .expect("open")
+        .session
+        .images_on(0)
+        .expect("images")
+        .remove(0);
+    app.tab_mut().selection.selected =
+        Some(Selected { page: 0, object: image.object, rect: image.rect, what: "the picture" });
+
+    crate::tests_support::images_reads_reset();
+    for frame in 0..3 {
+        assert!(app.rotation_subject().is_some(), "frame {frame} lost the picture");
+    }
+    assert_eq!(
+        crate::tests_support::images_reads(),
+        1,
+        "three frames read the page's pictures {} times; one is enough until the page changes",
+        crate::tests_support::images_reads()
+    );
+
+    app.turn_selected_by(30.0);
+    for frame in 0..2 {
+        assert!(app.rotation_subject().is_some(), "frame {frame} after the turn lost the picture");
+    }
+    assert_eq!(
+        crate::tests_support::images_reads(),
+        2,
+        "two frames after one turn read the page's pictures {} times; the turn is the one change",
+        crate::tests_support::images_reads()
+    );
+}
+
 /// **Words and shapes get no rotation section**, and neither do groups or paragraphs.
 #[test]
 fn words_and_shapes_get_no_rotation_section() {
@@ -297,5 +387,49 @@ fn the_panel_shows_rotation_and_its_controls_turn_a_placed_picture() {
         (placed_rotation(h.state()) - 90.0).abs() < 0.01,
         "typing 45 should be one undo step back to 90; it is at {}",
         placed_rotation(h.state())
+    );
+}
+
+/// **A half-typed angle never lands on another picture.** Clicking a second picture takes the focus
+/// off the angle box; egui reports `lost_focus` on the frame after that click, and by then the panel's
+/// subject is the picture the click selected.
+#[test]
+fn typing_an_angle_then_clicking_another_picture_does_not_turn_the_other_one() {
+    let app = with_two_placed_pictures();
+    let marks = app.tab().doc.as_ref().expect("open").session.placed_image_marks(0).expect("marks");
+    let (a, b) = (marks[0].index, marks[1].index);
+    assert_ne!(a, b, "the two pictures are the same mark");
+    let b_middle = AppPoint {
+        x: ((marks[1].rect.left + marks[1].rect.right) / 2.0) as f64,
+        y: ((marks[1].rect.top + marks[1].rect.bottom) / 2.0) as f64,
+    };
+    let mut h = harness_from(app);
+    h.run_steps(2);
+
+    // A's angle box: click it, clear it, type 45 — with no Enter.
+    h.get_all_by_role(egui::accesskit::Role::SpinButton).next().expect("the angle box").click();
+    h.run_steps(1);
+    for _ in 0..3 {
+        h.key_press(egui::Key::Backspace);
+        h.run_steps(1);
+    }
+    for ch in "45".chars() {
+        h.event(egui::Event::Text(ch.to_string()));
+        h.run_steps(1);
+    }
+
+    let at = h.state_mut().tab_mut().view_state.last_view.expect("the page was never drawn").to_screen(b_middle);
+    click(&mut h, at);
+    h.run_steps(3);
+
+    assert!(
+        h.state().tab().selection.placed_image_selected.as_ref().is_some_and(|s| s.index == b),
+        "the click did not select picture B, so nothing was proved: {:?}",
+        h.state().tab().selection.placed_image_selected
+    );
+    assert!(
+        rotation_of(h.state(), b).abs() < 0.01,
+        "typing 45 with A selected and then clicking B turned B to {}",
+        rotation_of(h.state(), b)
     );
 }

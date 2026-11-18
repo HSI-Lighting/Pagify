@@ -599,9 +599,13 @@ struct PanelsState {
     find_replace: Option<FindReplace>,
     spell_scan: Option<SpellScan>,
     spelling: Option<SpellCheck>,
-    /// The angle being typed into the Properties panel's rotation box, `None` when not editing.
-    /// Applied only when the edit ends — a placed picture's turn rebuilds its appearance.
-    rotation_draft: Option<f32>,
+    /// The angle being typed into the Properties panel's rotation box, with the picture it was
+    /// typed for, `None` when not editing. Applied only when the edit ends, and only to that same
+    /// picture — a click on another picture before Enter cancels the typing.
+    rotation_draft: Option<(rotation_panel::RotationKey, f32)>,
+    /// Which picture the angle box last belonged to — set while it has focus or is being dragged,
+    /// so a value can be refused when focus is lost to a click that selected another picture.
+    rotation_key: Option<rotation_panel::RotationKey>,
 }
 
 /// The rail/Organize selection and drag: which page the rail follows, which
@@ -1040,7 +1044,7 @@ impl DocTab {
             view_state: ViewState { page: 0, zoom: ZoomMode::Fit, rotation: Rotation::None, view: None, hover_view: None, viewport_rect: None, anchor_offset: None, last_view: None, scroll_offset: egui::Vec2::ZERO, scroll_pt: 0.0, pan_by: None, scroll_to_pt: None, canvas_pt: egui::vec2(800.0, 600.0), reveal: None, saved_revision: 0, copy_wanted: false, },
             edit: EditState { editing_run: None, new_text_box: None, settling: None },
             next_text_id: 0x0100_0000,
-            panels: PanelsState { pending_link: None, extract_ask: None, #[cfg(target_os = "windows")] print_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, rotation_draft: None, },
+            panels: PanelsState { pending_link: None, extract_ask: None, #[cfg(target_os = "windows")] print_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, rotation_draft: None, rotation_key: None, },
             bookmarked_pages: std::collections::HashSet::new(),
             joined_groups: Vec::new(),
             organize: OrganizeState { selection_page: 0, organize_selected: Vec::new(), organize_anchor: None, organize_drag: None },
@@ -10985,17 +10989,6 @@ impl PagifyApp {
             }
             Err(e) => Err(format!("lock: {e}")),
         }
-    }
-
-    /// The images on a page, or none if they cannot be read.
-    ///
-    /// Read fresh rather than cached: locking one rewrites the page, and a
-    /// cached list would go on offering an image that is no longer there.
-    fn images_on(&self, page: usize) -> Vec<pdf_core::document::PageImage> {
-        self.tab().doc
-            .as_ref()
-            .and_then(|d| d.session.images_on(page).ok())
-            .unwrap_or_default()
     }
 
     /// Put something at the front or the back of a page's drawing order.
