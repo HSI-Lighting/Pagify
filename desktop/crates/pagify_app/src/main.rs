@@ -12017,9 +12017,10 @@ impl PagifyApp {
                 self.recording_state.session_log.record(
                     "save",
                     &format!(
-                        "pictures_baked={} marks_drawn={} objects_dropped={} fonts_stored={} fonts_missing={} widths_differ={} ms={}",
+                        "pictures_baked={} marks_drawn={} resources_dropped={} objects_dropped={} fonts_stored={} fonts_missing={} widths_differ={} ms={}",
                         report.pictures,
                         report.marks_drawn,
+                        report.resources_dropped,
                         report.objects_dropped,
                         report.fonts_stored.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>().join(","),
                         report.fonts_missing.join(","),

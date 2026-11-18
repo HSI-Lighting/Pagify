@@ -545,3 +545,343 @@ fn on_the_owners_files_dropping_unreachable_objects_changes_no_page() {
         }
     }
 }
+
+// -- Task 8: a page's unused images and fonts ---------------------------------
+
+/// A PDF stream object body with its exact `/Length`.
+fn stream_object(dict: &str, data: &str) -> String {
+    format!("<< {dict} /Length {} >>\nstream\n{data}\nendstream", data.len())
+}
+
+/// The first page's dict in a classic or rewritten file.
+fn page_dict(file: &File<'_>, index: usize) -> pdf_core::pdf::Dict {
+    let root = file
+        .trailer()
+        .get(b"Root")
+        .and_then(|o| file.resolve(o).ok())
+        .and_then(|o| o.as_dict().cloned())
+        .expect("a catalogue");
+    let pages = root
+        .get(b"Pages")
+        .and_then(|o| file.resolve(o).ok())
+        .and_then(|o| o.as_dict().cloned())
+        .expect("a page tree");
+    let kids = pages
+        .get(b"Kids")
+        .and_then(|o| file.resolve(o).ok())
+        .and_then(|o| match o {
+            Object::Array(items) => Some(items),
+            _ => None,
+        })
+        .expect("kids");
+    let Object::Reference(number, _) = kids[index] else { panic!("a page is not a reference") };
+    file.object(number).ok().and_then(|o| o.as_dict().cloned()).expect("the first page")
+}
+
+/// The names a page's `category` table (`/Font`, `/XObject`, ...) holds.
+fn resource_keys(file: &File<'_>, page: &pdf_core::pdf::Dict, category: &[u8]) -> Vec<Vec<u8>> {
+    let Some(resources) = page
+        .get(b"Resources")
+        .and_then(|o| file.resolve(o).ok())
+        .and_then(|o| o.as_dict().cloned())
+    else {
+        return Vec::new();
+    };
+    resources
+        .get(category)
+        .and_then(|o| file.resolve(o).ok())
+        .and_then(|o| o.as_dict().cloned())
+        .map(|table| table.0.iter().map(|(name, _)| name.clone()).collect())
+        .unwrap_or_default()
+}
+
+fn rendered_page(doc: &PdfiumDocument, page: usize, scale: f32) -> (Vec<u8>, u32, u32, usize) {
+    let bitmap = doc
+        .render_page_to_bitmap(page, &RenderRequest { scale, ..Default::default() })
+        .expect("render");
+    (bitmap.data, bitmap.width, bitmap.height, bitmap.stride)
+}
+
+/// **A removed page picture leaves the file.** Edit Object's delete cuts the drawing operator out
+/// of the page's content but leaves the image in the page's `/Resources`; the page still refers to
+/// it, so `drop_unreachable` rightly keeps it and the bytes stay. This is what left PRISMA at 796 KB
+/// after the screenshot was removed.
+#[test]
+fn removing_a_page_picture_takes_its_bytes_out_of_the_saved_file() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("two-column.pdf");
+    let mut plain = Vec::new();
+    doc.save_full_copy(&mut plain).expect("the plain full save");
+
+    let (w, h) = (300u32, 200u32);
+    let mut rgba = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let i = ((y * w + x) * 4) as usize;
+            rgba[i..i + 4].copy_from_slice(&[
+                (x * 7 % 251) as u8,
+                (y * 13 % 241) as u8,
+                ((x ^ y) % 239) as u8,
+                255,
+            ]);
+        }
+    }
+    doc.add_annotation(
+        0,
+        &Annotation::Image {
+            rect: Rect { left: 60.0, top: 60.0, right: 210.0, bottom: 160.0 },
+            rgba,
+            width: w,
+            height: h,
+        },
+    )
+    .expect("place the picture");
+    let finder = no_face;
+    let mut baked = Vec::new();
+    doc.save_full_copy_with_fixups(&mut baked, &SaveFixups { find_face: &finder }).expect("bake it");
+
+    let mut reopened = PdfiumDocument::open_bytes(baked, None).expect("reopen the baked file");
+    let picture = reopened
+        .images_on(0)
+        .expect("images")
+        .into_iter()
+        .find(|i| i.rect.left >= 55.0 && i.rect.right <= 215.0 && i.rect.top >= 55.0 && i.rect.bottom <= 165.0)
+        .expect("the baked picture is on the page");
+    reopened.remove_object_mut(0, picture.object).expect("remove it, as Edit Object does");
+
+    let mut saved = Vec::new();
+    reopened.save_full_copy_with_fixups(&mut saved, &SaveFixups { find_face: &finder }).expect("save again");
+    eprintln!("plain {} bytes, after removal {} bytes", plain.len(), saved.len());
+    assert!(
+        saved.len() <= plain.len() + 4096,
+        "removing the picture left {} bytes behind (plain {}, after removal {})",
+        saved.len().saturating_sub(plain.len()),
+        plain.len(),
+        saved.len()
+    );
+}
+
+/// **A form with no `/Resources` draws with the page's names** — removing them would erase its text.
+#[test]
+fn a_form_without_resources_keeps_the_page_names_it_draws_with() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let form = "BT /F1 24 Tf 72 700 Td (Kept) Tj ET";
+    let objects = [
+        stream_object("/Type /XObject /Subtype /Form /BBox [0 0 612 792]", form),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+    ];
+    let refs: Vec<&str> = objects.iter().map(String::as_str).collect();
+    let input = harness::hand_built_pdf(
+        &[harness::HandPage {
+            content: "q /Fm0 Do Q",
+            resources: "<< /XObject << /Fm0 5 0 R >> /Font << /F1 6 0 R >> >>",
+            extra: "",
+        }],
+        &refs,
+    );
+
+    let mut doc = PdfiumDocument::open_bytes(input.clone(), None).expect("open the hand-built page");
+    doc.add_annotation(
+        0,
+        &Annotation::Image {
+            rect: Rect { left: 400.0, top: 100.0, right: 420.0, bottom: 120.0 },
+            rgba: red(2, 2),
+            width: 2,
+            height: 2,
+        },
+    )
+    .expect("an edit, so the save is a rewrite");
+    let finder = no_face;
+    let mut saved = Vec::new();
+    doc.save_full_copy_with_fixups(&mut saved, &SaveFixups { find_face: &finder }).expect("full save");
+
+    let file = File::parse(&saved).expect("the saved file parses");
+    let page = page_dict(&file, 0);
+    assert!(
+        resource_keys(&file, &page, b"Font").iter().any(|name| name == b"F1"),
+        "the form's font was taken off the page's list: {:?}",
+        resource_keys(&file, &page, b"Font")
+    );
+
+    // The word is still drawn: the top of the page, away from the added picture.
+    let before = PdfiumDocument::open_bytes(input, None).expect("reopen the input");
+    let after = PdfiumDocument::open_bytes(saved, None).expect("reopen the saved");
+    let (a, aw, _, a_stride) = rendered_page(&before, 0, 1.0);
+    let (b, bw, bh, bs) = rendered_page(&after, 0, 1.0);
+    assert_eq!(aw, bw, "the page changed width");
+    for y in 650..792.min(bh) {
+        for x in 0..300 {
+            let at = y as usize * bs as usize + x * 4;
+            let old = y as usize * a_stride as usize + x * 4;
+            assert_eq!(a[old..old + 4], b[at..at + 4], "the form's text changed at ({x}, {y})");
+        }
+    }
+}
+
+/// **An annotation's appearance with no `/Resources` draws with the page's names too.**
+#[test]
+fn an_appearance_without_resources_keeps_the_page_names_it_uses() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let appearance = "BT /F1 12 Tf 5 5 Td (x) Tj ET";
+    let objects = [
+        "<< /Type /Annot /Subtype /Stamp /Rect [10 10 110 110] /AP << /N 6 0 R >> >>".to_string(),
+        stream_object("/Type /XObject /Subtype /Form /BBox [0 0 100 100]", appearance),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+    ];
+    let refs: Vec<&str> = objects.iter().map(String::as_str).collect();
+    let input = harness::hand_built_pdf(
+        &[harness::HandPage {
+            content: "",
+            resources: "<< /Font << /F1 7 0 R >> >>",
+            extra: "/Annots [5 0 R]",
+        }],
+        &refs,
+    );
+
+    let mut doc = PdfiumDocument::open_bytes(input, None).expect("open the hand-built page");
+    doc.add_annotation(
+        0,
+        &Annotation::Image {
+            rect: Rect { left: 400.0, top: 100.0, right: 420.0, bottom: 120.0 },
+            rgba: red(2, 2),
+            width: 2,
+            height: 2,
+        },
+    )
+    .expect("an edit, so the save is a rewrite");
+    let finder = no_face;
+    let mut saved = Vec::new();
+    doc.save_full_copy_with_fixups(&mut saved, &SaveFixups { find_face: &finder }).expect("full save");
+
+    let file = File::parse(&saved).expect("the saved file parses");
+    let page = page_dict(&file, 0);
+    assert!(
+        resource_keys(&file, &page, b"Font").iter().any(|name| name == b"F1"),
+        "the appearance's font was taken off the page's list: {:?}",
+        resource_keys(&file, &page, b"Font")
+    );
+}
+
+/// **Pages sharing one resources dict keep what any of them draws**, and only the unused name goes.
+#[test]
+fn pages_sharing_resources_keep_what_any_of_them_uses() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let image = || {
+        stream_object(
+            "/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8",
+            "A",
+        )
+    };
+    let objects = [
+        image(),
+        image(),
+        image(),
+        "<< /XObject << /Im1 7 0 R /Im2 8 0 R /Im3 9 0 R >> >>".to_string(),
+    ];
+    let refs: Vec<&str> = objects.iter().map(String::as_str).collect();
+    let input = harness::hand_built_pdf(
+        &[
+            harness::HandPage {
+                content: "q 10 0 0 10 10 10 cm /Im1 Do Q",
+                resources: "10 0 R",
+                extra: "",
+            },
+            harness::HandPage {
+                content: "q 10 0 0 10 10 10 cm /Im2 Do Q",
+                resources: "10 0 R",
+                extra: "",
+            },
+        ],
+        &refs,
+    );
+
+    let mut doc = PdfiumDocument::open_bytes(input.clone(), None).expect("open the two pages");
+    doc.add_annotation(
+        0,
+        &Annotation::Image {
+            rect: Rect { left: 400.0, top: 100.0, right: 420.0, bottom: 120.0 },
+            rgba: red(2, 2),
+            width: 2,
+            height: 2,
+        },
+    )
+    .expect("an edit, so the save is a rewrite");
+    let finder = no_face;
+    let mut saved = Vec::new();
+    doc.save_full_copy_with_fixups(&mut saved, &SaveFixups { find_face: &finder }).expect("full save");
+
+    let file = File::parse(&saved).expect("the saved file parses");
+    let one = resource_keys(&file, &page_dict(&file, 0), b"XObject");
+    let two = resource_keys(&file, &page_dict(&file, 1), b"XObject");
+    for (page, kept, names) in [(1, b"Im1".as_slice(), &one), (2, b"Im2".as_slice(), &two)] {
+        assert!(names.iter().any(|name| name.as_slice() == kept), "page {page} lost {kept:?}: {names:?}");
+        assert!(!names.iter().any(|name| name.as_slice() == b"Im3"), "page {page} kept unused Im3: {names:?}");
+    }
+
+    let before = PdfiumDocument::open_bytes(input, None).expect("reopen the input");
+    let after = PdfiumDocument::open_bytes(saved, None).expect("reopen the saved");
+    for page in 0..2 {
+        let a = rendered_page(&before, page, 1.0);
+        let b = rendered_page(&after, page, 1.0);
+        assert_eq!((a.1, a.2, a.3), (b.1, b.2, b.3), "page {} changed size", page + 1);
+        for y in 0..a.2 {
+            for x in 0..a.1 {
+                // Page 1 gained the small picture that forced the rewrite; everything else is the same.
+                if page == 0 && (395..425).contains(&x) && (95..125).contains(&y) {
+                    continue;
+                }
+                let at = y as usize * a.3 + x as usize * 4;
+                assert!(a.0[at..at + 4] == b.0[at..at + 4], "page {} draws differently at ({x}, {y})", page + 1);
+            }
+        }
+    }
+}
+
+/// **On the owner's files, pruning changes no page**, and PRISMA is back under 650 KB.
+#[test]
+fn on_the_owners_files_pruning_changes_no_page() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let files = [
+        (r"C:\Users\hsili\Desktop\Pagify_EditText_Evidence\PRISMA-after-removal.pdf", true),
+        (r"C:\Users\hsili\Desktop\TECHNICAL DATASHEET.pdf", false),
+        (r"C:\Users\hsili\Downloads\TECHNICAL DATASHEET - Q2447.pdf", false),
+        (r"C:\Users\hsili\Desktop\Pagify_EditText_Evidence\LUX REPORT -REV.pdf", false),
+    ];
+    for (index, (path, must_be_under_650k)) in files.into_iter().enumerate() {
+        if !std::path::Path::new(path).is_file() {
+            eprintln!("skipping: {path} is not on this machine");
+            continue;
+        }
+        let mut doc = PdfiumDocument::open_path(path, None).expect("open the owner's file");
+        let mut a = Vec::new();
+        doc.save_full_copy(&mut a).expect("PDFium's full save");
+        let (pruned, entries) = pdf_core::pdf::hidden::drop_unused_resources(&a).expect("prune");
+        let (b, objects) = pdf_core::pdf::hidden::drop_unreachable(&pruned).expect("drop unreachable");
+        eprintln!("{path}: {} -> {} bytes, {entries} entries off, {objects} objects dropped", a.len(), b.len());
+        if must_be_under_650k {
+            assert!(b.len() < 650_000, "PRISMA is still {} bytes", b.len());
+        }
+
+        harness::check_with_qpdf(&b, &format!("pruned-owner-{index}"));
+
+        let before = PdfiumDocument::open_bytes(a, None).expect("open the full save");
+        let after = PdfiumDocument::open_bytes(b, None).expect("open the pruned save");
+        assert_eq!(before.page_count(), after.page_count(), "{path}: a page went");
+        for page in 0..before.page_count() {
+            let one = rendered_page(&before, page, 0.3);
+            let two = rendered_page(&after, page, 0.3);
+            assert_eq!((one.1, one.2, one.3), (two.1, two.2, two.3), "{path}: page {} changed size", page + 1);
+            assert!(one.0 == two.0, "{path}: page {} draws differently after pruning", page + 1);
+        }
+    }
+}

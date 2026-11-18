@@ -205,13 +205,13 @@ fn number(value: f64) -> String {
 }
 
 /// A page, where it is, and the resources it inherits if it has none.
-struct PageAt {
-    number: u32,
-    dict: Dict,
-    resources: Option<Object>,
+pub(crate) struct PageAt {
+    pub(crate) number: u32,
+    pub(crate) dict: Dict,
+    pub(crate) resources: Option<Object>,
 }
 
-fn collect_pages(
+pub(crate) fn collect_pages(
     file: &File<'_>,
     node: &Object,
     inherited: Option<Object>,

@@ -1220,6 +1220,9 @@ pub struct SaveFixupReport {
     pub pictures: usize,
     /// Highlights, underlines and ink given an appearance of their own.
     pub marks_drawn: usize,
+    /// `/XObject` and `/Font` names taken off pages' resource lists because their drawing no longer
+    /// names them — the bytes of a removed picture or line, left behind by Delete.
+    pub resources_dropped: usize,
     /// Objects left out of the file because nothing referred to them — the full save's own garbage
     /// collection, as Acrobat's `PDSaveCollectGarbage` and Foxit's full save do.
     pub objects_dropped: usize,

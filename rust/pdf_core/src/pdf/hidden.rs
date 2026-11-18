@@ -39,7 +39,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::error::Result;
 
 use super::object::Dict;
-use super::{write_object, write_stream, File, Object};
+use super::flatten::{collect_pages, PageAt};
+use super::lift;
+use super::{content, write_object, write_stream, File, Object};
 
 /// The lock's attachment, which is hidden data that must survive sanitising.
 const KEEP: &str = "pagify-lock.json";
@@ -585,6 +587,262 @@ fn reachable(
         references(&object, &mut |n| stack.push(n));
     }
     seen
+}
+
+/// The pages' unused `/XObject` and `/Font` entries taken off, and how many went.
+///
+/// **A removed picture or line leaves its name on the page's list.** Edit Object's delete takes
+/// the drawing operator out of the page's content, but `PgFlat3` (and the image and its `/SMask`)
+/// stay in `/Resources`, so the page still refers to the bytes and `drop_unreachable` rightly keeps
+/// them — which is why PRISMA stayed at 796 KB after its pasted screenshot was removed.
+///
+/// Only `/XObject` and `/Font` entries are ever removed: every other category is left exactly as it
+/// is. What a page uses is [`lift::used_resource_names`] over its `/Contents`, decoded with
+/// [`content::decode`] and joined with a newline; a page whose drawing cannot be decoded or parsed
+/// is skipped whole. Pages whose `/Resources` is one indirect object are pruned to the **union** of
+/// their uses, and only when every object in the file that refers to it is one of those pages. A
+/// page that inherits its resources has none of its own to prune, so it is skipped. A category table
+/// that is itself an indirect object is changed only when the resources holder is its only referrer.
+///
+/// **Anything that could be leaning on the page's list skips the group:** an annotation appearance
+/// with no `/Resources` of its own, a Form XObject with none, a Type3 font with none, or a pattern
+/// stream with none — old files draw those with the page's names.
+pub fn drop_unused_resources(bytes: &[u8]) -> Result<(Vec<u8>, usize)> {
+    let file = File::parse(bytes)?;
+    let Some(root) = dict_of(&file, file.trailer().get(b"Root")) else {
+        return Ok((bytes.to_vec(), 0));
+    };
+    let mut pages = Vec::new();
+    if let Some(tree) = root.get(b"Pages") {
+        collect_pages(&file, tree, None, 0, &mut BTreeSet::new(), &mut pages)?;
+    }
+
+    // Who refers to what, once, over every readable object.
+    let mut referrers: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+    for number in file.numbers().collect::<Vec<_>>() {
+        if let Ok(object) = file.object(number) {
+            references(&object, &mut |n| {
+                referrers.entry(n).or_default().insert(number);
+            });
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Holder {
+        /// The page's `/Resources` is a direct dictionary: only that page.
+        Page(usize),
+        /// An indirect object, possibly named by several pages.
+        Indirect(u32),
+    }
+
+    let mut work: Vec<(usize, Holder)> = Vec::new();
+    for (index, page) in pages.iter().enumerate() {
+        match page.dict.get(b"Resources") {
+            Some(Object::Dict(_)) => work.push((index, Holder::Page(index))),
+            Some(Object::Reference(number, _)) => work.push((index, Holder::Indirect(*number))),
+            // None of its own: inherited, so not this page's list to prune.
+            _ => {}
+        }
+    }
+    let mut holders: Vec<(Holder, Vec<usize>)> = Vec::new();
+    for (index, holder) in work {
+        match holders.iter_mut().find(|(h, _)| *h == holder) {
+            Some((_, group)) => group.push(index),
+            None => holders.push((holder, vec![index])),
+        }
+    }
+
+    let mut replacements: Vec<(u32, Vec<u8>)> = Vec::new();
+    let mut dropped = 0usize;
+    for (holder, group) in holders {
+        let holder_number = match holder {
+            Holder::Indirect(number) => {
+                // The union is safe only while these pages are the holder's only referrers.
+                let Some(found) = referrers.get(&number) else { continue };
+                if !found.iter().all(|n| group.iter().any(|&i| pages[i].number == *n)) {
+                    continue;
+                }
+                number
+            }
+            Holder::Page(index) => pages[index].number,
+        };
+
+        let mut used: lift::Used = BTreeMap::new();
+        let mut sound = true;
+        for &index in &group {
+            let Some(page_used) = page_uses(&file, &pages[index]) else {
+                sound = false;
+                break;
+            };
+            for (category, names) in page_used {
+                used.entry(category).or_default().extend(names);
+            }
+            if appearance_without_resources(&file, &pages[index]) {
+                sound = false;
+                break;
+            }
+        }
+        if !sound {
+            continue;
+        }
+
+        let holder_dict = match holder {
+            Holder::Indirect(number) => match file.object(number) {
+                Ok(Object::Dict(dict)) => dict,
+                _ => continue,
+            },
+            Holder::Page(index) => {
+                let Some(Object::Dict(dict)) = pages[index].dict.get(b"Resources") else { continue };
+                dict.clone()
+            }
+        };
+        if leans_on_page_names(&file, &holder_dict) {
+            continue;
+        }
+
+        let mut changed = holder_dict.clone();
+        let mut holder_changed = false;
+        for category in [b"XObject".as_slice(), b"Font".as_slice()] {
+            let Some(stored) = holder_dict.get(category) else { continue };
+            let Ok(Object::Dict(table)) = file.resolve(stored) else { continue };
+            let names = used.get(category);
+            let mut pruned = table.clone();
+            pruned.0.retain(|(name, _)| names.is_some_and(|names| names.contains(name)));
+            if pruned.0.len() == table.0.len() {
+                continue;
+            }
+            let removed = table.0.len() - pruned.0.len();
+            match stored {
+                Object::Reference(number, _) => {
+                    // The table is shared unless the resources holder is its only referrer.
+                    let only = referrers
+                        .get(number)
+                        .is_some_and(|set| set.len() == 1 && set.contains(&holder_number));
+                    if !only {
+                        continue;
+                    }
+                    let mut body = Vec::new();
+                    write_object(&mut body, &Object::Dict(pruned));
+                    replacements.push((*number, body));
+                    dropped += removed;
+                }
+                _ => {
+                    dropped += removed;
+                    changed.set(category, Object::Dict(pruned));
+                    holder_changed = true;
+                }
+            }
+        }
+        if !holder_changed {
+            continue;
+        }
+        let (number, dict) = match holder {
+            Holder::Indirect(number) => (number, changed),
+            Holder::Page(index) => (pages[index].number, {
+                let mut dict = pages[index].dict.clone();
+                dict.set(b"Resources", Object::Dict(changed));
+                dict
+            }),
+        };
+        let mut body = Vec::new();
+        write_object(&mut body, &Object::Dict(dict));
+        replacements.push((number, body));
+    }
+
+    if replacements.is_empty() {
+        return Ok((bytes.to_vec(), 0));
+    }
+    Ok((file.rewrite(&replacements)?, dropped))
+}
+
+/// A value as a dictionary, through any reference.
+fn dict_of(file: &File<'_>, value: Option<&Object>) -> Option<Dict> {
+    let value = value?;
+    match file.resolve(value).ok()? {
+        Object::Dict(dict) => Some(dict),
+        _ => None,
+    }
+}
+
+/// A resources dict's `category` table, when it is a dict.
+fn table(file: &File<'_>, resources: &Dict, category: &[u8]) -> Option<Dict> {
+    dict_of(file, resources.get(category))
+}
+
+/// The resource names one page's own drawing uses, or `None` when a stream cannot be read.
+fn page_uses(file: &File<'_>, page: &PageAt) -> Option<lift::Used> {
+    let contents = page.dict.get(b"Contents")?;
+    let items = match file.resolve(contents).ok()? {
+        Object::Array(items) => items,
+        _ => vec![contents.clone()],
+    };
+    let mut drawing = Vec::new();
+    for item in items {
+        let Object::Stream(dict, range) = file.resolve(&item).ok()? else { return None };
+        let decoded = content::decode(&dict, &file.bytes()[range])?;
+        drawing.extend_from_slice(&decoded);
+        drawing.push(b'\n');
+    }
+    lift::used_resource_names(&drawing).ok()
+}
+
+/// Whether an appearance stream (any `/AP` mode or state) has no `/Resources` of its own.
+fn appearance_without_resources(file: &File<'_>, page: &PageAt) -> bool {
+    let Some(annots) = page.dict.get(b"Annots") else { return false };
+    let Ok(Object::Array(items)) = file.resolve(annots) else { return false };
+    for item in items {
+        let Ok(Object::Dict(annot)) = file.resolve(&item) else { continue };
+        let Some(ap) = annot.get(b"AP") else { continue };
+        let Ok(Object::Dict(modes)) = file.resolve(ap) else { continue };
+        if modes.0.iter().any(|(_, mode)| appearance_lacks_resources(file, mode)) {
+            return true;
+        }
+    }
+    false
+}
+
+fn appearance_lacks_resources(file: &File<'_>, value: &Object) -> bool {
+    match file.resolve(value) {
+        Ok(Object::Stream(dict, _)) => dict.get(b"Resources").is_none(),
+        Ok(Object::Dict(states)) => states.0.iter().any(|(_, state)| appearance_lacks_resources(file, state)),
+        _ => false,
+    }
+}
+
+/// Whether a Form, Type3 font or pattern stream in the list draws with the page's names.
+fn leans_on_page_names(file: &File<'_>, resources: &Dict) -> bool {
+    if let Some(xobjects) = table(file, resources, b"XObject") {
+        for (_, value) in &xobjects.0 {
+            if let Ok(Object::Stream(dict, _)) = file.resolve(value) {
+                if dict.get(b"Subtype").and_then(Object::as_name) == Some(b"Form")
+                    && dict.get(b"Resources").is_none()
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    if let Some(fonts) = table(file, resources, b"Font") {
+        for (_, value) in &fonts.0 {
+            if let Ok(Object::Dict(dict)) = file.resolve(value) {
+                if dict.get(b"Subtype").and_then(Object::as_name) == Some(b"Type3")
+                    && dict.get(b"Resources").is_none()
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    if let Some(patterns) = table(file, resources, b"Pattern") {
+        for (_, value) in &patterns.0 {
+            if let Ok(Object::Stream(dict, _)) = file.resolve(value) {
+                if dict.get(b"Resources").is_none() {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// A copy with the objects nothing refers to left out, and how many went.
