@@ -308,8 +308,11 @@ impl<'a> File<'a> {
         out.extend_from_slice(&self.bytes[..header_end]);
 
         let mut written: Offsets = Offsets::new();
+        // A set, not the slice: `drop` can be most of a large file, and a linear search per object
+        // made the rewrite O(n × dropped).
+        let dropped: std::collections::HashSet<u32> = drop.iter().copied().collect();
         for number in self.numbers().collect::<Vec<_>>() {
-            if drop.contains(&number) {
+            if dropped.contains(&number) {
                 continue;
             }
             written.insert(number, out.len());

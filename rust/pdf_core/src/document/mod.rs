@@ -1220,6 +1220,9 @@ pub struct SaveFixupReport {
     pub pictures: usize,
     /// Highlights, underlines and ink given an appearance of their own.
     pub marks_drawn: usize,
+    /// Objects left out of the file because nothing referred to them — the full save's own garbage
+    /// collection, as Acrobat's `PDSaveCollectGarbage` and Foxit's full save do.
+    pub objects_dropped: usize,
     /// Fonts stored, by the program's own PostScript name, with its size.
     pub fonts_stored: Vec<(String, usize)>,
     /// Fonts the finder could not supply, or supplied only as a variable font.

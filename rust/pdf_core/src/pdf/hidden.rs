@@ -34,7 +34,7 @@
 //! destroy the only copy of what somebody was promised they could get back.
 //! It is named explicitly and always kept.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::Result;
 
@@ -228,7 +228,15 @@ pub fn survey(file: &File<'_>, bytes: &[u8]) -> Result<Hidden> {
         }
     }
 
-    let reachable = reachable_from_root(file);
+    let reachable = reachable(
+        file,
+        &BTreeMap::new(),
+        [file.trailer().get(b"Root"), file.trailer().get(b"Info")]
+            .into_iter()
+            .flatten()
+            .filter_map(Object::as_reference)
+            .map(|(number, _)| number),
+    );
     found.unreachable = file.numbers().filter(|n| !reachable.contains(n)).count();
 
     // **Script is wherever an action can run it**, not only in the name tree:
@@ -531,10 +539,7 @@ pub fn strip(file: &File<'_>, bytes: &[u8]) -> Result<(Vec<u8>, Sanitised)> {
     // clean that way. The same goes for the attachments and the script: the
     // walk reads the rewritten objects, so what they no longer point at is
     // left out.
-    let mut reachable = BTreeSet::new();
-    if let Some(number) = root_number {
-        walk_through(file, &rewritten, number, &mut reachable, 0);
-    }
+    let reachable = reachable(file, &rewritten, root_number);
     let drop: Vec<u32> = file.numbers().filter(|n| !reachable.contains(n)).collect();
 
     // The trailer loses `/Info` entirely. An empty `/Info` dictionary would
@@ -549,52 +554,68 @@ pub fn strip(file: &File<'_>, bytes: &[u8]) -> Result<(Vec<u8>, Sanitised)> {
     Ok((cleaned, Sanitised { before, after }))
 }
 
-/// [`walk`], reading rewritten objects where there are any.
-fn walk_through(
-    file: &File<'_>,
-    rewritten: &std::collections::BTreeMap<u32, Object>,
-    number: u32,
-    seen: &mut BTreeSet<u32>,
-    depth: usize,
-) {
-    if depth > 96 || !seen.insert(number) {
-        return;
-    }
-    let object = match rewritten.get(&number) {
-        Some(object) => object.clone(),
-        None => match file.object(number) {
-            Ok(object) => object,
-            Err(_) => return,
-        },
-    };
-    references(&object, &mut |n| walk_through(file, rewritten, n, seen, depth + 1));
-}
-
-/// Everything reachable from the catalogue as the file stands, following
-/// references.
+/// Everything reachable from `starts`, following references — one iterative walk with **no depth
+/// limit**, used by the survey, the clean, and the full save's own garbage collection.
 ///
-/// `/Info` counts as reached here because it still is: this is what the survey
-/// reports against, and calling a referenced object "unreachable" would be a
-/// lie. `strip` computes its own set against the file it is about to write.
-fn reachable_from_root(file: &File<'_>) -> BTreeSet<u32> {
+/// **The visited set is the only cycle guard.** The old walk stopped at depth 96 to keep a file that
+/// points an object at itself from hanging, which also stopped real documents: outlines are a
+/// `/First` then `/Next` chain, so 300 sibling bookmarks were cut to 96. A file cannot recurse forever
+/// without revisiting a number, so a set is enough and a cap only loses real objects.
+///
+/// `rewritten` is the clean's own replacement objects; the survey and the full save pass an empty map.
+/// An object that cannot be read is reached but not followed.
+fn reachable(
+    file: &File<'_>,
+    rewritten: &BTreeMap<u32, Object>,
+    starts: impl IntoIterator<Item = u32>,
+) -> BTreeSet<u32> {
     let mut seen = BTreeSet::new();
-    if let Some(Object::Reference(number, _)) = file.trailer().get(b"Root") {
-        walk(file, *number, &mut seen, 0);
-    }
-    if let Some(Object::Reference(number, _)) = file.trailer().get(b"Info") {
-        walk(file, *number, &mut seen, 0);
+    let mut stack: Vec<u32> = starts.into_iter().collect();
+    while let Some(number) = stack.pop() {
+        if !seen.insert(number) {
+            continue;
+        }
+        let object = match rewritten.get(&number) {
+            Some(object) => object.clone(),
+            None => match file.object(number) {
+                Ok(object) => object,
+                Err(_) => continue,
+            },
+        };
+        references(&object, &mut |n| stack.push(n));
     }
     seen
 }
 
-fn walk(file: &File<'_>, number: u32, seen: &mut BTreeSet<u32>, depth: usize) {
-    // A depth cap rather than trust: a file can point an object at itself, and
-    // a sanitiser that hangs is a sanitiser nobody runs.
-    if depth > 96 || !seen.insert(number) {
-        return;
+/// A copy with the objects nothing refers to left out, and how many went.
+///
+/// **Acrobat's and Foxit's full saves do this too** (`PDSaveCollectGarbage`, "Remove unreferenced
+/// objects, often reducing file size"). PDFium's full save writes every object made in the session,
+/// so each turn or resize of a picture used to leave a whole copy of it in the file. Nothing on a
+/// page changes: only objects the file does not point at any more are omitted.
+///
+/// Starts are every reference in every trailer entry except `/Prev` and `/XRefStm`, which name
+/// places in the file rather than objects. The input bytes are returned unchanged when there is
+/// nothing to drop.
+pub fn drop_unreachable(bytes: &[u8]) -> Result<(Vec<u8>, usize)> {
+    let file = File::parse(bytes)?;
+    let starts = file
+        .trailer()
+        .0
+        .iter()
+        .filter(|(key, _)| key.as_slice() != b"Prev" && key.as_slice() != b"XRefStm")
+        .flat_map(|(_, value)| {
+            let mut found = Vec::new();
+            references(value, &mut |n| found.push(n));
+            found
+        });
+    let reachable = reachable(&file, &BTreeMap::new(), starts);
+    let drop: Vec<u32> = file.numbers().filter(|n| !reachable.contains(n)).collect();
+    if drop.is_empty() {
+        return Ok((bytes.to_vec(), 0));
     }
-    let Ok(object) = file.object(number) else { return };
-    references(&object, &mut |n| walk(file, n, seen, depth + 1));
+    let cleaned = file.rewrite_dropping(&[], &[], &Dict(Vec::new()), &drop)?;
+    Ok((cleaned, drop.len()))
 }
 
 fn references(object: &Object, found: &mut impl FnMut(u32)) {

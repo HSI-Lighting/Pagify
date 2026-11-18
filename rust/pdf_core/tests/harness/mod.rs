@@ -37,6 +37,91 @@ pub fn fixture_bytes(name: &str) -> Vec<u8> {
     std::fs::read(fixture_path(name)).expect("read fixture")
 }
 
+/// A one-page file whose catalogue carries `n` sibling bookmarks, 5, 6, 7 … in
+/// one `/Next` chain — a classic-xref file with no PDFium in it, so a test can
+/// say what a walk did to a long list without asking a renderer.
+pub fn bookmarks_pdf(n: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut offsets = Vec::new();
+    out.extend_from_slice(b"%PDF-1.7\n");
+
+    let mut add = |body: String, out: &mut Vec<u8>, offsets: &mut Vec<usize>| {
+        offsets.push(out.len());
+        out.extend_from_slice(body.as_bytes());
+    };
+    add(
+        format!("1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Outlines 3 0 R >>\nendobj\n"),
+        &mut out,
+        &mut offsets,
+    );
+    add(
+        format!("2 0 obj\n<< /Type /Pages /Kids [4 0 R] /Count 1 >>\nendobj\n"),
+        &mut out,
+        &mut offsets,
+    );
+    add(
+        format!("3 0 obj\n<< /Type /Outlines /First 5 0 R /Last {} 0 R /Count {n} >>\nendobj\n", 4 + n),
+        &mut out,
+        &mut offsets,
+    );
+    add(
+        format!("4 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] >>\nendobj\n"),
+        &mut out,
+        &mut offsets,
+    );
+    for i in 0..n {
+        let number = 5 + i;
+        let prev = (i > 0).then(|| format!(" /Prev {} 0 R", number - 1)).unwrap_or_default();
+        let next = (i + 1 < n).then(|| format!(" /Next {} 0 R", number + 1)).unwrap_or_default();
+        add(
+            format!(
+                "{number} 0 obj\n<< /Title (B{}) /Parent 3 0 R{prev}{next} /Dest [4 0 R /Fit] >>\nendobj\n",
+                i + 1
+            ),
+            &mut out,
+            &mut offsets,
+        );
+    }
+
+    let xref_at = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", 5 + n).as_bytes());
+    for offset in &offsets {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF", 5 + n).as_bytes());
+    out
+}
+
+/// How many sibling bookmarks [`bookmarks_pdf`]'s `/Outlines` holds, followed
+/// the way a reader follows them: `/First`, then `/Next` until there is none.
+pub fn bookmark_count(bytes: &[u8]) -> usize {
+    use pdf_core::pdf::{File, Object};
+
+    let file = File::parse(bytes).expect("parse the bookmarked file");
+    let Some((root, _)) = file.trailer().get(b"Root").and_then(Object::as_reference) else { return 0 };
+    let Some((outlines, _)) = file
+        .object(root)
+        .ok()
+        .and_then(|o| o.as_dict().and_then(|d| d.get(b"Outlines")).and_then(Object::as_reference))
+    else {
+        return 0;
+    };
+    let mut count = 0;
+    let mut current = file
+        .object(outlines)
+        .ok()
+        .and_then(|o| o.as_dict().and_then(|d| d.get(b"First")).and_then(Object::as_reference));
+    while let Some((number, _)) = current {
+        count += 1;
+        current = file
+            .object(number)
+            .ok()
+            .and_then(|o| o.as_dict().and_then(|d| d.get(b"Next")).and_then(Object::as_reference));
+    }
+    count
+}
+
+
 pub fn open_fixture(_pdfium: &(), name: &str) -> Box<dyn Document> {
     let path = fixture_path(name);
     Box::new(

@@ -743,3 +743,14 @@ fn a_mark_survives_a_save_and_a_reopen() {
     assert_ne!(plain.len(), marked.len(), "the mark did not reach the file");
     PdfiumDocument::open_bytes(marked, None).expect("the marked file will not open");
 }
+
+/// **A clean keeps every bookmark of a long list.** Bookmarks are a `/First` then `/Next` chain; the
+/// old reachability walk stopped at depth 96, so 300 siblings were cut to 95. The walk has no depth
+/// cap now — the visited set is the only cycle guard.
+#[test]
+fn sanitise_keeps_every_bookmark_of_a_long_list() {
+    let bytes = harness::bookmarks_pdf(300);
+    let file = pdf_core::pdf::File::parse(&bytes).expect("parse the bookmarked file");
+    let (cleaned, _report) = pdf_core::pdf::hidden::strip(&file, &bytes).expect("strip");
+    assert_eq!(harness::bookmark_count(&cleaned), 300, "the clean lost part of the bookmark list");
+}

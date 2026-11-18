@@ -6740,9 +6740,16 @@ impl DocumentMut for PdfiumDocument {
         // Fix 3: fonts the file names but does not carry.
         let fonts = crate::pdf::fonts::embed_missing(&pictures.bytes, fixups.find_face)?;
 
+        // **What nothing refers to is not written.** Acrobat's and Foxit's full saves collect
+        // garbage the same way (`PDSaveCollectGarbage`); PDFium's writes every object made in the
+        // session, which is why each turn or resize of a picture used to leave a whole copy behind.
+        // A cleanup that cannot be done must never fail the save: those bytes go out unchanged.
+        let (bytes, objects_dropped) = crate::pdf::hidden::drop_unreachable(&fonts.bytes)
+            .unwrap_or_else(|_| (fonts.bytes.clone(), 0));
+
         let bytes = match &self.security {
-            Some(wanted) => self.encrypted(&fonts.bytes, wanted)?,
-            None => fonts.bytes,
+            Some(wanted) => self.encrypted(&bytes, wanted)?,
+            None => bytes,
         };
         dest.write_all(&bytes)?;
         self.dirty = false;
@@ -6750,6 +6757,7 @@ impl DocumentMut for PdfiumDocument {
         Ok(crate::document::SaveFixupReport {
             pictures: pictures.pictures,
             marks_drawn: marks.drawn,
+            objects_dropped,
             fonts_stored: fonts.stored,
             fonts_missing: fonts.missing,
             width_mismatches: fonts.width_mismatches,

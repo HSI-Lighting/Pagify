@@ -398,3 +398,150 @@ fn a_turned_then_moved_picture_is_baked_where_it_was_moved_to() {
         "the saved page still draws the picture in the un-turned part of its old frame"
     );
 }
+
+/// **A turn must not leave a copy of the picture behind.** Every turn rebuilds the appearance and creates
+/// a new image object, and a full save used to write every object made in the session: ten turns of a
+/// 300 x 200 picture saved about 1.5 MB bigger than one. A save now drops what nothing refers to.
+#[test]
+fn turning_a_picture_ten_times_saves_no_bigger_than_turning_it_once() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let (w, h) = (300u32, 200u32);
+    let mut rgba = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let i = ((y * w + x) * 4) as usize;
+            rgba[i..i + 4].copy_from_slice(&[
+                (x * 7 % 251) as u8,
+                (y * 13 % 241) as u8,
+                ((x ^ y) % 239) as u8,
+                255,
+            ]);
+        }
+    }
+    let rect = Rect { left: 60.0, top: 60.0, right: 210.0, bottom: 160.0 };
+    let finder = no_face;
+
+    let saved_size = |turns: u32| -> usize {
+        let mut doc = open("two-column.pdf");
+        let index = doc
+            .add_annotation(0, &Annotation::Image { rect, rgba: rgba.clone(), width: w, height: h })
+            .expect("place the picture");
+        for turn in 1..=turns {
+            doc.rotate_image_signature(0, index, 10.0 * turn as f32).expect("turn");
+        }
+        let mut saved = Vec::new();
+        let report = doc
+            .save_full_copy_with_fixups(&mut saved, &SaveFixups { find_face: &finder })
+            .expect("the full save");
+        assert_eq!(report.pictures, 1, "the picture was not baked");
+        saved.len()
+    };
+
+    let once = saved_size(1);
+    let ten = saved_size(10);
+    eprintln!("one turn {once} bytes, ten turns {ten} bytes");
+    assert!(
+        ten <= once + 4096,
+        "ten turns grew the saved file from {once} to {ten} bytes (+{}): every turn left a copy",
+        ten - once
+    );
+}
+
+/// **A save keeps every bookmark of a long list.** Outlines are a `/First` then `/Next` chain, and the
+/// old reachability walk stopped at depth 96 — 95 siblings. The walk is iterative now, with no depth cap.
+#[test]
+fn a_full_save_keeps_every_bookmark_of_a_long_list() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = PdfiumDocument::open_bytes(harness::bookmarks_pdf(300), None).expect("open the bookmarks");
+    // A placed picture, so the save really is a rewrite.
+    doc.add_annotation(
+        0,
+        &Annotation::Image { rect: Rect { left: 60.0, top: 60.0, right: 80.0, bottom: 80.0 }, rgba: red(2, 2), width: 2, height: 2 },
+    )
+    .expect("place a picture");
+
+    let finder = no_face;
+    let mut saved = Vec::new();
+    doc.save_full_copy_with_fixups(&mut saved, &SaveFixups { find_face: &finder })
+        .expect("the full save");
+    assert_eq!(harness::bookmark_count(&saved), 300, "the save lost part of the bookmark list");
+}
+
+/// **Dropping what nothing refers to changes no page, on the owner's own files.** Each file is opened,
+/// given one placed picture and full-saved; the dropped copy must render identically, page for page,
+/// and pass qpdf. The files are skipped when they are not on this machine.
+#[test]
+fn on_the_owners_files_dropping_unreachable_objects_changes_no_page() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let files = [
+        r"C:\Users\hsili\Desktop\TECHNICAL DATASHEET.pdf",
+        r"C:\Users\hsili\Downloads\TECHNICAL DATASHEET - Q2447.pdf",
+        r"C:\Users\hsili\Desktop\Pagify_EditText_Evidence\LUX REPORT -REV.pdf",
+    ];
+    for (index, path) in files.into_iter().enumerate() {
+        if !std::path::Path::new(path).is_file() {
+            eprintln!("skipping: {path} is not on this machine");
+            continue;
+        }
+        let mut doc = PdfiumDocument::open_path(path, None).expect("open the owner's file");
+        let (w, h) = (300u32, 200u32);
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                rgba[i..i + 4].copy_from_slice(&[
+                    (x * 7 % 251) as u8,
+                    (y * 13 % 241) as u8,
+                    ((x ^ y) % 239) as u8,
+                    255,
+                ]);
+            }
+        }
+        doc.add_annotation(
+            0,
+            &Annotation::Image { rect: Rect { left: 40.0, top: 40.0, right: 190.0, bottom: 140.0 }, rgba, width: w, height: h },
+        )
+        .expect("place a picture");
+
+        let mut plain = Vec::new();
+        doc.save_full_copy(&mut plain).expect("PDFium's full save");
+        // **Baked first, as the ordinary Save does.** A plain PDFium full save still refers to the
+        // placed stamp, so nothing is unreachable yet; `flatten_pictures` puts the picture in the page
+        // and leaves the annotation and its appearance behind — exactly the 1–2 objects the prototype
+        // measured. (The plan said plain `save_full_copy` alone reaches that state; measured, it does
+        // not, and the ordinary Save's own cleanup would remove the orphans before this test saw them.)
+        let before = pdf_core::pdf::flatten::flatten_pictures(&plain).expect("bake the picture").bytes;
+        let (after, dropped) = pdf_core::pdf::hidden::drop_unreachable(&before).expect("drop unreachable");
+        eprintln!("{path}: dropped {dropped} objects, {} -> {} bytes", before.len(), after.len());
+        assert!(dropped >= 1, "{path}: nothing was dropped");
+        assert!(after.len() < before.len(), "{path}: the cleaned file is not smaller");
+
+        harness::check_with_qpdf(&after, &format!("owner-{index}"));
+
+        let a = PdfiumDocument::open_bytes(before, None).expect("open the full save");
+        let b = PdfiumDocument::open_bytes(after, None).expect("open the cleaned save");
+        let pages = a.page_count().min(b.page_count()).min(40);
+        assert_eq!(a.page_count(), b.page_count(), "{path}: a page went");
+        for page in 0..pages {
+            let one = a
+                .render_page_to_bitmap(page, &RenderRequest { scale: 0.3, ..Default::default() })
+                .expect("render before");
+            let two = b
+                .render_page_to_bitmap(page, &RenderRequest { scale: 0.3, ..Default::default() })
+                .expect("render after");
+            assert_eq!(
+                (one.width, one.height, one.stride),
+                (two.width, two.height, two.stride),
+                "{path}: page {} changed size",
+                page + 1
+            );
+            assert!(one.data == two.data, "{path}: page {} draws differently after the drop", page + 1);
+        }
+    }
+}
