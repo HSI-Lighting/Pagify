@@ -13,6 +13,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod align_page;
+mod rotation_panel;
 mod canvas;
 mod chrome;
 mod caches;
@@ -598,6 +599,9 @@ struct PanelsState {
     find_replace: Option<FindReplace>,
     spell_scan: Option<SpellScan>,
     spelling: Option<SpellCheck>,
+    /// The angle being typed into the Properties panel's rotation box, `None` when not editing.
+    /// Applied only when the edit ends — a placed picture's turn rebuilds its appearance.
+    rotation_draft: Option<f32>,
 }
 
 /// The rail/Organize selection and drag: which page the rail follows, which
@@ -1036,7 +1040,7 @@ impl DocTab {
             view_state: ViewState { page: 0, zoom: ZoomMode::Fit, rotation: Rotation::None, view: None, hover_view: None, viewport_rect: None, anchor_offset: None, last_view: None, scroll_offset: egui::Vec2::ZERO, scroll_pt: 0.0, pan_by: None, scroll_to_pt: None, canvas_pt: egui::vec2(800.0, 600.0), reveal: None, saved_revision: 0, copy_wanted: false, },
             edit: EditState { editing_run: None, new_text_box: None, settling: None },
             next_text_id: 0x0100_0000,
-            panels: PanelsState { pending_link: None, extract_ask: None, #[cfg(target_os = "windows")] print_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, },
+            panels: PanelsState { pending_link: None, extract_ask: None, #[cfg(target_os = "windows")] print_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, rotation_draft: None, },
             bookmarked_pages: std::collections::HashSet::new(),
             joined_groups: Vec::new(),
             organize: OrganizeState { selection_page: 0, organize_selected: Vec::new(), organize_anchor: None, organize_drag: None },
@@ -7461,20 +7465,7 @@ impl PagifyApp {
             if (wanted - sel.rotation).abs() < 0.5 {
                 return;
             }
-            let Some(doc) = &self.tab_mut().doc else { return };
-            match doc.session.rotate_image_signature(sel.page, sel.index, wanted, sel.rotation) {
-                Ok(()) => {
-                    if let Some(doc) = &mut self.tab_mut().doc {
-                        doc.rendered_is_stale();
-                    }
-                    self.tab_mut().selection.signature_selected =
-                        Some(SignatureSelected { rotation: wanted, ..sel });
-                }
-                Err(e) => {
-                    self.say_error(e.to_string());
-                    self.tab_mut().selection.signature_selected = Some(sel);
-                }
-            }
+            self.turn_signature_to(sel, wanted);
             return;
         }
 
@@ -7539,20 +7530,7 @@ impl PagifyApp {
             if (wanted - sel.rotation).abs() < 0.5 {
                 return;
             }
-            let Some(doc) = &self.tab_mut().doc else { return };
-            match doc.session.rotate_image_signature(sel.page, sel.index, wanted, sel.rotation) {
-                Ok(()) => {
-                    if let Some(doc) = &mut self.tab_mut().doc {
-                        doc.rendered_is_stale();
-                    }
-                    self.tab_mut().selection.placed_image_selected =
-                        Some(PlacedImageSelected { rotation: wanted, ..sel });
-                }
-                Err(e) => {
-                    self.say_error(e.to_string());
-                    self.tab_mut().selection.placed_image_selected = Some(sel);
-                }
-            }
+            self.turn_placed_image_to(sel, wanted);
             return;
         }
 
@@ -7590,6 +7568,44 @@ impl PagifyApp {
                     doc.rendered_is_stale();
                 }
                 self.tab_mut().selection.placed_image_selected = Some(PlacedImageSelected { rect: wanted, ..sel });
+            }
+            Err(e) => {
+                self.say_error(e.to_string());
+                self.tab_mut().selection.placed_image_selected = Some(sel);
+            }
+        }
+    }
+
+    /// **Turn a signature picture to an absolute angle** — one command, so one undo. The ring drag
+    /// and the Properties panel's angle box and buttons both come through here, so the two cannot
+    /// behave differently.
+    fn turn_signature_to(&mut self, sel: SignatureSelected, wanted: f32) {
+        let Some(doc) = &self.tab_mut().doc else { return };
+        match doc.session.rotate_image_signature(sel.page, sel.index, wanted, sel.rotation) {
+            Ok(()) => {
+                if let Some(doc) = &mut self.tab_mut().doc {
+                    doc.rendered_is_stale();
+                }
+                self.tab_mut().selection.signature_selected =
+                    Some(SignatureSelected { rotation: wanted, ..sel });
+            }
+            Err(e) => {
+                self.say_error(e.to_string());
+                self.tab_mut().selection.signature_selected = Some(sel);
+            }
+        }
+    }
+
+    /// The same as [`Self::turn_signature_to`], for [`Self::placed_image_selected`].
+    fn turn_placed_image_to(&mut self, sel: PlacedImageSelected, wanted: f32) {
+        let Some(doc) = &self.tab_mut().doc else { return };
+        match doc.session.rotate_image_signature(sel.page, sel.index, wanted, sel.rotation) {
+            Ok(()) => {
+                if let Some(doc) = &mut self.tab_mut().doc {
+                    doc.rendered_is_stale();
+                }
+                self.tab_mut().selection.placed_image_selected =
+                    Some(PlacedImageSelected { rotation: wanted, ..sel });
             }
             Err(e) => {
                 self.say_error(e.to_string());
@@ -17434,6 +17450,7 @@ fn wrap_typed_last_line(
                 } else if let Some(picked) = picked {
                     ui.label(self.align_describe(picked));
                 }
+                self.draw_rotation(ui);
                 self.draw_align_to_page(ui);
             });
     }
@@ -18626,6 +18643,8 @@ mod g1_command_box_tests;
 mod guide_tests;
 #[cfg(test)]
 mod align_page_tests;
+#[cfg(test)]
+mod rotation_panel_tests;
 #[cfg(test)]
 mod nudge_tests;
 #[cfg(test)]
