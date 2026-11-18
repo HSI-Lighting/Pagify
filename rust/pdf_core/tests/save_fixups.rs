@@ -937,6 +937,101 @@ fn a_looping_appearance_does_not_stop_the_save() {
         .expect("a looping appearance must not stop the save");
 }
 
+// -- Task 11: a font that draws nothing but spaces ---------------------------
+
+/// **A simple font that draws only a space needs no program.** It shows
+/// nothing, so every reader's own face draws it; storing one only costs bytes.
+/// It is not reported as missing either — nothing is missing.
+#[test]
+fn a_font_used_only_for_a_space_is_not_stored() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = PdfiumDocument::open_bytes(
+        pagify_helvetica_page("BT /F1 1 Tf ( ) Tj ET"),
+        None,
+    )
+    .expect("open");
+    let program = include_bytes!("../../../desktop/third_party/fonts/Montserrat-Regular.ttf").to_vec();
+    let finder = |name: &str| (name == "ArialMT").then(|| program.clone());
+
+    let mut saved = Vec::new();
+    let report = doc
+        .save_full_copy_with_fixups(&mut saved, &SaveFixups { find_face: &finder })
+        .expect("save");
+    assert!(report.fonts_stored.is_empty(), "a face was stored for a space: {:?}", report.fonts_stored);
+    assert!(report.fonts_missing.is_empty(), "a font that draws a space was reported missing: {:?}", report.fonts_missing);
+
+    let file = File::parse(&saved).expect("a readable file");
+    let page = page_dict(&file, 0);
+    let resources = page
+        .get(b"Resources")
+        .and_then(|o| file.resolve(o).ok())
+        .and_then(|o| o.as_dict().cloned())
+        .expect("resources");
+    let fonts = resources
+        .get(b"Font")
+        .and_then(|o| file.resolve(o).ok())
+        .and_then(|o| o.as_dict().cloned())
+        .expect("fonts");
+    let (_, value) = fonts.0.first().expect("a font");
+    let font = file.resolve(value).expect("the font").as_dict().cloned().expect("a font dict");
+    assert_eq!(font.get(b"Subtype"), Some(&Object::Name(b"Type1".to_vec())), "the font was rewritten");
+    assert!(font.get(b"FontDescriptor").is_none(), "a descriptor and a program were written for a space");
+}
+
+/// **The 75 KB the owner saw.** A page's hidden block is a fully transparent
+/// space in Helvetica; storing a face for it put 75 KB of Arial into PRISMA on
+/// every save that had marks on it.
+#[test]
+fn the_marks_hidden_block_adds_no_font_to_prisma() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let path = r"C:\Users\hsili\Desktop\Pagify_EditText_Evidence\PRISMA-after-removal.pdf";
+    if !std::path::Path::new(path).is_file() {
+        eprintln!("skipping: {path} is not on this machine");
+        return;
+    }
+    let arial = r"C:\Windows\Fonts\arial.ttf";
+    if !std::path::Path::new(arial).is_file() {
+        eprintln!("skipping: {arial} is not on this machine");
+        return;
+    }
+    let arial = std::fs::read(arial).expect("read arial");
+
+    let mut doc = PdfiumDocument::open_path(path, None).expect("open the owner's file");
+    // The hidden block exactly as `commit_page` writes it: one fully transparent
+    // space in Helvetica, carrying the markup blob under the carrier id.
+    doc.add_annotation(0, &Annotation::Text {
+        text: " ".into(),
+        font: "Helvetica".into(),
+        font_asset: None,
+        size: 1.0,
+        color: Color { r: 0, g: 0, b: 0, a: 0 },
+        glyphs: vec![pdf_core::document::Glyph { ch: " ".into(), id: 0, x: 0.0, y: 0.0, radians: 0.0 }],
+        id: 0x7061_67_01,
+        restore: "{\"magic\":\"pagify.markup\",\"version\":2,\"page_height_pt\":792.0,\"objects\":[]}".into(),
+        frame: Vec::new(),
+        frame_width: 0.0,
+        scale_x: 1.0,
+        more: Vec::new(),
+        rules: Vec::new(),
+    })
+    .expect("the hidden block");
+    doc.add_annotation(0, &ink_rectangle(100.0, 200.0, 300.0, 400.0)).expect("the rectangle");
+
+    let finder = |name: &str| (name == "ArialMT").then(|| arial.clone());
+    let mut saved = Vec::new();
+    let report = doc
+        .save_full_copy_with_fixups(&mut saved, &SaveFixups { find_face: &finder })
+        .expect("the full save");
+    eprintln!("PRISMA with the hidden block: {} bytes, fonts stored {:?}", saved.len(), report.fonts_stored);
+    assert!(report.fonts_stored.is_empty(), "a face was stored for the hidden block: {:?}", report.fonts_stored);
+    assert!(saved.len() < 650_000, "the hidden block brought {} bytes; PRISMA is {} bytes", saved.len().saturating_sub(650_000), saved.len());
+    harness::check_with_qpdf(&saved, "prisma-hidden-block");
+}
+
 // -- Task 9: Pagify's own marks go into the page ------------------------------
 
 /// The drawing a page's content streams hold, decoded, one after another.

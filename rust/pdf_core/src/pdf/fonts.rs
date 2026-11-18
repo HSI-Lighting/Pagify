@@ -36,6 +36,15 @@
 //! Whole programs cost a one-page quotation 320 KB → 1.2 MB. A font in any
 //! other encoding, a symbolic one, or a CFF face is stored whole.
 //!
+//! **A simple font that draws nothing but spaces is left alone.** The marks'
+//! hidden block is one fully transparent space in Helvetica, tagged so the
+//! markup blob survives a save; storing a face for it put 75 KB of Arial into
+//! PRISMA on every save that had marks (measured 2026-11-18: `fonts_stored=ArialMT`,
+//! 147,656 bytes). A font is stored only when some content stream that names it
+//! — a page's own, a form's, an appearance's — shows a string with a byte other
+//! than space while it is the current font. It is not reported as missing then
+//! either: nothing is missing.
+//!
 //! **Variable fonts are refused.** Their default instance is not a weight this
 //! code can choose correctly (Google's Montserrat defaults to Thin, not
 //! Regular), so a file found only as a variable font is reported as missing
@@ -80,7 +89,10 @@ enum Face {
 pub fn embed_missing(bytes: &[u8], find_face: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<FontsEmbedded> {
     let file = File::parse(bytes)?;
     let mut fonts: BTreeMap<u32, Dict> = BTreeMap::new();
-    collect_page_fonts(&file, &mut fonts)?;
+    // The fonts some stream actually sets text with, and draws a byte other
+    // than a space in. A font merely listed here draws nothing.
+    let mut drawn: HashSet<u32> = HashSet::new();
+    collect_page_fonts(&file, &mut fonts, &mut drawn)?;
     if fonts.is_empty() {
         return Ok(FontsEmbedded { bytes: bytes.to_vec(), ..Default::default() });
     }
@@ -102,6 +114,12 @@ pub fn embed_missing(bytes: &[u8], find_face: &dyn Fn(&str) -> Option<Vec<u8>>) 
         // Type3 draws with procedures of its own, not a font program; Type0 is
         // left alone — see the module's doc.
         if matches!(subtype.as_deref(), Some(b"Type3") | Some(b"Type0")) {
+            continue;
+        }
+        // **Nothing to store for a font that draws nothing.** The marks'
+        // hidden space is Helvetica set at size 1, one byte of 0x20; a program
+        // for it is 75 KB of a face no reader ever draws from.
+        if !drawn.contains(&number) {
             continue;
         }
         let Some(base) = font.get(b"BaseFont").and_then(Object::as_name) else { continue };
@@ -633,8 +651,13 @@ fn checksum(data: &[u8]) -> u32 {
 // ---------------------------------------------------------------- page walk --
 
 /// Every font any page uses: its resources, its forms' resources, and the
-/// appearances of the annotations that stay.
-fn collect_page_fonts(file: &File<'_>, fonts: &mut BTreeMap<u32, Dict>) -> Result<()> {
+/// appearances of the annotations that stay — and which of them **draw**
+/// something (see the module's doc).
+fn collect_page_fonts(
+    file: &File<'_>,
+    fonts: &mut BTreeMap<u32, Dict>,
+    drawn: &mut HashSet<u32>,
+) -> Result<()> {
     let root = file
         .resolve(file.trailer().get(b"Root").ok_or_else(|| {
             PdfError::InvalidArgument("the file has no catalogue".into())
@@ -646,7 +669,7 @@ fn collect_page_fonts(file: &File<'_>, fonts: &mut BTreeMap<u32, Dict>) -> Resul
         .ok_or_else(|| PdfError::InvalidArgument("the file has no page tree".into()))?;
     let mut pages_seen = HashSet::new();
     let mut forms_seen = HashSet::new();
-    collect_pages(file, &pages, None, 0, &mut pages_seen, &mut forms_seen, fonts)
+    collect_pages(file, &pages, None, 0, &mut pages_seen, &mut forms_seen, fonts, drawn)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -658,6 +681,7 @@ fn collect_pages(
     seen: &mut HashSet<u32>,
     forms: &mut HashSet<u32>,
     fonts: &mut BTreeMap<u32, Dict>,
+    drawn: &mut HashSet<u32>,
 ) -> Result<()> {
     let Some((number, _)) = node.as_reference() else { return Ok(()) };
     if depth > 64 || !seen.insert(number) {
@@ -668,19 +692,48 @@ fn collect_pages(
     match dict.get(b"Kids") {
         Some(Object::Array(kids)) => {
             for kid in kids {
-                collect_pages(file, kid, resources.clone(), depth + 1, seen, forms, fonts)?;
+                collect_pages(file, kid, resources.clone(), depth + 1, seen, forms, fonts, drawn)?;
             }
         }
         _ => {
             if let Some(resources) = &resources {
-                collect_resources(file, resources, 0, forms, fonts)?;
+                collect_resources(file, resources, 0, forms, fonts, drawn)?;
+                note_drawn_fonts(
+                    file,
+                    Some(resources),
+                    page_content_bytes(file, &dict),
+                    drawn,
+                )?;
             }
             if let Some(annots) = dict.get(b"Annots") {
-                collect_annotation_fonts(file, annots, 0, forms, fonts)?;
+                collect_annotation_fonts(file, annots, resources.as_ref(), 0, forms, fonts, drawn)?;
             }
         }
     }
     Ok(())
+}
+
+/// The page's own drawing, decoded, every content stream one after another.
+///
+/// `None` when any of it cannot be read, which makes the caller treat every
+/// font of that page as drawn — a program that is not needed costs bytes, and
+/// one that is needed and missing draws the wrong face.
+fn page_content_bytes(file: &File<'_>, page: &Dict) -> Option<Vec<u8>> {
+    let contents = page.get(b"Contents")?;
+    let items = match file.resolve(contents).ok()? {
+        Object::Array(items) => items,
+        Object::Stream(dict, range) => {
+            return content::decode(&dict, &file.bytes()[range]);
+        }
+        _ => return None,
+    };
+    let mut out = Vec::new();
+    for item in items {
+        let Object::Stream(dict, range) = file.resolve(&item).ok()? else { continue };
+        out.extend(content::decode(&dict, &file.bytes()[range])?);
+        out.push(b'\n');
+    }
+    Some(out)
 }
 
 fn collect_resources(
@@ -689,6 +742,7 @@ fn collect_resources(
     depth: usize,
     forms: &mut HashSet<u32>,
     fonts: &mut BTreeMap<u32, Dict>,
+    drawn: &mut HashSet<u32>,
 ) -> Result<()> {
     if depth > 32 {
         return Ok(());
@@ -711,13 +765,18 @@ fn collect_resources(
                 if !forms.insert(number) {
                     continue;
                 }
-                let Ok(Object::Stream(dict, _)) = file.object(number) else { continue };
+                let Ok(Object::Stream(dict, range)) = file.object(number) else { continue };
                 if dict.get(b"Subtype").and_then(Object::as_name) != Some(b"Form") {
                     continue;
                 }
-                if let Some(inner) = dict.get(b"Resources") {
-                    collect_resources(file, inner, depth + 1, forms, fonts)?;
-                }
+                // A form with no `/Resources` draws with the page's names, as
+                // PDFium does — see `a_form_without_resources_keeps_the_page_names_it_draws_with`.
+                let inner = dict.get(b"Resources").cloned();
+                let fallback = Object::Dict(resources.clone());
+                let scope: &Object = inner.as_ref().unwrap_or(&fallback);
+                let drawing = content::decode(&dict, &file.bytes()[range]);
+                note_drawn_fonts(file, Some(scope), drawing, drawn)?;
+                collect_resources(file, scope, depth + 1, forms, fonts, drawn)?;
             }
         }
     }
@@ -727,9 +786,11 @@ fn collect_resources(
 fn collect_annotation_fonts(
     file: &File<'_>,
     annots: &Object,
+    page_resources: Option<&Object>,
     depth: usize,
     forms: &mut HashSet<u32>,
     fonts: &mut BTreeMap<u32, Dict>,
+    drawn: &mut HashSet<u32>,
 ) -> Result<()> {
     if depth > 32 {
         return Ok(());
@@ -740,19 +801,83 @@ fn collect_annotation_fonts(
         let Some(appearance) = annot.get(b"AP") else { continue };
         let Ok(Object::Dict(appearance)) = file.resolve(appearance) else { continue };
         let Some(normal) = appearance.get(b"N") else { continue };
-        match file.resolve(normal)? {
-            Object::Stream(dict, _) => {
-                if let Some(resources) = dict.get(b"Resources") {
-                    collect_resources(file, resources, depth + 1, forms, fonts)?;
-                }
+        let mut one = |dict: Dict, range: std::ops::Range<usize>| -> Result<()> {
+            let inner = dict.get(b"Resources").cloned();
+            let scope = inner.as_ref().or(page_resources);
+            let drawing = content::decode(&dict, &file.bytes()[range]);
+            note_drawn_fonts(file, scope, drawing, drawn)?;
+            if let Some(scope) = scope {
+                collect_resources(file, scope, depth + 1, forms, fonts, drawn)?;
             }
+            Ok(())
+        };
+        match file.resolve(normal)? {
+            Object::Stream(dict, range) => one(dict, range)?,
             // A dictionary of states, of which every one an appearance.
             Object::Dict(states) => {
                 for (_, value) in states.0 {
-                    let Ok(Object::Stream(dict, _)) = file.resolve(&value) else { continue };
-                    if let Some(resources) = dict.get(b"Resources") {
-                        collect_resources(file, resources, depth + 1, forms, fonts)?;
+                    if let Ok(Object::Stream(dict, range)) = file.resolve(&value) {
+                        one(dict, range)?;
                     }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Mark the fonts of `resources` that `stream` sets text with and draws a byte
+/// other than a space in.
+///
+/// **A space alone is not drawing.** `BT /F1 1 Tf ( ) Tj ET` puts no mark on the
+/// page, so its font needs no program. A stream that cannot be read marks all its
+/// fonts as drawn rather than none: a program that is not needed costs bytes, and
+/// one that is needed and missing draws the wrong face.
+fn note_drawn_fonts(
+    file: &File<'_>,
+    resources: Option<&Object>,
+    stream: Option<Vec<u8>>,
+    drawn: &mut HashSet<u32>,
+) -> Result<()> {
+    let Some(resources) = resources else { return Ok(()) };
+    let Ok(Object::Dict(resources)) = file.resolve(resources) else { return Ok(()) };
+    let Some(font) = resources.get(b"Font") else { return Ok(()) };
+    let Ok(Object::Dict(names)) = file.resolve(font) else { return Ok(()) };
+    let mut by_name: HashMap<Vec<u8>, u32> = HashMap::new();
+    for (name, value) in names.0 {
+        if let Some((number, _)) = value.as_reference() {
+            by_name.insert(name, number);
+        }
+    }
+    if by_name.is_empty() {
+        return Ok(());
+    }
+    let Some(stream) = stream else {
+        drawn.extend(by_name.values().copied());
+        return Ok(());
+    };
+    let Ok(operations) = content::parse(&stream) else {
+        drawn.extend(by_name.values().copied());
+        return Ok(());
+    };
+
+    let mut current: Option<u32> = None;
+    for operation in &operations {
+        match operation.operator.as_slice() {
+            b"Tf" => {
+                current = match operation.operands.first() {
+                    Some(Object::Name(name)) => by_name.get(name.as_slice()).copied(),
+                    _ => None,
+                };
+            }
+            b"Tj" | b"'" | b"\"" | b"TJ" => {
+                let Some(number) = current else { continue };
+                let shows_something = content::pieces(operation).iter().any(|piece| {
+                    matches!(piece, content::Piece::Codes(codes) if codes.iter().any(|byte| *byte != b' '))
+                });
+                if shows_something {
+                    drawn.insert(number);
                 }
             }
             _ => {}
