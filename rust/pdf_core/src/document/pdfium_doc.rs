@@ -2380,6 +2380,14 @@ impl Document for PdfiumDocument {
             .flatten();
 
         while let Some((handle, depth, top, to_page)) = stack.pop() {
+            // **The drawing Save baked in is not an object of the page.** It is
+            // the marks' appearance, and the marks are edited with the markup
+            // tools; moving this alone would part it from the geometry the
+            // hidden block stores. Listed nowhere, so Edit Object can neither
+            // offer nor pick it — and a form's own contents are not stepped into.
+            if unsafe { has_mark(bindings, handle, crate::pdf::flatten::MARKS_TAG) } {
+                continue;
+            }
             let kind_code = unsafe { bindings.FPDFPageObj_GetType(handle) };
             let kind = match kind_code as u32 {
                 FPDF_PAGEOBJ_TEXT => DrawnKind::Words,
@@ -6567,6 +6575,65 @@ impl DocumentMut for PdfiumDocument {
         let (replacements, extra) = self.own_content_replacements(&file, page_index, &page, &edited)?;
         let rewritten = Self::write_edit(&base, &file, &replacements, &extra)?;
         self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
+    }
+
+    /// **Byte-safe, like [`Self::remove_text`].** The tag Save wrote is in the
+    /// page's own content, one `/PagifyMarks BMC … EMC` around each drawing;
+    /// cutting those spans out removes the drawing and touches nothing else.
+    /// PDFium's object list is asked first only to know whether this page has
+    /// one at all, so a page nobody saved costs no rewrite.
+    ///
+    /// The `/PgFlatN` names the spans used stay on the page's `/Resources`; Save's
+    /// own `drop_unused_resources` takes them off, and the XObject bytes with
+    /// them, on the next full save.
+    fn remove_marked_drawing(&mut self, page_index: usize) -> Result<usize> {
+        use crate::pdf::content;
+
+        self.validate_page_index(page_index)?;
+        let page_number = i32::try_from(page_index).map_err(|_| {
+            PdfError::InvalidArgument(format!("page index {page_index} is out of range"))
+        })?;
+
+        let tagged = {
+            let raw = RawPage::open(self.document.handle(), page_number)?;
+            let bindings = pdfium()?.bindings();
+            let mut found = 0;
+            unsafe {
+                for index in 0..bindings.FPDFPage_CountObjects(raw.handle) {
+                    let object = bindings.FPDFPage_GetObject(raw.handle, index);
+                    if !object.is_null() && has_mark(bindings, object, crate::pdf::flatten::MARKS_TAG) {
+                        found += 1;
+                    }
+                }
+            }
+            found
+        };
+        if tagged == 0 {
+            return Ok(0);
+        }
+
+        let was_secured = self.already_secured;
+        let plus = self.secure_plus;
+        let permissions = self.permissions();
+        let base = self.edit_base()?;
+        let file = crate::pdf::File::parse(&base.bytes)?;
+        let page = self.page_object(&file, page_index)?;
+        let (stream, _streams) = self.page_content(&file, &page)?;
+        let operations = content::parse(&stream)?;
+        let spans = marked_spans(&operations)?;
+        if spans.is_empty() {
+            return Err(PdfError::Unsupported(
+                "the drawing is tagged, but the span that draws it is not in the page's own content",
+            ));
+        }
+        let edits: Vec<(std::ops::Range<usize>, Vec<u8>)> =
+            spans.into_iter().map(|span| (span, Vec::new())).collect();
+        let edited = content::splice(&stream, &edits);
+
+        let (replacements, extra) = self.own_content_replacements(&file, page_index, &page, &edited)?;
+        let rewritten = Self::write_edit(&base, &file, &replacements, &extra)?;
+        self.adopt_edit(&base, rewritten, was_secured, plus, permissions)?;
+        Ok(tagged)
     }
 
     fn add_text_layer(&mut self, page_index: usize, words: &[RecognisedWord]) -> Result<usize> {
@@ -19122,6 +19189,16 @@ unsafe fn mark_is_ours(
     bindings: &dyn pdfium_render::prelude::PdfiumLibraryBindings,
     mark: FPDF_PAGEOBJECTMARK,
 ) -> bool {
+    mark_name(bindings, mark).as_deref() == Some(TEXT_MARK_NAME)
+}
+
+/// A content mark's own name, as PDFium hands it back.
+///
+/// Safety: `mark` must be a live content mark.
+unsafe fn mark_name(
+    bindings: &dyn pdfium_render::prelude::PdfiumLibraryBindings,
+    mark: FPDF_PAGEOBJECTMARK,
+) -> Option<String> {
     let mut buffer = [0u16; 64];
     let mut length: c_ulong = 0;
     if bindings.FPDFPageObjMark_GetName(
@@ -19131,14 +19208,67 @@ unsafe fn mark_is_ours(
         &mut length,
     ) == 0
     {
-        return false;
+        return None;
     }
     // `length` is what the name *needs*, not what the buffer got: a name
     // longer than the buffer reports a length past its end, and slicing by it
     // collapsed the document on open. Found by audit. A name that does not
     // fit is not ours in any case.
     let characters = (length as usize / 2).saturating_sub(1).min(buffer.len());
-    String::from_utf16_lossy(&buffer[..characters]) == TEXT_MARK_NAME
+    Some(String::from_utf16_lossy(&buffer[..characters]))
+}
+
+/// The byte ranges of a page's stream that draw under `/PagifyMarks`.
+///
+/// **Found by the tag, not by geometry.** Save writes one `BMC … EMC` around
+/// each drawing it bakes, so cutting the tagged span takes the drawing and
+/// nothing else. A `BDC` with the same name is accepted too — a reader's own
+/// bake may carry properties — and a `BMC` that never closes is refused rather
+/// than left in the page to be drawn twice.
+fn marked_spans(operations: &[crate::pdf::content::Operation]) -> Result<Vec<std::ops::Range<usize>>> {
+    let mut spans = Vec::new();
+    // One entry per open marked-content sequence: our span's start, or `None`.
+    let mut open: Vec<Option<usize>> = Vec::new();
+    for operation in operations {
+        match operation.operator.as_slice() {
+            b"BMC" | b"BDC" => {
+                let ours = matches!(
+                    operation.operands.first(),
+                    Some(crate::pdf::Object::Name(name)) if name.as_slice() == crate::pdf::flatten::MARKS_TAG.as_bytes()
+                );
+                open.push(ours.then_some(operation.span.start));
+            }
+            b"EMC" => {
+                if let Some(Some(start)) = open.pop() {
+                    spans.push(start..operation.span.end);
+                }
+            }
+            _ => {}
+        }
+    }
+    if open.iter().any(Option::is_some) {
+        return Err(PdfError::Unsupported(
+            "the drawing's tag is not closed in the page's own content",
+        ));
+    }
+    Ok(spans)
+}
+
+/// Whether this page object is drawn under a content mark of `name`.
+///
+/// Safety: `object` must be a live page object.
+unsafe fn has_mark(
+    bindings: &dyn pdfium_render::prelude::PdfiumLibraryBindings,
+    object: FPDF_PAGEOBJECT,
+    name: &str,
+) -> bool {
+    for slot in 0..bindings.FPDFPageObj_CountMarks(object) {
+        let mark = bindings.FPDFPageObj_GetMark(object, slot as c_ulong);
+        if !mark.is_null() && mark_name(bindings, mark).as_deref() == Some(name) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Embed a registered font in the document, ready to be written by glyph id.

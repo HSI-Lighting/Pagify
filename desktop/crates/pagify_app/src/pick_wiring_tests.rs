@@ -1905,3 +1905,69 @@ fn lux_report_a_click_in_a_boxes_blank_space_opens_that_box() {
     let objects: Vec<Vec<usize>> = edit.lines.iter().map(|(objects, _)| objects.clone()).collect();
     assert_eq!(objects, vec![vec![78], vec![87]], "the box is not the two lines the hover showed: {objects:?}");
 }
+
+// -- Task 10: the drawing Save baked into the page ---------------------------
+
+/// **Edit Object leaves the drawing Save baked into the page alone.** The
+/// drawing is the marks' appearance, not an object of the page: marks are
+/// edited with the markup tools, and moving the drawing on its own would part
+/// it from the geometry the hidden block stores.
+#[test]
+fn a_baked_markups_drawing_is_not_offered_or_picked_by_edit_object() {
+    use pdf_core::document::{Annotation, Color, DocumentMut as _};
+
+    let _turn = one_at_a_time();
+    let path = std::env::temp_dir().join(format!("pagify-baked-drawing-{}.pdf", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    {
+        let mut doc = pdf_core::document::pdfium_doc::PdfiumDocument::open_path(
+            &fixture("two-column.pdf"),
+            None,
+        )
+        .expect("open two-column");
+        let ink = Annotation::Ink {
+            strokes: vec![vec![
+                pdf_core::document::Point { x: 100.0, y: 200.0 },
+                pdf_core::document::Point { x: 300.0, y: 200.0 },
+                pdf_core::document::Point { x: 300.0, y: 400.0 },
+                pdf_core::document::Point { x: 100.0, y: 400.0 },
+                pdf_core::document::Point { x: 100.0, y: 200.0 },
+            ]],
+            color: Color { r: 255, g: 92, b: 138, a: 255 },
+            width: 1.0,
+        };
+        doc.add_annotation(0, &ink).expect("the rectangle");
+        let finder = |_: &str| None;
+        let mut saved = Vec::new();
+        doc.save_full_copy_with_fixups(&mut saved, &pdf_core::document::SaveFixups { find_face: &finder })
+            .expect("the save that bakes the drawing into the page");
+        std::fs::write(&path, saved).expect("write the baked file");
+    }
+
+    let app = PagifyApp::new(Some(path.to_str().expect("a path")));
+    assert!(app.tab().doc.is_some(), "the baked file did not open");
+
+    // On the rectangle's own edges a click finds nothing (or what is under it),
+    // never the drawing.
+    for at in [AppPoint { x: 200.0, y: 200.0 }, AppPoint { x: 100.0, y: 300.0 }] {
+        let picked = app.thing_at(0, at, false);
+        let picked_the_drawing = matches!(picked, Some((_, _, what)) if what == "the shape" || what == "the group it is drawn in");
+        assert!(
+            !picked_the_drawing,
+            "the tagged drawing was picked at ({}, {}): {picked:?}",
+            at.x,
+            at.y
+        );
+    }
+
+    // And it is not in the list of the page's objects either.
+    let drawn = app.tab().doc.as_ref().expect("open").session.drawn_objects(0).expect("drawn");
+    let square = Rect { left: 100.0, top: 200.0, right: 300.0, bottom: 400.0 };
+    let close = |a: f32, b: f32| (a - b).abs() < 2.0;
+    let offered = drawn
+        .iter()
+        .find(|d| close(d.rect.left, square.left) && close(d.rect.top, square.top)
+            && close(d.rect.right, square.right) && close(d.rect.bottom, square.bottom));
+    assert!(offered.is_none(), "the tagged drawing is offered as an object: {offered:?}");
+    let _ = std::fs::remove_file(&path);
+}

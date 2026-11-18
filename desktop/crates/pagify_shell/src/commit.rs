@@ -49,7 +49,12 @@ use crate::page_space::PageSpace;
 /// Bump when the meaning of an existing field changes. Adding an optional field
 /// does not need it; changing what one *means* does, because an old reader must
 /// be able to tell it cannot understand the file rather than misread it.
-pub const FORMAT_VERSION: u32 = 1;
+///
+/// **2 — the appearance may be in the page.** From Save on, Pagify's own ink and
+/// filled shapes are drawn into the page under `/PagifyMarks`, not left as
+/// annotations. A reader that cannot find and remove that drawing must not
+/// rewrite the marks: it would draw them a second time beside it.
+pub const FORMAT_VERSION: u32 = 2;
 
 /// Marks a blob as ours. Other tools write `restore` blobs too; a blob that is
 /// not ours must be left alone rather than parsed and thrown away.
@@ -550,6 +555,10 @@ pub fn commit_page(
     // id, so it finds the blob however the page has been edited since — §5.2's
     // "tag every written object with the layer's id".
     let _ = doc.remove_text(page, CARRIER_ID);
+    // And the drawing Save baked into the page, if this page has been saved
+    // since its last commit. Withdrawing the count is deliberate: a page that
+    // was never saved has none, and that is not a failure.
+    let _ = doc.remove_marked_drawing(page);
     // From the back: removing by index renumbers everything after it.
     for index in doomed.into_iter().rev() {
         let _ = doc.remove_annotation(page, index);
@@ -976,6 +985,32 @@ mod tests {
 
         let refused = from_blob(&blob).expect_err("must refuse");
         assert!(refused.contains("newer"), "unhelpful message: {refused}");
+    }
+
+    /// **Format 2 is this build's own.** Its meaning changed, not its shape: the
+    /// appearance of the marks may now be in the page under `/PagifyMarks`, so a
+    /// reader that cannot remove that drawing must not rewrite the marks. A
+    /// version-2 blob is read; only a newer one is refused.
+    #[test]
+    fn a_version_two_blob_is_read() {
+        assert_eq!(FORMAT_VERSION, 2, "the marks format was not bumped for the drawing in the page");
+        let blob = serde_json::to_string(&StoredLayer {
+            magic: MAGIC.into(),
+            version: 2,
+            page_height_pt: 800.0,
+            objects: vec![StoredGeom::Line {
+                a: [10.0, 20.0],
+                b: [30.0, 40.0],
+                start_arrow: false,
+                end_arrow: false,
+                lineweight_mm: None,
+            }],
+        })
+        .unwrap();
+
+        let stored = from_blob(&blob).expect("format 2 is this build's own").expect("ours");
+        assert_eq!(stored.version, 2);
+        assert_eq!(to_layer(&stored).len(), 1);
     }
 
     #[test]

@@ -1723,6 +1723,20 @@ pub trait DocumentMut {
     /// including the document's own text, exactly where it was.
     fn remove_text(&mut self, page_index: usize, id: i32) -> Result<()>;
 
+    /// Take out the drawing Save baked into this page, if there is one.
+    ///
+    /// Every page object carrying a `/PagifyMarks` mark is removed
+    /// **byte-safely**, the way [`DocumentMut::remove_text`] does it: the span
+    /// that draws it is cut out of the page's own content, and the page is not
+    /// regenerated. Returns how many objects went; **0 is not an error** — a
+    /// page nobody baked has none.
+    ///
+    /// What a page's next commit calls, so the marks it writes as annotations
+    /// are drawn once and not over the drawing the last Save left behind.
+    fn remove_marked_drawing(&mut self, _page_index: usize) -> Result<usize> {
+        Ok(0)
+    }
+
     /// Write recognised words onto a page as invisible, selectable text.
     ///
     /// The page must look **byte-for-byte the same** afterwards. What changes is
