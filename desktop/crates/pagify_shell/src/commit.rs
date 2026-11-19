@@ -516,6 +516,11 @@ pub struct Committed {
     pub strokes_written: usize,
     pub objects_stored: usize,
     pub skipped: Vec<Unstorable>,
+    /// Why the page's previous hidden block could not be replaced, if it could
+    /// not — a removal that leaves the old block beside the new one. A Save must
+    /// not fail for this, but it must not be silent either: the caller records
+    /// it.
+    pub carrier_not_removed: Option<String>,
 }
 
 /// Write a page's markup into the document.
@@ -553,8 +558,17 @@ pub fn commit_page(
 
     // Clear what a previous commit left. `remove_text` is keyed on the carrier
     // id, so it finds the blob however the page has been edited since — §5.2's
-    // "tag every written object with the layer's id".
-    let _ = doc.remove_text(page, CARRIER_ID);
+    // "tag every written object with the layer's id". It now finds the carrier
+    // by its tag when it has no run (a space has no area), and removes every one
+    // it finds, so a page saved before 9c gets back to one block rather than
+    // keeping its old ones.
+    let carrier_not_removed = match doc.remove_text(page, CARRIER_ID) {
+        // Nothing of that id on the page: the ordinary first commit.
+        Ok(()) | Err(pdf_core::PdfError::InvalidArgument(_)) => None,
+        // Something was there and could not be cut: a Save must not fail for
+        // it, but the caller is told so it is not silent.
+        Err(error) => Some(error.to_string()),
+    };
     // And the drawing Save baked into the page, if this page has been saved
     // since its last commit. Withdrawing the count is deliberate: a page that
     // was never saved has none, and that is not a failure.
@@ -683,6 +697,7 @@ pub fn commit_page(
         strokes_written,
         objects_stored: layer.objects().len() - skipped.len(),
         skipped,
+        carrier_not_removed,
     })
 }
 
@@ -781,12 +796,18 @@ fn same_stroke(a: &[PdfPoint], b: &[PdfPoint]) -> bool {
 }
 
 /// Read a page's markup back out of a document.
+///
+/// **The last blob that is ours, not the first.** Each commit appends its
+/// carrier, and a file saved before 0.1.126 could carry several; the newest is
+/// the one the most recent commit wrote. This is what
+/// `DocumentMut::text_mark_restore` returns for the carrier id, so `restore_page`
+/// and `previous_markup_indices` agree on which layer is the page's.
 pub fn restore_page(
     doc: &dyn pdf_core::document::Document,
     page: usize,
 ) -> std::result::Result<Option<StoredLayer>, String> {
     let blobs = doc.text_marks(page).map_err(|e| e.to_string())?;
-    for blob in blobs {
+    for blob in blobs.into_iter().rev() {
         if let Some(stored) = from_blob(&blob)? {
             return Ok(Some(stored));
         }

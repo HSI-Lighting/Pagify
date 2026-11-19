@@ -1,9 +1,10 @@
 //! **Marks drawn into the page come back as marks, and are never drawn twice.**
 //!
-//! Save writes Pagify's own ink into the page under `/PagifyMarks` so every
+//! Save writes the markup layer's ink into the page under `/PagifyMarks` so every
 //! viewer shows it; the geometry stays in the hidden block. This is the other
 //! half: the drawing is taken back out when the page's marks are next committed,
-//! and a reopen with no edit leaves both the drawing and the geometry alone.
+//! the hidden block is replaced rather than added to, and a reopen with no edit
+//! leaves both the drawing and the geometry alone.
 //!
 //! ```text
 //! PAGIFY_PDFIUM_LIB=<pdfium> cargo test --release -p pagify_shell --test marks_into_the_page
@@ -15,6 +16,7 @@ use pagify_shell::markup::Layer;
 use pagify_shell::Session;
 use pdf_core::command::Command;
 use pdf_core::document::{Annotation, Color, Point};
+use pdf_core::pdf::{File, Object};
 
 fn fixture(name: &str) -> String {
     format!("{}/../../../rust/pdf_core/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))
@@ -26,21 +28,26 @@ fn scratch(name: &str) -> std::path::PathBuf {
     path
 }
 
-/// One closed rectangle, the way the markup tool draws it.
-fn rectangle_layer(page_height_pt: f64) -> Layer {
+/// A rectangle at a chosen place, the way the markup tool draws it.
+fn rect_at(page_height_pt: f64, x0: f64, y0: f64, x1: f64, y1: f64) -> Layer {
     let mut layer = Layer::new(page_height_pt);
     layer.add(Geom::Polyline(Polyline {
         vertices: vec![
-            PolyVertex { pos: Vec2::new(100.0, 200.0), bulge: 0.0 },
-            PolyVertex { pos: Vec2::new(300.0, 200.0), bulge: 0.0 },
-            PolyVertex { pos: Vec2::new(300.0, 400.0), bulge: 0.0 },
-            PolyVertex { pos: Vec2::new(100.0, 400.0), bulge: 0.0 },
-            PolyVertex { pos: Vec2::new(100.0, 200.0), bulge: 0.0 },
+            PolyVertex { pos: Vec2::new(x0, y0), bulge: 0.0 },
+            PolyVertex { pos: Vec2::new(x1, y0), bulge: 0.0 },
+            PolyVertex { pos: Vec2::new(x1, y1), bulge: 0.0 },
+            PolyVertex { pos: Vec2::new(x0, y1), bulge: 0.0 },
+            PolyVertex { pos: Vec2::new(x0, y0), bulge: 0.0 },
         ],
         closed: true,
         widths: Vec::new(),
     }));
     layer
+}
+
+/// One closed rectangle, the way the markup tool draws it.
+fn rectangle_layer(page_height_pt: f64) -> Layer {
+    rect_at(page_height_pt, 100.0, 200.0, 300.0, 400.0)
 }
 
 fn pink() -> Color {
@@ -56,6 +63,52 @@ fn ink_annotations(session: &Session) -> usize {
         .count()
 }
 
+/// The x of the first rectangle a restored layer holds.
+fn restored_x(stored: &commit::StoredLayer) -> f64 {
+    let layer = commit::to_layer(stored);
+    match &layer.objects().first().expect("a restored object").geom {
+        Geom::Polyline(p) => p.vertices[0].pos.x as f64,
+        other => panic!("the restored object is not a rectangle: {other:?}"),
+    }
+}
+
+/// How many hidden blocks the file's page content holds.
+///
+/// `/PagifyText` is written once per carrier, inside its `BDC … EMC`; a file
+/// saved after several commits has one for each, so this is what "one per page"
+/// is measured by. Every stream is decoded, because PDFium compresses on save.
+fn carrier_count(bytes: &[u8]) -> usize {
+    const MARK: &[u8] = b"/PagifyText";
+    let file = File::parse(bytes).expect("a readable file");
+    let mut count = 0;
+    for number in 1..40_000u32 {
+        if let Ok(Object::Stream(dict, range)) = file.object(number) {
+            if let Some(drawing) = pdf_core::pdf::content::decode(&dict, &file.bytes()[range]) {
+                count += drawing.windows(MARK.len()).filter(|window| *window == MARK).count();
+            }
+        }
+    }
+    count
+}
+
+/// Whether the file still stores ArialMT's outlines.
+fn arial_program_present(bytes: &[u8]) -> bool {
+    let file = File::parse(bytes).expect("a readable file");
+    for number in 1..40_000u32 {
+        let Ok(Object::Dict(font)) = file.object(number) else { continue };
+        let Some(base) = font.get(b"BaseFont").and_then(Object::as_name) else { continue };
+        if !String::from_utf8_lossy(base).contains("ArialMT") {
+            continue;
+        }
+        let Some(descriptor) = font.get(b"FontDescriptor") else { continue };
+        let Ok(Object::Dict(descriptor)) = file.resolve(descriptor) else { continue };
+        if descriptor.get(b"FontFile2").is_some() || descriptor.get(b"FontFile3").is_some() {
+            return true;
+        }
+    }
+    false
+}
+
 /// Whether the file draws anything under the tag — decoded, because PDFium
 /// compresses the page's content when it saves.
 fn holds_the_tag(bytes: &[u8]) -> bool {
@@ -65,7 +118,7 @@ fn holds_the_tag(bytes: &[u8]) -> bool {
 /// The first page's drawing, every content stream decoded, so a tag can be
 /// counted rather than merely found.
 fn first_page_drawing(bytes: &[u8]) -> String {
-    use pdf_core::pdf::{content, Dict, File, Object};
+    use pdf_core::pdf::{content, Dict};
 
     fn walk(file: &File<'_>, node: &Object, out: &mut Vec<Dict>) {
         let Some(dict) = node.as_dict() else { return };
@@ -110,6 +163,71 @@ fn first_page_drawing(bytes: &[u8]) -> String {
 
 fn pixel_count(raster: &pagify_shell::session::PageRaster, wanted: fn(&[u8]) -> bool) -> usize {
     raster.pixels.chunks_exact(4).filter(|p| wanted(p)).count()
+}
+
+/// Pink pixels inside one box of a scale-1.0 render.
+fn pink_in(raster: &pagify_shell::session::PageRaster, x0: usize, y0: usize, x1: usize, y1: usize) -> usize {
+    let w = raster.width as usize;
+    let mut count = 0;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let p = &raster.pixels[(y * w + x) * 4..(y * w + x) * 4 + 4];
+            if p[0] > 200 && (60..140).contains(&p[1]) && (100..180).contains(&p[2]) {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+/// A page whose own content carries two hidden blocks, with different layers.
+///
+/// Written by hand because the engine no longer produces one: each commit must
+/// leave exactly one, and files saved before 9c are the ones with several.
+fn two_carrier_page(first: &str, second: &str) -> Vec<u8> {
+    let content = format!(
+        "/PagifyText <</id 1885431553 /restore ({first})>> BDC\n\
+         BT /F1 1 Tf 12 0 0 12 40 60 Tm ( ) Tj ET\n\
+         EMC\n\
+         /PagifyText <</id 1885431553 /restore ({second})>> BDC\n\
+         BT /F1 1 Tf 12 0 0 12 40 40 Tm ( ) Tj ET\n\
+         EMC\n"
+    );
+    let objects: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>".to_vec(),
+        {
+            let mut stream = format!("<< /Length {} >>\nstream\n", content.len()).into_bytes();
+            stream.extend_from_slice(content.as_bytes());
+            stream.extend_from_slice(b"\nendstream");
+            stream
+        },
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_vec(),
+    ];
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (index, body) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+        out.extend_from_slice(body);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes());
+    for offset in offsets {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1).as_bytes(),
+    );
+    out
+}
+
+fn blob(x0: f64, y0: f64, x1: f64, y1: f64) -> String {
+    format!(
+        "{{\"magic\":\"pagify.markup\",\"version\":2,\"page_height_pt\":792.0,\"objects\":[{{\"k\":\"polyline\",\"v\":[[{x0},{y0},0.0],[{x1},{y0},0.0],[{x1},{y1},0.0],[{x0},{y1},0.0],[{x0},{y0},0.0]],\"closed\":true,\"filled\":false,\"lineweight_mm\":null}}]}}"
+    )
 }
 
 /// **The whole round trip.** A rectangle is drawn, saved, reopened, edited and
@@ -179,11 +297,7 @@ fn reopening_without_editing_leaves_the_drawing_and_restores_the_marks() {
 
     // The drawing is still what the page shows.
     let raster = reopened.render_page(0, 1.0).expect("render");
-    let pink = raster
-        .pixels
-        .chunks_exact(4)
-        .filter(|p| p[0] > 200 && (60..140).contains(&p[1]) && (100..180).contains(&p[2]))
-        .count();
+    let pink = pixel_count(&raster, |p| p[0] > 200 && (60..140).contains(&p[1]) && (100..180).contains(&p[2]));
     assert!(pink > 0, "the page does not draw the rectangle at all");
     let _ = std::fs::remove_file(&path);
 }
@@ -310,5 +424,173 @@ fn a_file_marked_by_0_1_125_bakes_on_its_first_save() {
         drawn_with_marks.pixels, drawn_as_page.pixels,
         "the page draws differently after baking the rectangles"
     );
+    let _ = std::fs::remove_file(&out);
+}
+
+/// **One commit leaves one hidden block.** Before this, every commit added one:
+/// the carrier is a space PDFium makes no run of, so `remove_text` never found
+/// it, and each Save commits every marked page.
+#[test]
+fn committing_twice_leaves_one_hidden_block() {
+    let session = Session::open(fixture("two-column.pdf")).expect("open");
+    let height = session.page_size(0).expect("size").height_pt as f64;
+    session.commit_markup(0, &rectangle_layer(height), pink(), 1.0).expect("commit");
+    assert_eq!(carrier_count(&session.current_bytes().expect("bytes")), 1, "setup: one block after one commit");
+    session.commit_markup(0, &rectangle_layer(height), pink(), 1.0).expect("commit again");
+    assert_eq!(
+        carrier_count(&session.current_bytes().expect("bytes")),
+        1,
+        "the second commit added a hidden block instead of replacing the first"
+    );
+}
+
+/// **Every Save commits, so every Save must replace.** Saved, reopened and
+/// recommitted three times — with Arial on offer as the app's finder supplies it
+/// — the page still carries one hidden block.
+#[test]
+fn a_page_saved_and_reopened_three_times_keeps_one_hidden_block() {
+    let arial_path = r"C:\Windows\Fonts\arial.ttf";
+    if !std::path::Path::new(arial_path).is_file() {
+        eprintln!("skipping: {arial_path} is not on this machine");
+        return;
+    }
+    let arial = std::fs::read(arial_path).expect("read Arial");
+    let finder = |_: &str| Some(arial.clone());
+    let path = scratch("three");
+    let pink = pink();
+
+    let session = Session::open(fixture("two-column.pdf")).expect("open");
+    let height = session.page_size(0).expect("size").height_pt as f64;
+    session.commit_markup(0, &rectangle_layer(height), pink, 1.0).expect("commit");
+    session.save_to_with_fixups(&path, false, &finder).expect("save");
+    drop(session);
+
+    for round in 1..=3 {
+        let session = Session::open(&path).expect("reopen");
+        let layer = session.restore_markup(0).expect("read the hidden block").expect("the layer came back");
+        session.commit_markup(0, &layer, pink, 1.0).expect("commit as Save does");
+        assert_eq!(
+            carrier_count(&session.current_bytes().expect("bytes")),
+            1,
+            "round {round}: the page carries more than one hidden block"
+        );
+        session.save_to_with_fixups(&path, false, &finder).expect("save again");
+    }
+    assert_eq!(
+        carrier_count(&std::fs::read(&path).expect("read the saved file")),
+        1,
+        "the saved file carries more than one hidden block"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// **An edit made after reopening is what the next reopen restores.** Draw A,
+/// save; reopen, replace A by B, save; reopen and Save as the app does. Only B
+/// may be drawn, and B is what the hidden block holds — before this, A came
+/// back, the next Save wrote A and removed B's drawing.
+#[test]
+fn an_edit_made_after_reopening_is_what_the_next_reopen_restores() {
+    let path = scratch("edit");
+    let pink = pink();
+
+    let session = Session::open(fixture("two-column.pdf")).expect("open");
+    let height = session.page_size(0).expect("size").height_pt as f64;
+    session.commit_markup(0, &rect_at(height, 100.0, 200.0, 300.0, 400.0), pink, 1.0).expect("A");
+    session.save_to_with_fixups(&path, false, &|_: &str| None).expect("save 1");
+    drop(session);
+
+    let session = Session::open(&path).expect("reopen 1");
+    session.commit_markup(0, &rect_at(height, 350.0, 450.0, 550.0, 650.0), pink, 1.0).expect("B replaces A");
+    session.save_to_with_fixups(&path, false, &|_: &str| None).expect("save 2");
+    drop(session);
+
+    let session = Session::open(&path).expect("reopen 2");
+    let stored = session
+        .with_engine(|s| commit::restore_page(&*s.document, 0).map_err(pdf_core::PdfError::InvalidArgument))
+        .expect("read the hidden block")
+        .expect("the layer came back");
+    assert_eq!(restored_x(&stored), 350.0, "the edit made after reopening did not replace the old marks");
+    let layer = commit::to_layer(&stored);
+    session.commit_markup(0, &layer, pink, 1.0).expect("Save's commit");
+    session.save_to_with_fixups(&path, false, &|_: &str| None).expect("save 3");
+    drop(session);
+
+    let session = Session::open(&path).expect("reopen 3");
+    let raster = session.render_page(0, 1.0).expect("render");
+    // By its own x band: A and B do not overlap across the page, and the rows a
+    // raster reports are not the app's own y, so the columns are what to read.
+    let height = raster.height as usize;
+    assert!(pink_in(&raster, 340, 0, 560, height) > 0, "B is not drawn");
+    assert_eq!(pink_in(&raster, 90, 0, 310, height), 0, "A is drawn as well as B");
+    assert_eq!(
+        carrier_count(&std::fs::read(&path).expect("read the saved file")),
+        1,
+        "the page carries more than one hidden block"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// **A page with old hidden blocks restores the newest, and one commit leaves
+/// one.** Files saved since 0.1.91 can carry several; each commit appended. The
+/// last is the newest, because that is the one the last commit wrote.
+#[test]
+fn a_page_with_old_hidden_blocks_restores_the_newest_and_keeps_one() {
+    let path = scratch("two-blocks");
+    std::fs::write(&path, two_carrier_page(&blob(100.0, 200.0, 300.0, 400.0), &blob(350.0, 450.0, 550.0, 650.0)))
+        .expect("write the two-block page");
+    assert_eq!(carrier_count(&std::fs::read(&path).expect("read")), 2, "setup: two hidden blocks");
+
+    let session = Session::open(&path).expect("open the two-block page");
+    let stored = session
+        .with_engine(|s| commit::restore_page(&*s.document, 0).map_err(pdf_core::PdfError::InvalidArgument))
+        .expect("read the hidden block")
+        .expect("a layer came back");
+    assert_eq!(restored_x(&stored), 350.0, "the older hidden block came back instead of the newest");
+
+    let layer = commit::to_layer(&stored);
+    session.commit_markup(0, &layer, pink(), 1.0).expect("commit");
+    assert_eq!(
+        carrier_count(&session.current_bytes().expect("bytes")),
+        1,
+        "the old hidden blocks were not all replaced"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// **The owner's PRISMA, through the app's Save.** Its 0.1.125 block holds an
+/// ArialMT program and draws the rectangles; the new block supersedes it. One
+/// save later the page carries one block, Arial's program is gone, and the file
+/// is under 650,000 bytes.
+#[test]
+fn the_owners_prisma_drops_the_old_arial_on_its_first_save() {
+    let path = r"C:\Users\hsili\Desktop\Pagify_EditText_Evidence\PRISMA-3-rectangles.pdf";
+    if !std::path::Path::new(path).is_file() {
+        eprintln!("skipping: {path} is not on this machine");
+        return;
+    }
+    let arial_path = r"C:\Windows\Fonts\arial.ttf";
+    if !std::path::Path::new(arial_path).is_file() {
+        eprintln!("skipping: {arial_path} is not on this machine");
+        return;
+    }
+    let arial = std::fs::read(arial_path).expect("read Arial");
+    let finder = |_: &str| Some(arial.clone());
+    let out = scratch("prisma-one-block");
+
+    let input = std::fs::read(path).expect("read the owner's file");
+    assert_eq!(carrier_count(&input), 1, "setup: the owner's file carries one hidden block");
+    assert!(arial_program_present(&input), "setup: the owner's file stores ArialMT's outlines");
+
+    let session = Session::open(path).expect("open the owner's file");
+    let layer = session.restore_markup(0).expect("read the hidden block").expect("the layer came back");
+    session.commit_markup(0, &layer, pink(), 1.5).expect("commit as Save does");
+    session.save_to_with_fixups(&out, false, &finder).expect("save with the app's finder");
+    drop(session);
+
+    let saved = std::fs::read(&out).expect("read the saved file");
+    eprintln!("PRISMA after its first save: {} bytes, {} hidden block(s)", saved.len(), carrier_count(&saved));
+    assert_eq!(carrier_count(&saved), 1, "the old block was kept beside the new one");
+    assert!(!arial_program_present(&saved), "ArialMT's outlines are still in the file");
+    assert!(saved.len() < 650_000, "the file is {} bytes; the old block's font was not dropped", saved.len());
     let _ = std::fs::remove_file(&out);
 }

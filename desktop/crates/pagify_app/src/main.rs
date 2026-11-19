@@ -11905,6 +11905,16 @@ impl PagifyApp {
                     Ok(committed) => {
                         stored += committed.objects_stored;
                         skipped.extend(committed.skipped.into_iter().map(|s| s.what));
+                        // A Save does not fail for a hidden block that could not
+                        // be replaced, but it is recorded: the old block would
+                        // sit beside the new one, and the next reopen would
+                        // restore the old marks.
+                        if let Some(why) = committed.carrier_not_removed {
+                            self.recording_state.session_log.record(
+                                "error",
+                                &format!("page {}: the marks' hidden block was not replaced: {why}", page + 1),
+                            );
+                        }
                     }
                     Err(e) => {
                         self.say_error(format!("could not write the markup on page {}: {e}", page + 1));

@@ -6477,6 +6477,13 @@ impl DocumentMut for PdfiumDocument {
         let page = RawPage::open(self.document.handle(), page_number)?;
         let bindings = pdfium()?.bindings();
 
+        // **The last one, not the first.** Each commit appends its carrier after
+        // the page's other objects, and a file saved before this version can
+        // carry several (a commit used to add one instead of replacing the last).
+        // The newest is the one the most recent commit wrote, so it is the one to
+        // bring back; returning the first handed an edit made after reopening
+        // straight back to the state before it.
+        let mut found: Option<String> = None;
         // Safety: the page is live for the loop and closed by RawPage's drop.
         unsafe {
             for index in 0..bindings.FPDFPage_CountObjects(page.handle) {
@@ -6485,14 +6492,13 @@ impl DocumentMut for PdfiumDocument {
                     continue;
                 }
                 if let Some(blob) = text_mark_restore_of(bindings, object) {
-                    return Ok(blob);
+                    found = Some(blob);
                 }
             }
         }
-
-        Err(PdfError::InvalidArgument(format!(
-            "page {page_index} has no text mark {id}"
-        )))
+        found.ok_or_else(|| {
+            PdfError::InvalidArgument(format!("page {page_index} has no text mark {id}"))
+        })
     }
 
     /// **Byte-safe, not `FPDFPage_GenerateContent`.** That call rebuilds the
@@ -6609,9 +6615,24 @@ impl DocumentMut for PdfiumDocument {
             edits.push((from..to, Vec::new()));
         }
         if edits.is_empty() {
-            return Err(PdfError::Unsupported(
-                "that text mark cannot be found in the page's own content",
-            ));
+            // **No run: the mark has no area — the markup carrier is one
+            // transparent space.** A run is how a typed text mark is found, but
+            // PDFium makes none for a space written on its own, so that path
+            // could never remove the carrier; every commit added another one.
+            // Its tag is still in the page's own content, so cut every
+            // `/PagifyText <</id N …>> BDC … EMC` with this id — all of them, so
+            // a page that has collected several (every commit before this
+            // version added one) is left with none rather than one fewer.
+            //
+            // Typed text is untouched by this: it is found by its run above and
+            // never reaches here.
+            let spans = text_mark_spans(&operations, id);
+            if spans.is_empty() {
+                return Err(PdfError::Unsupported(
+                    "that text mark cannot be found in the page's own content",
+                ));
+            }
+            edits.extend(spans.into_iter().map(|span| (span, Vec::new())));
         }
         let edited = content::splice(&stream, &edits);
 
@@ -19308,6 +19329,45 @@ fn marked_spans(operations: &[crate::pdf::content::Operation]) -> Result<Vec<std
         ));
     }
     Ok(spans)
+}
+
+/// The byte ranges of a page's `/PagifyText <</id N …>> BDC … EMC` marks.
+///
+/// The way [`marked_spans`] finds the drawing Save baked: a mark with no area —
+/// the markup carrier is one transparent space — has no run PDFium will report,
+/// but its tag is in the page's own content. Every mark with this id is
+/// returned, so a page that collected several carriers (every commit before
+/// 9c added one) is left with none rather than one fewer.
+fn text_mark_spans(operations: &[crate::pdf::content::Operation], id: i32) -> Vec<std::ops::Range<usize>> {
+    let mut spans = Vec::new();
+    let mut open: Vec<Option<usize>> = Vec::new();
+    for operation in operations {
+        match operation.operator.as_slice() {
+            b"BDC" | b"BMC" => {
+                let ours = operation.operator.as_slice() == b"BDC"
+                    && matches!(
+                        operation.operands.first(),
+                        Some(crate::pdf::Object::Name(name)) if name.as_slice() == TEXT_MARK_NAME.as_bytes()
+                    )
+                    && operation
+                        .operands
+                        .get(1)
+                        .and_then(crate::pdf::Object::as_dict)
+                        .and_then(|properties| properties.get(TEXT_MARK_ID.as_bytes()))
+                        .and_then(crate::pdf::Object::as_i64)
+                        .and_then(|value| i32::try_from(value).ok())
+                        == Some(id);
+                open.push(ours.then_some(operation.span.start));
+            }
+            b"EMC" => {
+                if let Some(Some(start)) = open.pop() {
+                    spans.push(start..operation.span.end);
+                }
+            }
+            _ => {}
+        }
+    }
+    spans
 }
 
 /// Whether this page object is drawn under a content mark of `name`.
