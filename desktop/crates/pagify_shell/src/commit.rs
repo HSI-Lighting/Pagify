@@ -617,7 +617,7 @@ pub fn commit_page(
         // of the solid interior rather than lost beneath it.
         if filled.contains(&object.handle) {
             if let Some(ring) = outline.first().cloned() {
-                doc.add_annotation(
+                let index = doc.add_annotation(
                     page,
                     &Annotation::Fill {
                         outline: ring,
@@ -627,14 +627,19 @@ pub fn commit_page(
                     }
                     .unturned(frame),
                 )?;
+                doc.mark_as_markup(page, index)?;
             }
         }
 
         strokes_written += outline.len();
-        doc.add_annotation(
+        let index = doc.add_annotation(
             page,
             &Annotation::Ink { strokes: outline, color: pen, width: pen_width }.unturned(frame),
         )?;
+        // **This is what Save may draw into the page, and the next commit may
+        // take back out.** A drawn signature, an article box and Android's ink
+        // are Ink with a colour key too; only this key says the layer wrote it.
+        doc.mark_as_markup(page, index)?;
 
         for tri in &arrow_fills {
             let ring: Vec<PdfPoint> = tri
@@ -644,11 +649,12 @@ pub fn commit_page(
                     PdfPoint { x: p.x as f32, y: p.y as f32 }
                 })
                 .collect();
-            doc.add_annotation(
+            let index = doc.add_annotation(
                 page,
                 &Annotation::Fill { outline: ring, fill_color: pen, stroke_color: pen, width: pen_width }
                     .unturned(frame),
             )?;
+            doc.mark_as_markup(page, index)?;
         }
     }
 

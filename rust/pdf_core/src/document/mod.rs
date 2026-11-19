@@ -2070,6 +2070,21 @@ pub trait DocumentMut {
         Err(PdfError::Unsupported("marking a signature in this document"))
     }
 
+    /// Record that an ink or filled-shape annotation is one the **markup layer
+    /// wrote**, so Save may draw it into the page.
+    ///
+    /// Written onto the annotation in the file (`/PagifyMarkup`), because the
+    /// next commit has to tell it apart from ink that only *looks* like it:
+    /// a drawn signature, an article box and ink from Pagify Android all carry
+    /// `/PagifyColor` too, and none of them is in the hidden block — so baking
+    /// one in and then removing the drawing would erase it for good.
+    ///
+    /// Not to be confused with [`Self::mark_as_signature`]: a signature is the
+    /// opposite case, exactly the ink a commit must never take away.
+    fn mark_as_markup(&mut self, _page_index: usize, _index: usize) -> Result<()> {
+        Err(PdfError::Unsupported("marking the markup layer's drawing in this document"))
+    }
+
     /// Keep a just-placed picture signature's original, alpha-bearing pixels
     /// for [`DocumentMut::apply_signatures`] to use later — an optional
     /// enhancement, not a requirement: a document type that does not

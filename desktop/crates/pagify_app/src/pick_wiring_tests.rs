@@ -1936,7 +1936,8 @@ fn a_baked_markups_drawing_is_not_offered_or_picked_by_edit_object() {
             color: Color { r: 255, g: 92, b: 138, a: 255 },
             width: 1.0,
         };
-        doc.add_annotation(0, &ink).expect("the rectangle");
+        let index = doc.add_annotation(0, &ink).expect("the rectangle");
+        doc.mark_as_markup(0, index).expect("the markup layer's own drawing");
         let finder = |_: &str| None;
         let mut saved = Vec::new();
         doc.save_full_copy_with_fixups(&mut saved, &pdf_core::document::SaveFixups { find_face: &finder })
@@ -1946,6 +1947,10 @@ fn a_baked_markups_drawing_is_not_offered_or_picked_by_edit_object() {
 
     let app = PagifyApp::new(Some(path.to_str().expect("a path")));
     assert!(app.tab().doc.is_some(), "the baked file did not open");
+    assert!(
+        pdf_core::pdf::content::may_name(&std::fs::read(&path).expect("read the baked file"), b"/PagifyMarks"),
+        "setup: the drawing was not baked into the page at all"
+    );
 
     // On the rectangle's own edges a click finds nothing (or what is under it),
     // never the drawing.

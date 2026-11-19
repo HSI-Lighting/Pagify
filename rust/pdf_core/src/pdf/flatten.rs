@@ -12,11 +12,14 @@
 //! Save keeps every other mark a mark, with an appearance of its own, as Foxit
 //! and Acrobat do.
 //!
-//! **Pagify's own marks are tagged `/PagifyMarks`.** A rectangle, line or ink
-//! stroke drawn in Pagify is one everywhere only when it is part of the page;
-//! the tag is what lets a later commit take the drawing out again, since the
-//! geometry that draws it is stored separately. A placed picture is not tagged:
-//! it becomes a page picture on purpose.
+//! **The markup layer's own marks are tagged `/PagifyMarks`.** A rectangle, line
+//! or ink stroke drawn in Pagify is one everywhere only when it is part of the
+//! page; the tag is what lets a later commit take the drawing out again, since
+//! the geometry that draws it is stored separately. Only marks the layer itself
+//! wrote (`/PagifyMarkup`) are baked: a drawn signature, an article box and
+//! Android's ink are ink with a colour key too, and nothing in the blob could
+//! put them back. A placed picture is not tagged: it becomes a page picture on
+//! purpose.
 //!
 //! # How a picture is written
 //!
@@ -47,9 +50,9 @@ pub struct Flattened {
     pub pictures: usize,
     /// Annotations put down as forms.
     pub forms: usize,
-    /// Pagify's own marks put down inside a `/PagifyMarks` tag: the ink and
-    /// filled shapes a commit wrote, which the next commit must be able to
-    /// take back out.
+    /// The markup layer's own marks put down inside a `/PagifyMarks` tag: the
+    /// ink and filled shapes a commit wrote, which the next commit must be able
+    /// to take back out.
     pub marks: usize,
     /// Marks left as annotations because they carry **no appearance to bake**:
     /// the highlights, underlines and ink PDFium writes are a colour and some
@@ -67,13 +70,14 @@ const NAME_PREFIX: &str = "PgFlat";
 /// The tag a Pagify mark's drawing is written under. See [`flatten_for_save`].
 pub(crate) const MARKS_TAG: &str = "PagifyMarks";
 
-/// The key [`set_annotation_colour_key`] records a mark's colour under — and so
-/// the one thing in the file that says a mark is **Pagify's own**. Another
-/// app's ink does not carry it, and is not ours to draw into the page.
+/// The key that says a mark is **the markup layer's own drawing**, written by
+/// `DocumentMut::mark_as_markup` and read here.
 ///
-/// `set_annotation_colour_key` and the constant it writes live in
-/// `document::pdfium_doc`, on the writing side; this is the reading side.
-const OWN_MARK: &[u8] = b"PagifyColor";
+/// `/PagifyColor` alone is not enough, and was the bug the review found: a drawn
+/// signature, an article box and ink from Pagify Android all carry it, none is in
+/// the hidden block, and baking one would have the next commit remove the drawing
+/// with nothing to put back — the signature erased for good.
+const MARKUP: &[u8] = b"PagifyMarkup";
 
 /// The kinds of annotation that are marks on the page. Everything else — links,
 /// fields, notes, popups, attachments — is something a reader does, not draws.
@@ -158,11 +162,13 @@ fn plan(file: &File<'_>, annot: &Dict) -> std::result::Result<Plan, Skip> {
     appearance(file, annot).ok_or(Skip::Bare)
 }
 
-/// Whether this annotation is one of Pagify's own marks that Save draws into the
-/// page: its ink, and the filled shapes and arrowheads it writes as a Stamp
-/// drawn as a form. A highlight, a note, a link and another app's ink are not.
+/// Whether this annotation is one of the markup layer's own marks that Save
+/// draws into the page: its ink, and the filled shapes and arrowheads it writes
+/// as a Stamp drawn as a form. A highlight, a note, a link, another app's ink
+/// **and ink Pagify itself wrote outside the markup layer** (a drawn signature,
+/// an article box, Android's) are not.
 fn pagify_mark(annot: &Dict, plan: &Plan) -> bool {
-    if annot.get(OWN_MARK).is_none() {
+    if annot.get(MARKUP).is_none() {
         return false;
     }
     match annot.get(b"Subtype") {
@@ -288,17 +294,19 @@ pub fn flatten_pictures(bytes: &[u8]) -> Result<Flattened> {
     flatten(bytes, What::Pictures)
 }
 
-/// Bake a placed picture **and Pagify's own marks** into their pages.
+/// Bake a placed picture **and the markup layer's own marks** into their pages.
 ///
 /// The owner's decision, 2026-11-18: a rectangle, line, arrow or ink stroke
 /// drawn in Pagify must look the same in every viewer after Save, and only
 /// drawing that is part of the page does. Pictures go down untagged, as
-/// [`flatten_pictures`] writes them; Pagify's own ink and filled shapes are
-/// written inside `/PagifyMarks`, so [`crate::document::DocumentMut::remove_marked_drawing`]
-/// can take the drawing back out when the page's marks are next committed.
+/// [`flatten_pictures`] writes them; the layer's own ink and filled shapes —
+/// the ones carrying `/PagifyMarkup` — are written inside `/PagifyMarks`, so
+/// [`crate::document::DocumentMut::remove_marked_drawing`] can take the drawing
+/// back out when the page's marks are next committed.
 ///
 /// Everything else stays an annotation, as it is: highlights, notes, links, form
-/// fields, hidden marks, and any mark without `/PagifyColor`.
+/// fields, hidden marks, and any ink the markup layer did not write — a drawn
+/// signature, an article box, Android's ink.
 pub fn flatten_for_save(bytes: &[u8]) -> Result<Flattened> {
     flatten(bytes, What::PicturesAndMarks)
 }

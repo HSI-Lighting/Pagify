@@ -1019,7 +1019,8 @@ fn the_marks_hidden_block_adds_no_font_to_prisma() {
         rules: Vec::new(),
     })
     .expect("the hidden block");
-    doc.add_annotation(0, &ink_rectangle(100.0, 200.0, 300.0, 400.0)).expect("the rectangle");
+    let rectangle = doc.add_annotation(0, &ink_rectangle(100.0, 200.0, 300.0, 400.0)).expect("the rectangle");
+    doc.mark_as_markup(0, rectangle).expect("the markup layer's own mark");
 
     let finder = |name: &str| (name == "ArialMT").then(|| arial.clone());
     let mut saved = Vec::new();
@@ -1167,7 +1168,8 @@ fn a_rectangle_drawn_in_pagify_is_part_of_the_page_after_save() {
     let _lock = serial();
 
     let mut doc = open("two-column.pdf");
-    doc.add_annotation(0, &ink_rectangle(100.0, 200.0, 300.0, 400.0)).expect("the rectangle");
+    let rectangle = doc.add_annotation(0, &ink_rectangle(100.0, 200.0, 300.0, 400.0)).expect("the rectangle");
+    doc.mark_as_markup(0, rectangle).expect("the markup layer's own mark");
     let annotations = doc.annotation_count(0).expect("count");
     let before = render(&doc, 1.0, true);
     assert!(pink_pixels(&before) > 0, "setup: the rectangle is not drawn at all");
@@ -1210,8 +1212,10 @@ fn a_filled_shape_and_its_arrowheads_go_into_the_page_too() {
         Point { x: 100.0, y: 560.0 },
         Point { x: 100.0, y: 500.0 },
     ];
-    doc.add_annotation(0, &Annotation::Fill { outline: ring, fill_color: pink(), stroke_color: pink(), width: 1.0 })
+    let fill = doc
+        .add_annotation(0, &Annotation::Fill { outline: ring, fill_color: pink(), stroke_color: pink(), width: 1.0 })
         .expect("the filled shape");
+    doc.mark_as_markup(0, fill).expect("the markup layer's own mark");
     let annotations = doc.annotation_count(0).expect("count");
     let before = render(&doc, 1.0, true);
 
@@ -1236,8 +1240,10 @@ fn a_filled_shape_and_its_arrowheads_go_into_the_page_too() {
 }
 
 /// **Not ours to fix in place.** Highlights, notes and links stay annotations,
-/// and so does another app's ink — `/PagifyColor` is what says a mark is
-/// Pagify's own.
+/// and so does ink Pagify itself wrote — `/PagifyColor` is not enough. Only the
+/// markup layer's own drawing (marked `/PagifyMarkup`) goes into the page: a
+/// drawn signature, an article box and Android's ink are not in the hidden
+/// block, so a commit could not put them back.
 #[test]
 fn highlights_notes_links_and_other_apps_ink_stay_marks() {
     let Some(_) = skip_without_pdfium() else { return };
@@ -1265,6 +1271,11 @@ fn highlights_notes_links_and_other_apps_ink_stay_marks() {
         uri: "https://example.com".into(),
     })
     .expect("link");
+    // **Pagify's own ink, but not the markup layer's.** A drawn signature, an
+    // article box and Android's ink carry `/PagifyColor` and nothing else; none
+    // is in the hidden block, so none may be baked — there would be no way back.
+    doc.add_annotation(0, &ink_rectangle(400.0, 400.0, 520.0, 470.0))
+        .expect("an ink that is not markup");
     let annotations = doc.annotation_count(0).expect("count");
 
     let finder = no_face;
@@ -1281,7 +1292,7 @@ fn highlights_notes_links_and_other_apps_ink_stay_marks() {
     for wanted in ["Highlight", "Text", "Link", "Ink"] {
         assert!(kinds.iter().any(|kind| kind == wanted), "the {wanted} is gone: {kinds:?}");
     }
-    assert!(annotations_of(&file, b"Ink") == 1, "another app's ink was baked in");
+    assert!(annotations_of(&file, b"Ink") == 2, "ink that is not the markup layer's was baked in");
     assert!(!String::from_utf8_lossy(&saved).contains("/PagifyMarks"), "something was tagged");
 }
 
@@ -1305,40 +1316,12 @@ fn a_placed_picture_is_baked_as_before_and_untagged() {
     assert!(!String::from_utf8_lossy(&saved).contains("/PagifyMarks"), "a picture was tagged as a mark");
 }
 
-/// **The owner's own three rectangles, through the save path itself.** Every
-/// viewer sees them once they are part of the page; a reader that draws only
-/// the page draws them as the file does with its marks.
-#[test]
-fn on_the_owners_rectangles_every_viewer_sees_them() {
-    let Some(_) = skip_without_pdfium() else { return };
-    let _lock = serial();
-
-    let path = r"C:\Users\hsili\Desktop\Pagify_EditText_Evidence\PRISMA-3-rectangles.pdf";
-    if !std::path::Path::new(path).is_file() {
-        eprintln!("skipping: {path} is not on this machine");
-        return;
-    }
-    let input = std::fs::read(path).expect("read the owner's file");
-    let out = pdf_core::pdf::flatten::flatten_for_save(&input).expect("bake the marks");
-    assert_eq!(out.marks, 3, "the three rectangles were not all baked");
-    assert_eq!(annotations_of(&File::parse(&out.bytes).expect("a readable file"), b"Ink"), 0, "an Ink annotation is left");
-
-    harness::check_with_qpdf(&out.bytes, "prisma-marks");
-
-    let before = PdfiumDocument::open_bytes(input, None).expect("open the input");
-    let after = PdfiumDocument::open_bytes(out.bytes, None).expect("open the baked file");
-    for page in 0..before.page_count() {
-        let drawn_with_marks = before
-            .render_page_to_bitmap(page, &RenderRequest { scale: 0.3, render_annotations: true, ..Default::default() })
-            .expect("render before");
-        let drawn_as_page = after
-            .render_page_to_bitmap(page, &RenderRequest { scale: 0.3, render_annotations: false, ..Default::default() })
-            .expect("render after");
-        let (differing, largest) = render_difference(&drawn_with_marks, &drawn_as_page);
-        eprintln!("PRISMA page {}: {differing} of {} pixels differ, largest channel difference {largest}", page + 1, drawn_with_marks.data.len() / 4);
-        assert!(largest <= 8, "page {} draws differently after baking: {differing} pixels, largest {largest}", page + 1);
-    }
-}
+// `on_the_owners_rectangles_every_viewer_sees_them` moved to
+// `pagify_shell/tests/marks_into_the_page.rs` as
+// `a_file_marked_by_0_1_125_bakes_on_its_first_save`: once Save bakes only the
+// markup layer's own drawing, a bare `flatten_for_save` of a 0.1.125 file — no
+// `/PagifyMarkup` anywhere — bakes nothing, and the test must go through the
+// commit the app makes at Save.
 
 /// **A still-encrypted copy is not pruned.** The save can reach the fix-ups before a rewrite, with
 /// `/Encrypt` in the trailer and ciphertext in the streams; pruning that would read ciphertext and a

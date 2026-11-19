@@ -5563,6 +5563,49 @@ impl DocumentMut for PdfiumDocument {
         Ok(())
     }
 
+    fn mark_as_markup(&mut self, page_index: usize, index: usize) -> Result<()> {
+        self.validate_page_index(page_index)?;
+        let page_number = i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
+            index: page_index,
+            count: self.page_count,
+        })?;
+        let annot_index = i32::try_from(index).map_err(|_| {
+            PdfError::InvalidArgument(format!("annotation index {index} is out of range"))
+        })?;
+
+        let page = RawPage::open(self.document.handle(), page_number)?;
+        let bindings = pdfium()?.bindings();
+        let annot = unsafe { bindings.FPDFPage_GetAnnot(page.handle, annot_index) };
+        if annot.is_null() {
+            return Err(PdfError::Pdfium(format!(
+                "page {page_index} has no annotation at index {index}"
+            )));
+        }
+        // Refused rather than written onto whatever is at that index. A
+        // highlight marked as the markup layer's would be drawn into the page by
+        // the next Save and then removed by the commit after it, and the blob
+        // never described it.
+        let subtype = unsafe { bindings.FPDFAnnot_GetSubtype(annot) };
+        if subtype != ANNOT_INK && subtype != ANNOT_STAMP {
+            unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+            return Err(PdfError::InvalidArgument(
+                "only ink or a filled shape can be marked as the markup layer's".into(),
+            ));
+        }
+
+        let mut value: Vec<u16> = "1".encode_utf16().collect();
+        value.push(0);
+        let set = unsafe { bindings.FPDFAnnot_SetStringValue(annot, MARKUP_KEY, value.as_ptr()) };
+        unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+        if set == 0 {
+            return Err(PdfError::Pdfium("the drawing could not be marked as the markup layer's".into()));
+        }
+
+        // A string on an existing annotation, not page content.
+        self.touch_annotation();
+        Ok(())
+    }
+
     fn remember_image_alpha(&mut self, page_index: usize, index: usize, rgba: Vec<u8>) -> Result<()> {
         // Nothing to keep for a picture that is already fully opaque — every
         // upload made before signature extraction produced real alpha
@@ -6578,10 +6621,12 @@ impl DocumentMut for PdfiumDocument {
     }
 
     /// **Byte-safe, like [`Self::remove_text`].** The tag Save wrote is in the
-    /// page's own content, one `/PagifyMarks BMC … EMC` around each drawing;
-    /// cutting those spans out removes the drawing and touches nothing else.
-    /// PDFium's object list is asked first only to know whether this page has
-    /// one at all, so a page nobody saved costs no rewrite.
+    /// page's own content, one `/PagifyMarks BMC … EMC` around each drawing the
+    /// markup layer wrote; cutting those spans out removes that drawing and
+    /// touches nothing else. A signature or an article box is never inside one —
+    /// Save does not bake what the blob cannot restore. PDFium's object list is
+    /// asked first only to know whether this page has one at all, so a page
+    /// nobody saved costs no rewrite.
     ///
     /// The `/PgFlatN` names the spans used stay on the page's `/Resources`; Save's
     /// own `drop_unused_resources` takes them off, and the XObject bytes with
@@ -18349,6 +18394,17 @@ fn packed_colour(packed: &str) -> Option<Color> {
 
 /// The key this engine records a mark's colour under.
 const COLOUR_KEY: &str = "PagifyColor";
+
+/// The key that says a mark is **the markup layer's own drawing** — the ink and
+/// filled shapes `commit_page` writes, which the hidden block describes and the
+/// next commit therefore repaints. Only these are baked into the page at Save.
+///
+/// [`COLOUR_KEY`] is written on everything this engine draws, and is not enough:
+/// a drawn signature, an article box and ink from Pagify Android carry it too,
+/// and none is in the blob. Baking one in and then removing the tagged drawing
+/// on the next commit would erase it. Written by
+/// [`crate::document::DocumentMut::mark_as_markup`].
+const MARKUP_KEY: &str = "PagifyMarkup";
 
 /// The key that says an ink annotation is a signature, not a drawing.
 ///
